@@ -9,14 +9,38 @@ class DapStructManifestGeneratorSpec extends AnyFunSuite {
       |
       |namespace com.jacoby6000.daphttp
       |
+      |use smithy.api#default
+      |use smithy.api#required
+      |
       |@trait(selector: ":is(structure)")
       |structure dapStruct {}
+      |
+      |@trait(selector: ":is(structure)")
+      |structure bitmask {}
+      |
+      |@trait(selector: ":is(structure)")
+      |integer size
       |
       |@trait(selector: ":is(structure, member)")
       |integer alignment
       |
       |@trait(selector: ":is(member)")
-      |integer cString
+      |integer padding
+      |
+      |@trait(selector: ":is(service, member)")
+      |enum endian {
+      |  BIG = "big"
+      |  LITTLE = "little"
+      |}
+      |
+      |@trait(selector: ":is(member)")
+      |structure cString {
+      |  @required
+      |  bytes: Integer
+      |
+      |  @default("ASCII")
+      |  encoding: String
+      |}
       |
       |@trait(selector: ":is(member)")
       |structure u8 {}
@@ -26,9 +50,17 @@ class DapStructManifestGeneratorSpec extends AnyFunSuite {
       |
       |@trait(selector: ":is(member)")
       |structure u32 {}
+      |
+      |list Bytes {
+      |  member: Byte
+      |}
+      |
+      |list Bits {
+      |  member: Boolean
+      |}
       |""".stripMargin
 
-  test("generates DAP manifest for dapStruct structures") {
+  test("generates manifest with cString encodings, padding and endian defaults") {
     val model = Model
       .assembler()
       .addUnparsedModel("traits.smithy", traitsModel)
@@ -38,43 +70,100 @@ class DapStructManifestGeneratorSpec extends AnyFunSuite {
           |
           |namespace example
           |
+          |use com.jacoby6000.daphttp#Bytes
           |use com.jacoby6000.daphttp#alignment
           |use com.jacoby6000.daphttp#cString
           |use com.jacoby6000.daphttp#dapStruct
-          |use com.jacoby6000.daphttp#s16
+          |use com.jacoby6000.daphttp#endian
+          |use com.jacoby6000.daphttp#padding
+          |use com.jacoby6000.daphttp#size
           |use com.jacoby6000.daphttp#u32
-          |use com.jacoby6000.daphttp#u8
+          |
+          |@endian("little")
+          |service Api {
+          |    version: "1"
+          |}
           |
           |@dapStruct
           |@alignment(4)
+          |@size(13)
           |structure Frame {
-          |    @u8
-          |    kind: Byte,
-          |    @s16
-          |    offset: Short,
-          |    @u32
-          |    @alignment(4)
-          |    length: Integer,
-          |    @cString(32)
-          |    name: String
-          |}
+          |    @cString(bytes: 4)
+          |    name: String,
           |
-          |structure Ignored {
-          |   value: String
+          |    @cString(bytes: 2, encoding: "UTF-16LE")
+          |    label: String,
+          |
+          |    @u32
+          |    @endian("big")
+          |    value: Integer,
+          |
+          |    @padding(2)
+          |    reserved: Bytes
           |}
           |""".stripMargin
       )
       .assemble()
       .unwrap()
 
-    val manifest = DapStructManifestGenerator.generate(model)
+    val result = DapStructManifestGenerator.generateWithDiagnostics(model)
 
-    assert(manifest.contains("\"shapeId\":\"example#Frame\""))
-    assert(manifest.contains("\"alignment\":4"))
-    assert(manifest.contains("\"name\":\"kind\",\"type\":\"u8\""))
-    assert(manifest.contains("\"name\":\"offset\",\"type\":\"s16\""))
-    assert(manifest.contains("\"name\":\"length\",\"type\":\"u32\",\"alignment\":4"))
-    assert(manifest.contains("\"name\":\"name\",\"type\":\"string\",\"cStringBytes\":32"))
-    assert(!manifest.contains("Ignored"))
+    assert(result.errors.isEmpty)
+    assert(result.warnings.nonEmpty)
+    assert(result.warnings.exists(_.message.contains("only 96 known bits")))
+
+    assert(result.json.contains("\"shapeId\":\"example#Frame\""))
+    assert(result.json.contains("\"kind\":\"struct\""))
+    assert(result.json.contains("\"size\":13"))
+    assert(result.json.contains("\"name\":\"name\",\"type\":\"string\",\"cStringBytes\":4,\"cStringEncoding\":\"ASCII\""))
+    assert(result.json.contains("\"name\":\"label\",\"type\":\"string\",\"cStringBytes\":2,\"cStringEncoding\":\"UTF-16LE\""))
+    assert(result.json.contains("\"name\":\"reserved\",\"type\":\"Bytes\",\"paddingRepeats\":2,\"endian\":\"little\",\"bitWidth\":16"))
+    assert(result.json.contains("\"name\":\"value\",\"type\":\"u32\",\"endian\":\"big\",\"bitWidth\":32"))
+  }
+
+  test("validates bitmask size and boolean-member requirements") {
+    val model = Model
+      .assembler()
+      .addUnparsedModel("traits.smithy", traitsModel)
+      .addUnparsedModel(
+        "bitmask.smithy",
+        """$version: "2"
+          |
+          |namespace example
+          |
+          |use com.jacoby6000.daphttp#bitmask
+          |use com.jacoby6000.daphttp#size
+          |
+          |@bitmask
+          |@size(2)
+          |structure Flags {
+          |    a: Boolean,
+          |    b: Boolean,
+          |    c: String
+          |}
+          |
+          |@bitmask
+          |structure MissingSize {
+          |    enabled: Boolean
+          |}
+          |
+          |@bitmask
+          |@size(8)
+          |structure Sparse {
+          |    enabled: Boolean,
+          |    visible: Boolean
+          |}
+          |""".stripMargin
+      )
+      .assemble()
+      .unwrap()
+
+    val result = DapStructManifestGenerator.generateWithDiagnostics(model)
+
+    assert(result.errors.exists(_.shapeId == "example#Flags$c"))
+    assert(result.errors.exists(_.shapeId == "example#Flags"))
+    assert(result.errors.exists(_.shapeId == "example#MissingSize"))
+    assert(result.warnings.exists(_.shapeId == "example#Sparse"))
+    assert(result.json.contains("\"kind\":\"bitmask\""))
   }
 }
