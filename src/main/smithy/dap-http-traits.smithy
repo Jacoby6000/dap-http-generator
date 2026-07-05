@@ -20,11 +20,23 @@ integer alignment
 @trait(selector: ":is(member)")
 integer padding
 
+@trait(selector: ":is(member)")
+structure pointer {}
+
+@trait(selector: ":is(member)")
+structure array {}
+
+@trait(selector: ":is(member)")
+integer length
+
 @trait(selector: ":is(service, member)")
 enum endian {
     BIG = "big"
     LITTLE = "little"
 }
+
+@trait(selector: ":is(service)")
+integer architectureBits
 
 @trait(selector: ":is(member)")
 structure cString {
