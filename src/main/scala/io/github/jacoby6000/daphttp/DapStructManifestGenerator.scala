@@ -31,7 +31,7 @@ object DapStructManifestGenerator {
   private val LengthTrait = ShapeId.from("com.jacoby6000.daphttp#length")
   private val CStringTrait = ShapeId.from("com.jacoby6000.daphttp#cString")
   private val EndianTrait = ShapeId.from("com.jacoby6000.daphttp#endian")
-  private val ArchitectureBitsTrait = ShapeId.from("com.jacoby6000.daphttp#architectureBits")
+  private val WordSizeTrait = ShapeId.from("com.jacoby6000.daphttp#wordSize")
   private val BytesShape = ShapeId.from("com.jacoby6000.daphttp#Bytes")
   private val BitsShape = ShapeId.from("com.jacoby6000.daphttp#Bits")
 
@@ -56,17 +56,17 @@ object DapStructManifestGenerator {
       .sortBy(_.getId.toString)
 
     services.foreach { service =>
-      if (intTraitValue(service, ArchitectureBitsTrait).isEmpty) {
+      if (intTraitValue(service, WordSizeTrait).isEmpty) {
         diagnostics += Diagnostic(
           "error",
           service.getId.toString,
-          "Services must declare @architectureBits to define pointer and long widths."
+          "Services must declare @wordSize to define pointer and long widths."
         )
       }
     }
 
-    val architectureBits = services
-      .flatMap(intTraitValue(_, ArchitectureBitsTrait))
+    val wordSize = services
+      .flatMap(intTraitValue(_, WordSizeTrait))
       .headOption
 
     val defaultEndian = services
@@ -81,9 +81,9 @@ object DapStructManifestGenerator {
       .toList
       .sortBy(_.getId.toString)
 
-    structs.foreach(validateStructure(model, _, architectureBits, diagnostics))
+    structs.foreach(validateStructure(model, _, wordSize, diagnostics))
 
-    val structJson = structs.map(structToJson(model, _, defaultEndian, architectureBits, diagnostics)).mkString(",")
+    val structJson = structs.map(structToJson(model, _, defaultEndian, wordSize, diagnostics)).mkString(",")
     val diagnosticsJson = diagnostics.toList.map(diagnosticToJson).mkString(",")
     ManifestResult(s"{\"structs\":[$structJson],\"diagnostics\":[$diagnosticsJson]}", diagnostics.toList)
   }
@@ -91,7 +91,7 @@ object DapStructManifestGenerator {
   private def validateStructure(
     model: Model,
     structure: StructureShape,
-    architectureBits: Option[Int],
+    wordSize: Option[Int],
     diagnostics: ListBuffer[Diagnostic]
   ): Unit = {
     val members = structure.members().asScala.toList
@@ -135,7 +135,7 @@ object DapStructManifestGenerator {
     } else {
       sizeOpt.foreach { expectedBytes =>
         val expectedBits = expectedBytes * 8
-        val knownBits = members.flatMap(memberBitWidth(model, _, architectureBits, diagnostics)).sum
+        val knownBits = members.flatMap(memberBitWidth(model, _, wordSize, diagnostics)).sum
         if (knownBits < expectedBits) {
           diagnostics += Diagnostic(
             "warning",
@@ -157,7 +157,7 @@ object DapStructManifestGenerator {
     model: Model,
     structure: StructureShape,
     defaultEndian: Option[String],
-    architectureBits: Option[Int],
+    wordSize: Option[Int],
     diagnostics: ListBuffer[Diagnostic]
   ): String = {
     val alignmentPart = intTraitValue(structure, AlignmentTrait)
@@ -171,7 +171,7 @@ object DapStructManifestGenerator {
     val kindPart = if (structure.hasTrait(BitmaskTrait)) ",\"kind\":\"bitmask\"" else ",\"kind\":\"struct\""
 
     val membersJson = structure.members().asScala.toList.sortBy(_.getMemberName).map { member =>
-      memberToJson(model, member, defaultEndian, architectureBits, diagnostics)
+      memberToJson(model, member, defaultEndian, wordSize, diagnostics)
     }.mkString(",")
 
     s"{\"shapeId\":\"${escape(structure.getId.toString)}\"$kindPart$alignmentPart$sizePart,\"members\":[$membersJson]}"
@@ -181,7 +181,7 @@ object DapStructManifestGenerator {
     model: Model,
     member: MemberShape,
     defaultEndian: Option[String],
-    architectureBits: Option[Int],
+    wordSize: Option[Int],
     diagnostics: ListBuffer[Diagnostic]
   ): String = {
     val cType = cTypeName(model, member)
@@ -208,7 +208,7 @@ object DapStructManifestGenerator {
     val arrayPart = if (member.hasTrait(ArrayTrait)) ",\"array\":true" else ""
     val lengthPart = intTraitValue(member, LengthTrait).map(v => s",\"length\":$v").getOrElse("")
 
-    val resolvedWidthPart = memberBitWidth(model, member, architectureBits, diagnostics)
+    val resolvedWidthPart = memberBitWidth(model, member, wordSize, diagnostics)
       .map(v => s",\"bitWidth\":$v")
       .getOrElse("")
 
@@ -218,15 +218,15 @@ object DapStructManifestGenerator {
   private def memberBitWidth(
     model: Model,
     member: MemberShape,
-    architectureBits: Option[Int],
+    wordSize: Option[Int],
     diagnostics: ListBuffer[Diagnostic]
   ): Option[Int] = {
     if (member.hasTrait(PointerTrait)) {
-      return architectureBits.orElse {
+      return wordSize.orElse {
         diagnostics += Diagnostic(
           "error",
           member.getId.toString,
-          "Pointer members require service @architectureBits to determine width."
+          "Pointer members require service @wordSize to determine width."
         )
         None
       }
@@ -247,7 +247,7 @@ object DapStructManifestGenerator {
           case ShapeType.BYTE    => Some(8)
           case ShapeType.SHORT   => Some(16)
           case ShapeType.INTEGER => Some(32)
-          case ShapeType.LONG    => architectureBits.orElse(Some(64))
+          case ShapeType.LONG    => wordSize.orElse(Some(64))
           case ShapeType.LIST =>
             val listShape = target.asInstanceOf[ListShape]
             val isArray = member.hasTrait(ArrayTrait)
@@ -255,7 +255,7 @@ object DapStructManifestGenerator {
 
             if (isArray && !isPointer) {
               intTraitValue(member, LengthTrait)
-                .flatMap(length => listElementBitWidth(model, listShape, architectureBits).map(_ * length))
+                .flatMap(length => listElementBitWidth(model, listShape, wordSize).map(_ * length))
             } else {
               val paddingOpt = intTraitValue(member, PaddingTrait)
               paddingOpt.flatMap { repeats =>
@@ -327,7 +327,7 @@ object DapStructManifestGenerator {
   private def listElementBitWidth(
     model: Model,
     listShape: ListShape,
-    architectureBits: Option[Int]
+    wordSize: Option[Int]
   ): Option[Int] = {
     if (listShape.getId == BytesShape) {
       Some(8)
@@ -340,7 +340,7 @@ object DapStructManifestGenerator {
         case ShapeType.BYTE    => Some(8)
         case ShapeType.SHORT   => Some(16)
         case ShapeType.INTEGER => Some(32)
-        case ShapeType.LONG    => architectureBits.orElse(Some(64))
+        case ShapeType.LONG    => wordSize.orElse(Some(64))
         case _                 => None
       }
     }

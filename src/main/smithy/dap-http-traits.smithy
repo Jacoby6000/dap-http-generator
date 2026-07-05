@@ -36,7 +36,7 @@ enum endian {
 }
 
 @trait(selector: ":is(service)")
-integer architectureBits
+integer wordSize
 
 @trait(selector: ":is(member)")
 structure cString {

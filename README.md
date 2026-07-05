@@ -18,7 +18,7 @@ Traits are defined in `src/main/smithy/dap-http-traits.smithy`:
 - `@array` marks list members as arrays.
 - `@length(<n>)` sets array element count for non-pointer list members.
 - `@endian("big" | "little")` sets default service/member byte order (member overrides service default).
-- `@architectureBits(<n>)` is required on services and sets pointer/`Long` bit width.
+- `@wordSize(<n>)` is required on services and sets pointer/`Long` bit width.
 - `@cString(bytes: <n>, encoding: <name>)` marks fixed-size C-style string members; encoding defaults to `ASCII`.
 - Numeric member traits: `@u8`, `@s8`, `@u16`, `@s16`, `@u32`, `@s32`.
 - Convenience list types: `Bytes` (`list<Byte>`) and `Bits` (`list<Boolean>`).

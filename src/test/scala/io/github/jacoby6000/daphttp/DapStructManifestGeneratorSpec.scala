@@ -43,7 +43,7 @@ class DapStructManifestGeneratorSpec extends AnyFunSuite {
       |}
       |
       |@trait(selector: ":is(service)")
-      |integer architectureBits
+      |integer wordSize
       |
       |@trait(selector: ":is(member)")
       |structure cString {
@@ -84,7 +84,7 @@ class DapStructManifestGeneratorSpec extends AnyFunSuite {
           |
           |use com.jacoby6000.daphttp#Bytes
           |use com.jacoby6000.daphttp#alignment
-          |use com.jacoby6000.daphttp#architectureBits
+          |use com.jacoby6000.daphttp#wordSize
           |use com.jacoby6000.daphttp#cString
           |use com.jacoby6000.daphttp#dapStruct
           |use com.jacoby6000.daphttp#endian
@@ -92,7 +92,7 @@ class DapStructManifestGeneratorSpec extends AnyFunSuite {
           |use com.jacoby6000.daphttp#size
           |use com.jacoby6000.daphttp#u32
           |
-          |@architectureBits(32)
+          |@wordSize(32)
           |@endian("little")
           |service Api {
           |    version: "1"
@@ -181,7 +181,7 @@ class DapStructManifestGeneratorSpec extends AnyFunSuite {
     assert(result.json.contains("\"kind\":\"bitmask\""))
   }
 
-  test("validates architecture bits and array length requirements while sizing pointers and longs") {
+  test("validates word size and array length requirements while sizing pointers and longs") {
     val model = Model
       .assembler()
       .addUnparsedModel("traits.smithy", traitsModel)
@@ -192,17 +192,17 @@ class DapStructManifestGeneratorSpec extends AnyFunSuite {
           |namespace example
           |
           |use com.jacoby6000.daphttp#array
-          |use com.jacoby6000.daphttp#architectureBits
+          |use com.jacoby6000.daphttp#wordSize
           |use com.jacoby6000.daphttp#dapStruct
           |use com.jacoby6000.daphttp#length
           |use com.jacoby6000.daphttp#pointer
           |use com.jacoby6000.daphttp#size
           |
-          |service MissingArch {
+          |service MissingWordSize {
           |    version: "1"
           |}
           |
-          |@architectureBits(32)
+          |@wordSize(32)
           |service Api {
           |    version: "1"
           |}
@@ -240,7 +240,7 @@ class DapStructManifestGeneratorSpec extends AnyFunSuite {
 
     val result = DapStructManifestGenerator.generateWithDiagnostics(model)
 
-    assert(result.errors.exists(_.shapeId == "example#MissingArch"))
+    assert(result.errors.exists(_.shapeId == "example#MissingWordSize"))
     assert(result.errors.exists(_.shapeId == "example#InvalidArray$values"))
     assert(result.json.contains("\"name\":\"data\",\"type\":\"pointer\",\"pointer\":true,\"bitWidth\":32"))
     assert(result.json.contains("\"name\":\"count\",\"type\":\"long\",\"bitWidth\":32"))
