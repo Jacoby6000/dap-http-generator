@@ -1,9 +1,10 @@
 # dap-http-generator
-Use smithy models to define http servers that allow structured viewing and modification of program memory via DAP
+Use smithy models to define read-only http servers that proxy debugger memory via DAP
 
-## Smithy 2.0 Scala/SBT plugin
+## Runtime server jar (http4s)
 
-This repository now contains an SBT-based Smithy 2.0 build plugin: `dap-http-generator`.
+This repository now builds a runnable jar with a `main` entrypoint:
+`io.github.jacoby6000.daphttp.DapHttpServerMain`.
 
 ### Custom C/DAP traits
 
@@ -17,14 +18,24 @@ Traits are defined in `src/main/smithy/dap-http-traits.smithy`:
 - `@pointer` marks a member as a pointer-sized field.
 - `@array` marks list members as arrays.
 - `@length(<n>)` sets array element count for non-pointer list members.
+- `@staticAddress(<address>)` marks the debugger memory address used for members inside non-`@dapStruct` shapes.
 - `@endian("big" | "little")` sets default service/member byte order (member overrides service default).
 - `@wordSize(<n>)` is required on services and sets pointer/`Long` bit width.
 - `@cString(bytes: <n>, encoding: <name>)` marks fixed-size C-style string members; encoding defaults to `ASCII`.
 - Numeric member traits: `@u8`, `@s8`, `@u16`, `@s16`, `@u32`, `@s32`.
 - Convenience list types: `Bytes` (`list<Byte>`) and `Bits` (`list<Boolean>`).
 
-### Plugin output
+### Runtime behavior
 
-The plugin scans Smithy models for `@dapStruct`/`@bitmask` structures and writes a manifest describing members, C-focused types, size/alignment, C-string encodings, padding, endianness, and validation diagnostics.
+The server:
+- loads Smithy source files,
+- generates read-only GET routes from service operations (`/<ServiceName>/<OperationName>`),
+- requires non-DAP output members to use `@staticAddress(...)`,
+- resolves DAP-backed structs (`@dapStruct`/`@bitmask`) and reads memory through a DAP `readMemory` request,
+- watches Smithy sources and reloads routes when model files change.
 
-Default output path: `dap-http/struct-manifest.json` (configurable with `outputFile` plugin setting).
+### Running locally
+
+```bash
+sbt "run --smithy=/absolute/path/to/models --dapHost=127.0.0.1 --dapPort=4711 --bindPort=8080 --watch=true"
+```

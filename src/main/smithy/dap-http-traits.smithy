@@ -29,6 +29,9 @@ structure array {}
 @trait(selector: ":is(member)")
 integer length
 
+@trait(selector: ":is(member)")
+string staticAddress
+
 @trait(selector: ":is(service, member)")
 enum endian {
     BIG = "big"
