@@ -159,4 +159,47 @@ class DapHttpServerMainSpec extends AnyFunSuite {
     assert(result.isLeft)
     assert(result.left.toOption.get.exists(_.contains("must declare @staticAddress")))
   }
+
+  test("maps numeric width traits to primitive IR widths") {
+    val model = Model
+      .assembler()
+      .addUnparsedModel("traits.smithy", traitsModel)
+      .addUnparsedModel(
+        "u16.smithy",
+        """$version: "2"
+          |
+          |namespace example
+          |
+          |use com.jacoby6000.daphttp#staticAddress
+          |use com.jacoby6000.daphttp#u16
+          |use com.jacoby6000.daphttp#wordSize
+          |
+          |@wordSize(32)
+          |service Api {
+          |    version: "1"
+          |    operations: [GetInfo]
+          |}
+          |
+          |operation GetInfo {
+          |    output: GetInfoOutput
+          |}
+          |
+          |structure GetInfoOutput {
+          |    @staticAddress("0x1000")
+          |    @u16
+          |    value: Integer
+          |}
+          |""".stripMargin
+      )
+      .assemble()
+      .unwrap()
+
+    val plans = DapHttpServerMain.buildRoutePlansFromModel(model).toOption.get
+    val route = plans("/Api/GetInfo")
+
+    assert(route.reads.size == 1)
+    assert(route.reads.head.path == "/Api/GetInfo.value")
+    assert(route.reads.head.address == 0x1000L)
+    assert(route.reads.head.sizeBytes == 2)
+  }
 }
