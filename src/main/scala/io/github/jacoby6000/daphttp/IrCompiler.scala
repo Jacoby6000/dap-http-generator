@@ -47,24 +47,50 @@ object IrCompiler {
               Nil
             case Some(address) =>
               structureSizeBytes(struct, wordSize, errors) match {
-                case Some(sizeBytes) => List(ReadPlan(pathPrefix, address, sizeBytes))
+                case Some(sizeBytes) =>
+                  List(
+                    ReadPlan(
+                      path = pathPrefix,
+                      address = address,
+                      sizeBytes = sizeBytes,
+                      decodeType = Some(struct),
+                      wordSizeBits = wordSize
+                    )
+                  )
                 case None            => Nil
               }
           }
         } else {
           struct.members.flatMap { member =>
             val memberPath = s"$pathPrefix.${member.name}"
-            val memberAddress = member.staticAddress.orElse {
-              errors += s"${member.id}: Members of non-DAP structures must declare @staticAddress."
-              None
+            val memberRequiresStaticAddress = member.target match {
+              case nestedStruct: IrType.Struct => nestedStruct.isDapStruct || nestedStruct.isBitmask
+              case _                           => false
             }
+            val memberAddress =
+              if (memberRequiresStaticAddress) {
+                member.staticAddress.orElse {
+                  errors += s"${member.id}: DAP-backed members of non-DAP structures must declare @staticAddress."
+                  None
+                }
+              } else {
+                member.staticAddress
+              }
             member.target match {
               case nestedStruct: IrType.Struct =>
                 collectReadsForType(nestedStruct, memberAddress, memberPath, wordSize, errors)
               case _ =>
                 memberAddress
                   .flatMap(address =>
-                    memberSizeBytes(member, wordSize, errors).map(ReadPlan(memberPath, address, _))
+                    memberSizeBytes(member, wordSize, errors).map(sizeBytes =>
+                      ReadPlan(
+                        path = memberPath,
+                        address = address,
+                        sizeBytes = sizeBytes,
+                        decodeType = Some(memberReadType(member)),
+                        wordSizeBits = wordSize
+                      )
+                    )
                   )
                   .toList
             }
@@ -195,5 +221,11 @@ object IrCompiler {
       case IrPrimitive.S32      => Some(32)
       case IrPrimitive.LongWord => wordSize.orElse(Some(64))
     }
+  }
+
+  private def memberReadType(member: IrMember): IrType = {
+    member.primitiveOverride
+      .map(IrType.Primitive.apply)
+      .getOrElse(member.target)
   }
 }

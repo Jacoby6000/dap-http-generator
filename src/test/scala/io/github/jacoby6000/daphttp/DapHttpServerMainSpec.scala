@@ -115,6 +115,7 @@ class DapHttpServerMainSpec extends AnyFunSuite {
     assert(route.reads.head.path == "/Api/GetInfo.info")
     assert(route.reads.head.address == 0x1000L)
     assert(route.reads.head.sizeBytes == 4)
+    assert(route.reads.head.decodeType.nonEmpty)
   }
 
   test("fails planning when non-dap output members do not have static addresses") {
@@ -201,5 +202,40 @@ class DapHttpServerMainSpec extends AnyFunSuite {
     assert(route.reads.head.path == "/Api/GetInfo.value")
     assert(route.reads.head.address == 0x1000L)
     assert(route.reads.head.sizeBytes == 2)
+  }
+
+  test("allows non-dap primitive members without static addresses") {
+    val model = Model
+      .assembler()
+      .addUnparsedModel("traits.smithy", traitsModel)
+      .addUnparsedModel(
+        "non-dap-primitive.smithy",
+        """$version: "2"
+          |
+          |namespace example
+          |
+          |use com.jacoby6000.daphttp#wordSize
+          |
+          |@wordSize(32)
+          |service Api {
+          |    version: "1"
+          |    operations: [GetInfo]
+          |}
+          |
+          |operation GetInfo {
+          |    output: GetInfoOutput
+          |}
+          |
+          |structure GetInfoOutput {
+          |    value: Integer
+          |}
+          |""".stripMargin
+      )
+      .assemble()
+      .unwrap()
+
+    val result = DapHttpServerMain.buildRoutePlansFromModel(model)
+    assert(result.isRight)
+    assert(result.toOption.get("/Api/GetInfo").reads.isEmpty)
   }
 }
