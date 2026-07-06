@@ -1,6 +1,22 @@
 ThisBuild / scalaVersion := "2.13.15"
 ThisBuild / organization := "io.github.jacoby6000"
 ThisBuild / version := "0.1.0-SNAPSHOT"
+ThisBuild / semanticdbEnabled := true
+ThisBuild / semanticdbVersion := scalafixSemanticdb.revision
+ThisBuild / scalafmtOnCompile := true
+ThisBuild / scalacOptions ++= Seq(
+  "-deprecation",
+  "-feature",
+  "-unchecked",
+  "-Xfatal-warnings",
+  "-Xlint:_",
+  "-Wdead-code",
+  "-Wextra-implicit",
+  "-Wnumeric-widen",
+  "-Wself-implicit",
+  "-Wunused:all",
+  "-Wvalue-discard"
+)
 
 lazy val smithyVersion = "1.72.0"
 
@@ -20,3 +36,6 @@ lazy val root = (project in file("."))
     Compile / mainClass := Some("io.github.jacoby6000.daphttp.DapHttpServerMain"),
     Test / fork := true
   )
+
+addCommandAlias("fmt", ";scalafmtAll;scalafmtSbt")
+addCommandAlias("fix", ";scalafixAll")

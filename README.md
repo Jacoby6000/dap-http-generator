@@ -39,3 +39,11 @@ The server:
 ```bash
 sbt "run --smithy=/absolute/path/to/models --dapHost=127.0.0.1 --dapPort=4711 --bindPort=8080 --watch=true"
 ```
+
+### Formatting, linting, and tests
+
+```bash
+sbt fmt
+sbt fix
+sbt test
+```
