@@ -22,5 +22,14 @@ jobs:
           java-version: "21"
           cache: sbt
 
+      - name: Set up sbt
+        uses: sbt/setup-sbt@v1
+
+      - name: Check formatting
+        run: sbt "scalafmtCheckAll;scalafmtSbtCheck"
+
+      - name: Check scalafix rules
+        run: sbt "scalafixAll --check"
+
       - name: Run tests
         run: sbt test
