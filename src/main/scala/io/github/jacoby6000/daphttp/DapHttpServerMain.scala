@@ -92,7 +92,7 @@ object DapHttpServerMain extends IOApp {
     }
   }
 
-  private def routes(
+  private[daphttp] def routes(
       plansRef: Ref[IO, Either[List[String], Map[String, RoutePlan]]],
       dapClient: DapClient
   ): HttpRoutes[IO] =
@@ -290,11 +290,11 @@ object DapHttpServerMain extends IOApp {
     }
   }
 
-  private trait DapClient {
+  private[daphttp] trait DapClient {
     def readMemory(address: Long, sizeBytes: Int): IO[Either[String, String]]
   }
 
-  private final class SocketDapClient(host: String, port: Int) extends DapClient {
+  private[daphttp] final class SocketDapClient(host: String, port: Int) extends DapClient {
     override def readMemory(address: Long, sizeBytes: Int): IO[Either[String, String]] =
       IO.blocking {
         val socket = new Socket(host, port)
