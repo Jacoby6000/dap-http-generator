@@ -59,10 +59,13 @@ object DoldecompSmithyGenerator {
 
   private def loadStructs(headerRoots: List[Path]): Map[String, CStruct] = {
     val headerFiles = headerRoots.flatMap(collectHeaderFiles).distinct
-    headerFiles.flatMap { path =>
-      val source = new String(Files.readAllBytes(path))
-      CHeaderParser.parse(source).structs
-    }.map(struct => struct.name -> struct).toMap
+    headerFiles
+      .flatMap { path =>
+        val source = new String(Files.readAllBytes(path))
+        CHeaderParser.parse(source)
+      }
+      .map(struct => struct.name -> struct)
+      .toMap
   }
 
   private def collectHeaderFiles(root: Path): List[Path] = {
@@ -93,7 +96,8 @@ object DoldecompSmithyGenerator {
       operations: List[OperationModel],
       headerStructs: Map[String, CStruct]
   ): String = {
-    val usedTraits = scala.collection.mutable.LinkedHashSet("dapStruct", "staticAddress", "wordSize")
+    val usedTraits =
+      scala.collection.mutable.LinkedHashSet("dapStruct", "staticAddress", "wordSize")
     val reachableStructs = collectReachableStructs(operations, headerStructs)
     val listAliases = scala.collection.mutable.LinkedHashSet.empty[ListAlias]
 
@@ -111,7 +115,13 @@ object DoldecompSmithyGenerator {
 
     val structBlocks = reachableStructs.map { struct =>
       val members = struct.fields.flatMap { field =>
-        toMemberLines(struct.name, field, reachableStructs.map(_.name).toSet, listAliases, usedTraits)
+        toMemberLines(
+          struct.name,
+          field,
+          reachableStructs.map(_.name).toSet,
+          listAliases,
+          usedTraits
+        )
       }
       s"""@dapStruct
          |structure ${struct.name} {
@@ -119,15 +129,13 @@ object DoldecompSmithyGenerator {
          |}""".stripMargin
     }
 
-    val listBlocks = listAliases.toList.map(alias =>
-      s"""list ${alias.name} {
+    val listBlocks = listAliases.toList.map(alias => s"""list ${alias.name} {
          |    member: ${alias.elementType}
-         |}""".stripMargin
-    )
+         |}""".stripMargin)
 
     val useLines = usedTraits.toList.sorted.map(name => s"use com.jacoby6000.daphttp#$name")
 
-    s"""$${version: "2"}
+    s"""$$version: "2"
        |
        |namespace $namespace
        |
@@ -237,8 +245,7 @@ object DoldecompSmithyGenerator {
   }
 
   private def normalizeTypeName(value: String): String = {
-    value
-      .trim
+    value.trim
       .stripPrefix("const ")
       .stripPrefix("struct ")
       .replaceAll("\\s+", "")
@@ -249,12 +256,12 @@ object DoldecompSmithyGenerator {
       .split("[^A-Za-z0-9]+")
       .toList
       .filter(_.nonEmpty)
-      .map(part => part.head.toUpper + part.drop(1))
+      .map(part => s"${part.head.toUpper}${part.drop(1)}")
       .mkString
 
   private def toCamelCase(value: String): String = {
     val pascal = toPascalCase(value)
-    if (pascal.isEmpty) "value" else pascal.head.toLower + pascal.drop(1)
+    if (pascal.isEmpty) "value" else s"${pascal.head.toLower}${pascal.drop(1)}"
   }
 
   private def formatHex(value: Long): String = f"0x$value%x"
