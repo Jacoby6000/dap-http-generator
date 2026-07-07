@@ -116,6 +116,7 @@ class DapHttpServerMainSpec extends AnyFunSuite {
     assert(route.reads.head.address == 0x1000L)
     assert(route.reads.head.sizeBytes == 4)
     assert(route.reads.head.decodeType.nonEmpty)
+    assert(route.reads.head.decodeCodec.nonEmpty)
   }
 
   test("fails planning when non-dap output members do not have static addresses") {

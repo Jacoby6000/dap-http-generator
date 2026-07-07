@@ -1,5 +1,10 @@
 package io.github.jacoby6000.daphttp
 
+import io.circe.Json
+import scodec.{Attempt, Codec, DecodeResult, Err, SizeBound}
+import scodec.bits.BitVector
+import scodec.codecs.{bits, bool}
+
 import scala.collection.mutable.ListBuffer
 
 object IrCompiler {
@@ -54,10 +59,11 @@ object IrCompiler {
                       address = address,
                       sizeBytes = sizeBytes,
                       decodeType = Some(struct),
-                      wordSizeBits = wordSize
+                      wordSizeBits = wordSize,
+                      decodeCodec = compileJsonCodec(Some(struct), wordSize, errors, pathPrefix)
                     )
                   )
-                case None            => Nil
+                case None => Nil
               }
           }
         } else {
@@ -88,7 +94,13 @@ object IrCompiler {
                         address = address,
                         sizeBytes = sizeBytes,
                         decodeType = Some(memberReadType(member)),
-                        wordSizeBits = wordSize
+                        wordSizeBits = wordSize,
+                        decodeCodec = compileJsonCodec(
+                          Some(memberReadType(member)),
+                          wordSize,
+                          errors,
+                          memberPath
+                        )
                       )
                     )
                   )
@@ -227,5 +239,156 @@ object IrCompiler {
     member.primitiveOverride
       .map(IrType.Primitive.apply)
       .getOrElse(member.target)
+  }
+
+  private def compileJsonCodec(
+      irType: Option[IrType],
+      wordSize: Option[Int],
+      errors: ListBuffer[String],
+      context: String
+  ): Option[Codec[Json]] = {
+    irType.flatMap { tpe =>
+      compileJsonCodecForType(tpe, wordSize, errors, context)
+    }
+  }
+
+  private def compileJsonCodecForType(
+      irType: IrType,
+      wordSize: Option[Int],
+      errors: ListBuffer[String],
+      context: String
+  ): Option[Codec[Json]] = {
+    irType match {
+      case struct: IrType.Struct =>
+        compileStructCodec(struct, wordSize, errors, context)
+      case IrType.Primitive(kind) =>
+        compilePrimitiveCodec(kind, wordSize)
+      case _ =>
+        errors += s"$context: Unable to derive decode codec for output type."
+        None
+    }
+  }
+
+  private final case class CompiledMemberCodec(name: String, bitWidth: Int, codec: Codec[Json])
+
+  private def compileStructCodec(
+      struct: IrType.Struct,
+      wordSize: Option[Int],
+      errors: ListBuffer[String],
+      context: String
+  ): Option[Codec[Json]] = {
+    val compiledMembers = struct.members.flatMap { member =>
+      val memberType = memberReadType(member)
+      val memberContext = s"$context.${member.name}"
+      val memberCodec = compileJsonCodecForType(memberType, wordSize, errors, memberContext)
+      val memberWidth = memberBitWidth(member, wordSize, errors)
+      (memberCodec, memberWidth) match {
+        case (Some(codec), Some(width)) =>
+          Some(CompiledMemberCodec(member.name, width, codec))
+        case _ => None
+      }
+    }
+
+    if (compiledMembers.size != struct.members.size) {
+      None
+    } else {
+      val memberBits = compiledMembers.map(_.bitWidth).sum
+      val totalBits = struct.declaredSizeBits
+        .map(raw => if (struct.isBitmask) raw else raw * 8)
+        .getOrElse(memberBits)
+
+      if (totalBits < memberBits) {
+        errors += s"$context: Declared size is smaller than decoded structure members."
+        None
+      } else {
+        val paddingBits = totalBits - memberBits
+        Some(new Codec[Json] {
+          override def sizeBound: SizeBound = SizeBound.exact(totalBits.toLong)
+
+          override def encode(value: Json): Attempt[BitVector] =
+            Attempt.failure(Err("Encoding is not supported for read-only DAP proxy codecs."))
+
+          override def decode(input: BitVector): Attempt[DecodeResult[Json]] = {
+            if (input.size < totalBits.toLong) {
+              Attempt.failure(
+                Err(
+                  s"Insufficient bits for struct decode. Needed $totalBits bits, got ${input.size} bits."
+                )
+              )
+            } else {
+              val payload = input.take(totalBits.toLong)
+              val remainder = input.drop(totalBits.toLong)
+              compiledMembers
+                .foldLeft(Attempt.successful((payload, List.empty[(String, Json)]))) {
+                  case (accAttempt, compiled) =>
+                    accAttempt.flatMap { case (remainingBits, fields) =>
+                      compiled.codec.decode(remainingBits).map { decoded =>
+                        (decoded.remainder, fields :+ (compiled.name -> decoded.value))
+                      }
+                    }
+                }
+                .flatMap { case (remainingAfterMembers, fields) =>
+                  val remainingAfterPadding = remainingAfterMembers.drop(paddingBits.toLong)
+                  if (remainingAfterPadding.nonEmpty) {
+                    Attempt.failure(Err("Struct decode left unexpected trailing bits."))
+                  } else {
+                    Attempt.successful(DecodeResult(Json.obj(fields: _*), remainder))
+                  }
+                }
+            }
+          }
+        })
+      }
+    }
+  }
+
+  private def compilePrimitiveCodec(
+      kind: IrPrimitive,
+      wordSize: Option[Int]
+  ): Option[Codec[Json]] = {
+    kind match {
+      case IrPrimitive.Bool =>
+        Some(
+          bool.xmap[Json](value => Json.fromBoolean(value), _.asBoolean.getOrElse(false))
+        )
+      case IrPrimitive.S8 | IrPrimitive.S16 | IrPrimitive.S32 =>
+        primitiveSignedCodec(kind, wordSize)
+      case _ =>
+        primitiveUnsignedCodec(kind, wordSize)
+    }
+  }
+
+  private def primitiveUnsignedCodec(
+      kind: IrPrimitive,
+      wordSize: Option[Int]
+  ): Option[Codec[Json]] = {
+    bitsForPrimitive(kind, wordSize).map { bitWidth =>
+      bits(bitWidth.toLong).xmap[Json](
+        value => Json.fromLong(bitVectorToUnsignedLong(value)),
+        _ => BitVector.low(bitWidth.toLong)
+      )
+    }
+  }
+
+  private def primitiveSignedCodec(
+      kind: IrPrimitive,
+      wordSize: Option[Int]
+  ): Option[Codec[Json]] = {
+    bitsForPrimitive(kind, wordSize).map { bitWidth =>
+      bits(bitWidth.toLong).xmap[Json](
+        value => Json.fromLong(signExtend(bitVectorToUnsignedLong(value), bitWidth)),
+        _ => BitVector.low(bitWidth.toLong)
+      )
+    }
+  }
+
+  private def bitVectorToUnsignedLong(value: BitVector): Long =
+    value.toBin.foldLeft(0L) { (acc, bit) =>
+      (acc << 1) | (if (bit == '1') 1L else 0L)
+    }
+
+  private def signExtend(value: Long, bitWidth: Int): Long = {
+    val signBit = 1L << (bitWidth - 1)
+    if ((value & signBit) == 0L) value else value - (1L << bitWidth)
   }
 }

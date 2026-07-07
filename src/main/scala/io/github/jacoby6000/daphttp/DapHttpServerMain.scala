@@ -11,6 +11,7 @@ import org.http4s.ember.server.EmberServerBuilder
 import org.http4s.implicits._
 import org.http4s.HttpRoutes
 import software.amazon.smithy.model.Model
+import scodec.bits.BitVector
 
 import java.io.{BufferedInputStream, BufferedOutputStream}
 import java.net.Socket
@@ -191,160 +192,13 @@ object DapHttpServerMain extends IOApp {
   }
 
   private def decodeReadResult(readPlan: ReadPlan, base64Data: String): Json = {
-    readPlan.decodeType match {
-      case None => Json.Null
-      case Some(irType) =>
+    readPlan.decodeCodec match {
+      case None        => Json.Null
+      case Some(codec) =>
         Try(Base64.getDecoder.decode(base64Data)).toOption
-          .flatMap(bytes => decodeIrType(irType, bytes, readPlan.wordSizeBits))
+          .flatMap(bytes => codec.decode(BitVector(bytes)).toOption.map(_.value))
           .getOrElse(Json.Null)
     }
-  }
-
-  private def decodeIrType(irType: IrType, bytes: Array[Byte], wordSizeBits: Option[Int]): Option[Json] = {
-    irType match {
-      case struct: IrType.Struct =>
-        decodeStruct(struct, bytes, wordSizeBits).map(Json.fromFields)
-      case IrType.Primitive(kind) =>
-        primitiveBitWidth(kind, wordSizeBits).flatMap { bitWidth =>
-          readBits(bytes, 0, bitWidth).map { raw =>
-            kind match {
-              case IrPrimitive.Bool                 => Json.fromBoolean(raw != 0)
-              case IrPrimitive.S8 | IrPrimitive.S16 | IrPrimitive.S32 =>
-                Json.fromLong(signExtend(raw, bitWidth))
-              case _ =>
-                Json.fromLong(raw)
-            }
-          }
-        }
-      case _ =>
-        None
-    }
-  }
-
-  private def decodeStruct(
-      struct: IrType.Struct,
-      bytes: Array[Byte],
-      wordSizeBits: Option[Int]
-  ): Option[List[(String, Json)]] = {
-    val initial = Option(0).map(_ -> List.empty[(String, Json)])
-    struct.members.foldLeft(initial) { case (accOpt, member) =>
-      accOpt.flatMap { case (bitOffset, fields) =>
-        decodeMember(member, bytes, bitOffset, wordSizeBits)
-          .map { case (decoded, consumedBits) =>
-            (bitOffset + consumedBits) -> (fields :+ (member.name -> decoded))
-          }
-      }
-    }.map(_._2)
-  }
-
-  private def decodeMember(
-      member: IrMember,
-      bytes: Array[Byte],
-      bitOffset: Int,
-      wordSizeBits: Option[Int]
-  ): Option[(Json, Int)] = {
-    val readType = member.primitiveOverride.map(IrType.Primitive.apply).getOrElse(member.target)
-    readType match {
-      case IrType.Primitive(kind) =>
-        primitiveBitWidth(kind, wordSizeBits).flatMap { bitWidth =>
-          readBits(bytes, bitOffset, bitWidth).map { raw =>
-            val value = kind match {
-              case IrPrimitive.Bool =>
-                Json.fromBoolean(raw != 0)
-              case IrPrimitive.S8 | IrPrimitive.S16 | IrPrimitive.S32 =>
-                Json.fromLong(signExtend(raw, bitWidth))
-              case _ =>
-                Json.fromLong(raw)
-            }
-            value -> bitWidth
-          }
-        }
-      case nestedStruct: IrType.Struct =>
-        structureBitWidth(nestedStruct, wordSizeBits).flatMap { bitWidth =>
-          sliceBits(bytes, bitOffset, bitWidth)
-            .flatMap(slice => decodeStruct(nestedStruct, slice, wordSizeBits).map(Json.fromFields))
-            .map(_ -> bitWidth)
-        }
-      case _ =>
-        None
-    }
-  }
-
-  private def structureBitWidth(struct: IrType.Struct, wordSizeBits: Option[Int]): Option[Int] = {
-    struct.declaredSizeBits.orElse {
-      val widths = struct.members.map(memberBitWidth(_, wordSizeBits))
-      if (widths.forall(_.isDefined)) Some(widths.flatten.sum) else None
-    }
-  }
-
-  private def memberBitWidth(member: IrMember, wordSizeBits: Option[Int]): Option[Int] = {
-    if (member.isPointer) {
-      wordSizeBits
-    } else {
-      member.cStringBytes.map(_ * 8).orElse {
-        member.primitiveOverride
-          .flatMap(primitiveBitWidth(_, wordSizeBits))
-          .orElse {
-            member.target match {
-              case IrType.Primitive(kind) => primitiveBitWidth(kind, wordSizeBits)
-              case struct: IrType.Struct  => structureBitWidth(struct, wordSizeBits)
-              case _                      => None
-            }
-          }
-      }
-    }
-  }
-
-  private def primitiveBitWidth(kind: IrPrimitive, wordSizeBits: Option[Int]): Option[Int] = {
-    kind match {
-      case IrPrimitive.Bool     => Some(1)
-      case IrPrimitive.U8       => Some(8)
-      case IrPrimitive.S8       => Some(8)
-      case IrPrimitive.U16      => Some(16)
-      case IrPrimitive.S16      => Some(16)
-      case IrPrimitive.U32      => Some(32)
-      case IrPrimitive.S32      => Some(32)
-      case IrPrimitive.LongWord => wordSizeBits.orElse(Some(64))
-    }
-  }
-
-  private def readBits(bytes: Array[Byte], bitOffset: Int, bitWidth: Int): Option[Long] = {
-    if (bitWidth <= 0 || bitWidth > 64) {
-      None
-    } else if (bitOffset + bitWidth > bytes.length * 8) {
-      None
-    } else {
-      var value = 0L
-      var index = 0
-      while (index < bitWidth) {
-        val absoluteBit = bitOffset + index
-        val byteIndex = absoluteBit / 8
-        val bitInByte = 7 - (absoluteBit % 8)
-        val bit = (bytes(byteIndex) >> bitInByte) & 1
-        value = (value << 1) | bit.toLong
-        index += 1
-      }
-      Some(value)
-    }
-  }
-
-  private def sliceBits(bytes: Array[Byte], bitOffset: Int, bitWidth: Int): Option[Array[Byte]] = {
-    if (bitOffset % 8 != 0 || bitWidth % 8 != 0) {
-      None
-    } else {
-      val start = bitOffset / 8
-      val length = bitWidth / 8
-      if (start < 0 || length < 0 || start + length > bytes.length) {
-        None
-      } else {
-        Some(bytes.slice(start, start + length))
-      }
-    }
-  }
-
-  private def signExtend(value: Long, bitWidth: Int): Long = {
-    val signBit = 1L << (bitWidth - 1)
-    if ((value & signBit) == 0) value else value - (1L << bitWidth)
   }
 
   private def watchSmithySources(
