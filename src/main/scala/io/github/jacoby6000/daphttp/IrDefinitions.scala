@@ -38,6 +38,8 @@ object IrPrimitive {
   case object S32 extends IrPrimitive
   case object U64 extends IrPrimitive
   case object S64 extends IrPrimitive
+  case object U128 extends IrPrimitive
+  case object S128 extends IrPrimitive
   case object F8 extends IrPrimitive
   case object F16 extends IrPrimitive
   case object F32 extends IrPrimitive

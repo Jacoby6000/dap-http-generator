@@ -220,7 +220,7 @@ object IrCompiler {
   private def isSignedPrimitive(kind: IrPrimitive): Boolean = {
     kind match {
       case IrPrimitive.S8 | IrPrimitive.S16 | IrPrimitive.S32 | IrPrimitive.S64 |
-          IrPrimitive.LongWord =>
+          IrPrimitive.S128 | IrPrimitive.LongWord =>
         true
       case _ => false
     }
@@ -272,38 +272,40 @@ object IrCompiler {
     }
   }
 
-  private def floatingJson(kind: IrPrimitive, raw: Long): Json = {
+  private def floatingJson(kind: IrPrimitive, raw: BigInt): Json = {
     kind match {
       case IrPrimitive.F8 =>
-        Json.fromDoubleOrNull(parseF8(raw))
+        Json.fromDoubleOrNull(parseF8(raw.longValue))
       case IrPrimitive.F16 =>
-        Json.fromDoubleOrNull(parseF16(raw))
+        Json.fromDoubleOrNull(parseF16(raw.longValue))
       case IrPrimitive.F32 =>
-        Json.fromFloatOrNull(java.lang.Float.intBitsToFloat((raw & 0xffffffffL).toInt))
+        Json.fromFloatOrNull(java.lang.Float.intBitsToFloat((raw.longValue & 0xffffffffL).toInt))
       case IrPrimitive.F64 =>
-        Json.fromDoubleOrNull(java.lang.Double.longBitsToDouble(raw))
+        Json.fromDoubleOrNull(java.lang.Double.longBitsToDouble(raw.longValue))
       case _ =>
         Json.Null
     }
   }
 
-  private def signedJson(bitWidth: Int, raw: Long): Json =
-    Json.fromLong(signExtend(raw, bitWidth))
+  private def signedJson(bitWidth: Int, raw: BigInt): Json = {
+    val value = signExtend(raw, bitWidth)
+    if (bitWidth > 63) Json.fromString(value.toString) else Json.fromLong(value.longValue)
+  }
 
-  private def unsignedJson(bitWidth: Int, raw: Long): Json = {
-    if (bitWidth == 64) {
-      Json.fromString(java.lang.Long.toUnsignedString(raw))
+  private def unsignedJson(bitWidth: Int, raw: BigInt): Json = {
+    if (bitWidth > 63) {
+      Json.fromString(raw.toString)
     } else {
-      Json.fromLong(raw)
+      Json.fromLong(raw.longValue)
     }
   }
 
-  private def charJson(raw: Long): Json = {
-    val c = (raw & 0xffL).toChar
+  private def charJson(raw: BigInt): Json = {
+    val c = (raw.longValue & 0xffL).toChar
     Json.fromString(c.toString)
   }
 
-  private def primitiveJson(kind: IrPrimitive, bitWidth: Int, raw: Long): Json = {
+  private def primitiveJson(kind: IrPrimitive, bitWidth: Int, raw: BigInt): Json = {
     kind match {
       case IrPrimitive.Bool                          => Json.fromBoolean(raw != 0L)
       case IrPrimitive.Char                          => charJson(raw)
@@ -325,7 +327,7 @@ object IrCompiler {
       value => {
         val normalized =
           if (needsEndian(kind)) applyEndianToBits(value, bitWidth, endian) else value
-        val raw = bitVectorToUnsignedLong(normalized)
+        val raw = bitVectorToUnsigned(normalized)
         primitiveJson(kind, bitWidth, raw)
       },
       _ => primitiveToBitVector(bitWidth)
@@ -383,6 +385,8 @@ object IrCompiler {
       case IrPrimitive.S32      => Some(32)
       case IrPrimitive.U64      => Some(64)
       case IrPrimitive.S64      => Some(64)
+      case IrPrimitive.U128     => Some(128)
+      case IrPrimitive.S128     => Some(128)
       case IrPrimitive.F8       => Some(8)
       case IrPrimitive.F16      => Some(16)
       case IrPrimitive.F32      => Some(32)
@@ -518,16 +522,18 @@ object IrCompiler {
     }
   }
 
-  private def bitVectorToUnsignedLong(value: BitVector): Long =
-    value.toBin.foldLeft(0L) { (acc, bit) =>
-      (acc << 1) | (if (bit == '1') 1L else 0L)
-    }
+  private def bitVectorToUnsigned(value: BitVector): BigInt = {
+    val bytes = value.toByteArray
+    if (bytes.isEmpty) BigInt(0) else BigInt(1, bytes)
+  }
 
-  private def signExtend(value: Long, bitWidth: Int): Long = {
-    if (bitWidth >= 64) {
-      return value
+  private def signExtend(value: BigInt, bitWidth: Int): BigInt = {
+    if (bitWidth <= 0) {
+      BigInt(0)
+    } else if (value.testBit(bitWidth - 1)) {
+      value - (BigInt(1) << bitWidth)
+    } else {
+      value
     }
-    val signBit = 1L << (bitWidth - 1)
-    if ((value & signBit) == 0L) value else value - (1L << bitWidth)
   }
 }
