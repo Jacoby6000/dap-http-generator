@@ -44,7 +44,11 @@ object IrCompiler {
   ): List[ReadPlan] = {
     irType match {
       case struct: IrType.Struct =>
-        val isDapShape = struct.isDapStruct || struct.isBitmask
+        val isDapShape = struct match {
+          case _: IrType.Bitmask            => true
+          case _: IrType.MemoryMappedStruct => true
+          case _: IrType.EnclosingStruct    => false
+        }
         if (isDapShape) {
           baseAddress match {
             case None =>
@@ -70,7 +74,8 @@ object IrCompiler {
           struct.members.flatMap { member =>
             val memberPath = s"$pathPrefix.${member.name}"
             val memberRequiresStaticAddress = member.target match {
-              case nestedStruct: IrType.Struct => nestedStruct.isDapStruct || nestedStruct.isBitmask
+              case _: IrType.Bitmask            => true
+              case _: IrType.MemoryMappedStruct => true
               case _                           => false
             }
             val memberAddress =
@@ -133,7 +138,10 @@ object IrCompiler {
   ): Option[Int] = {
     structure.declaredSizeBits
       .map { raw =>
-        if (structure.isBitmask) math.ceil(raw.toDouble / 8d).toInt else raw
+        structure match {
+          case _: IrType.Bitmask => math.ceil(raw.toDouble / 8d).toInt
+          case _                 => raw
+        }
       }
       .orElse {
         val bits = structure.members.flatMap(member => memberBitWidth(member, wordSize, errors))
@@ -294,7 +302,12 @@ object IrCompiler {
     } else {
       val memberBits = compiledMembers.map(_.bitWidth).sum
       val totalBits = struct.declaredSizeBits
-        .map(raw => if (struct.isBitmask) raw else raw * 8)
+        .map(raw =>
+          struct match {
+            case _: IrType.Bitmask => raw
+            case _                 => raw * 8
+          }
+        )
         .getOrElse(memberBits)
 
       if (totalBits < memberBits) {

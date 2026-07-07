@@ -30,12 +30,39 @@ object IrExtractor {
   private val CStringTrait = ShapeId.from("com.jacoby6000.daphttp#cString")
   private val WordSizeTrait = ShapeId.from("com.jacoby6000.daphttp#wordSize")
   private val StaticAddressTrait = ShapeId.from("com.jacoby6000.daphttp#staticAddress")
-  private val U8Trait = ShapeId.from("com.jacoby6000.daphttp#u8")
-  private val S8Trait = ShapeId.from("com.jacoby6000.daphttp#s8")
-  private val U16Trait = ShapeId.from("com.jacoby6000.daphttp#u16")
-  private val S16Trait = ShapeId.from("com.jacoby6000.daphttp#s16")
-  private val U32Trait = ShapeId.from("com.jacoby6000.daphttp#u32")
-  private val S32Trait = ShapeId.from("com.jacoby6000.daphttp#s32")
+  sealed trait PrimitiveTrait {
+    def traitId: ShapeId
+    def primitive: IrPrimitive
+  }
+  object PrimitiveTrait {
+    case object U8 extends PrimitiveTrait {
+      override val traitId: ShapeId = ShapeId.from("com.jacoby6000.daphttp#u8")
+      override val primitive: IrPrimitive = IrPrimitive.U8
+    }
+    case object S8 extends PrimitiveTrait {
+      override val traitId: ShapeId = ShapeId.from("com.jacoby6000.daphttp#s8")
+      override val primitive: IrPrimitive = IrPrimitive.S8
+    }
+    case object U16 extends PrimitiveTrait {
+      override val traitId: ShapeId = ShapeId.from("com.jacoby6000.daphttp#u16")
+      override val primitive: IrPrimitive = IrPrimitive.U16
+    }
+    case object S16 extends PrimitiveTrait {
+      override val traitId: ShapeId = ShapeId.from("com.jacoby6000.daphttp#s16")
+      override val primitive: IrPrimitive = IrPrimitive.S16
+    }
+    case object U32 extends PrimitiveTrait {
+      override val traitId: ShapeId = ShapeId.from("com.jacoby6000.daphttp#u32")
+      override val primitive: IrPrimitive = IrPrimitive.U32
+    }
+    case object S32 extends PrimitiveTrait {
+      override val traitId: ShapeId = ShapeId.from("com.jacoby6000.daphttp#s32")
+      override val primitive: IrPrimitive = IrPrimitive.S32
+    }
+
+    val All: List[PrimitiveTrait] = List(U8, S8, U16, S16, U32, S32)
+    val PrimitiveByTraitId: Map[ShapeId, IrPrimitive] = All.map(t => t.traitId -> t.primitive).toMap
+  }
   private val BytesShape = ShapeId.from("com.jacoby6000.daphttp#Bytes")
   private val BitsShape = ShapeId.from("com.jacoby6000.daphttp#Bits")
 
@@ -51,19 +78,33 @@ object IrExtractor {
         shape.getType match {
           case ShapeType.STRUCTURE =>
             val structure = shape.asInstanceOf[StructureShape]
-            IrType.Struct(
-              id = structure.getId,
-              members = structure
-                .members()
-                .asScala
-                .toList
-                .map(member =>
-                  buildIrMember(member, buildIrType(member.getTarget, stack + shapeId))
-                ),
-              isDapStruct = structure.hasTrait(DapStructTrait),
-              isBitmask = structure.hasTrait(BitmaskTrait),
-              declaredSizeBits = intTraitValue(structure, SizeTrait)
-            )
+            val members = structure
+              .members()
+              .asScala
+              .toList
+              .map(member =>
+                buildIrMember(member, buildIrType(member.getTarget, stack + shapeId))
+              )
+            val declaredSizeBits = intTraitValue(structure, SizeTrait)
+            if (structure.hasTrait(BitmaskTrait)) {
+              IrType.Bitmask(
+                id = structure.getId,
+                members = members,
+                declaredSizeBits = declaredSizeBits
+              )
+            } else if (structure.hasTrait(DapStructTrait)) {
+              IrType.MemoryMappedStruct(
+                id = structure.getId,
+                members = members,
+                declaredSizeBits = declaredSizeBits
+              )
+            } else {
+              IrType.EnclosingStruct(
+                id = structure.getId,
+                members = members,
+                declaredSizeBits = declaredSizeBits
+              )
+            }
           case ShapeType.UNION =>
             val union = shape.asInstanceOf[UnionShape]
             IrType.Union(
@@ -149,21 +190,9 @@ object IrExtractor {
   }
 
   private def memberPrimitiveOverride(member: MemberShape): Option[IrPrimitive] = {
-    if (member.hasTrait(U8Trait)) {
-      Some(IrPrimitive.U8)
-    } else if (member.hasTrait(S8Trait)) {
-      Some(IrPrimitive.S8)
-    } else if (member.hasTrait(U16Trait)) {
-      Some(IrPrimitive.U16)
-    } else if (member.hasTrait(S16Trait)) {
-      Some(IrPrimitive.S16)
-    } else if (member.hasTrait(U32Trait)) {
-      Some(IrPrimitive.U32)
-    } else if (member.hasTrait(S32Trait)) {
-      Some(IrPrimitive.S32)
-    } else {
-      None
-    }
+    member.getAllTraits.keySet.asScala.collectFirst(Function.unlift { traitId =>
+      PrimitiveTrait.PrimitiveByTraitId.get(traitId)
+    })
   }
 
   private def cStringBytes(member: MemberShape): Option[Int] = {

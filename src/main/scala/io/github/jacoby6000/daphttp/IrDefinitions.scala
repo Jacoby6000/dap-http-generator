@@ -31,13 +31,26 @@ object IrPrimitive {
 
 sealed trait IrType
 object IrType {
-  final case class Struct(
+  sealed trait Struct extends IrType {
+    def id: ShapeId
+    def members: List[IrMember]
+    def declaredSizeBits: Option[Int]
+  }
+  final case class Bitmask(
       id: ShapeId,
       members: List[IrMember],
-      isDapStruct: Boolean,
-      isBitmask: Boolean,
       declaredSizeBits: Option[Int]
-  ) extends IrType
+  ) extends Struct
+  final case class MemoryMappedStruct(
+      id: ShapeId,
+      members: List[IrMember],
+      declaredSizeBits: Option[Int]
+  ) extends Struct
+  final case class EnclosingStruct(
+      id: ShapeId,
+      members: List[IrMember],
+      declaredSizeBits: Option[Int]
+  ) extends Struct
   final case class Union(id: ShapeId, members: List[IrMember]) extends IrType
   final case class ListType(id: ShapeId, element: IrType, bytesAlias: Boolean, bitsAlias: Boolean)
       extends IrType
