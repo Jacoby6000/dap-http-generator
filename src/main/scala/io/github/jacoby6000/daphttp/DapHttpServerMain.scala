@@ -1,25 +1,32 @@
 package io.github.jacoby6000.daphttp
 
-import cats.effect.{ExitCode, IO, IOApp, Ref}
+import cats.effect.ExitCode
+import cats.effect.IO
+import cats.effect.IOApp
+import cats.effect.Ref
+import com.comcast.ip4s.Host
+import com.comcast.ip4s.Port
 import io.circe.Json
 import io.circe.syntax._
-import com.comcast.ip4s.{Host, Port}
+import org.http4s.HttpRoutes
 import org.http4s.Method.GET
 import org.http4s.circe.CirceEntityCodec._
 import org.http4s.dsl.io._
 import org.http4s.ember.server.EmberServerBuilder
 import org.http4s.implicits._
-import org.http4s.HttpRoutes
-import software.amazon.smithy.model.Model
 import scodec.bits.BitVector
+import software.amazon.smithy.model.Model
 
-import java.io.{BufferedInputStream, BufferedOutputStream}
+import java.io.BufferedInputStream
+import java.io.BufferedOutputStream
 import java.net.Socket
 import java.nio.charset.StandardCharsets
-import java.nio.file.{Files, Path, Paths}
+import java.nio.file.Files
+import java.nio.file.Path
+import java.nio.file.Paths
 import java.util.Base64
-import scala.jdk.CollectionConverters._
 import scala.concurrent.duration._
+import scala.jdk.CollectionConverters._
 import scala.util.Try
 
 object DapHttpServerMain extends IOApp {
@@ -194,7 +201,11 @@ object DapHttpServerMain extends IOApp {
     IrExtractor.buildIrFromModel(model).flatMap(IrCompiler.compileRoutePlansFromIr)
   }
 
-  private def decodeReadResult(readPlan: ReadPlan, base64Data: String, dapClient: DapClient): IO[Json] = {
+  private def decodeReadResult(
+      readPlan: ReadPlan,
+      base64Data: String,
+      dapClient: DapClient
+  ): IO[Json] = {
     if (readPlan.cStringPointer) {
       decodeCStringPointer(readPlan, base64Data, dapClient)
     } else {
@@ -229,7 +240,7 @@ object DapHttpServerMain extends IOApp {
       pointerValue(bytes, readPlan.endian)
     )
     pointer match {
-      case None => IO.pure(Json.Null)
+      case None          => IO.pure(Json.Null)
       case Some(address) =>
         def readChars(currentAddress: Long, acc: Vector[Byte]): IO[Vector[Byte]] =
           dapClient.readMemory(currentAddress, 1).flatMap {

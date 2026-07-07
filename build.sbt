@@ -1,4 +1,4 @@
-ThisBuild / scalaVersion := "2.13.15"
+ThisBuild / scalaVersion := "2.13.18"
 ThisBuild / organization := "io.github.jacoby6000"
 ThisBuild / version := "0.1.0-SNAPSHOT"
 ThisBuild / semanticdbEnabled := true
@@ -13,8 +13,8 @@ ThisBuild / scalacOptions ++= Seq(
   "-Wdead-code",
   "-Wextra-implicit",
   "-Wnumeric-widen",
-  "-Wself-implicit",
-  "-Wunused:all",
+  "-Xlint:implicit-recursion",
+  "-Wunused:imports,patvars,privates,locals,explicits,implicits",
   "-Wvalue-discard"
 )
 

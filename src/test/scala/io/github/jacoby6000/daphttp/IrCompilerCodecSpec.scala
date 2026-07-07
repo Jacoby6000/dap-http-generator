@@ -1,0 +1,315 @@
+package io.github.jacoby6000.daphttp
+
+import io.circe.Json
+import org.scalatest.funsuite.AnyFunSuite
+import scodec.bits.BitVector
+import software.amazon.smithy.model.shapes.ShapeId
+
+class IrCompilerCodecSpec extends AnyFunSuite {
+  private def id(value: String): ShapeId = ShapeId.from(s"example#$value")
+
+  private def compileSingleRead(
+      memberTarget: IrType,
+      memberPrimitiveOverride: Option[IrPrimitive] = None,
+      endian: IrEndian = IrEndian.Big,
+      wordSize: Option[Int] = Some(32)
+  ): ReadPlan = {
+    val output = IrType.EnclosingStruct(
+      id = id("Output"),
+      members = List(
+        IrMember(
+          id = id("Output_value"),
+          name = "value",
+          target = memberTarget,
+          staticAddress = Some(0x1000L),
+          paddingRepeats = None,
+          isPointer = false,
+          isArray = false,
+          arrayLength = None,
+          endianOverride = None,
+          primitiveOverride = memberPrimitiveOverride
+        )
+      ),
+      declaredSizeBits = None
+    )
+
+    IrCompiler
+      .compileRoutePlansFromIr(
+        List(
+          IrService(
+            name = "Api",
+            wordSizeBits = wordSize,
+            defaultEndian = endian,
+            operations =
+              List(IrOperation(name = "GetValue", routePath = "/Api/GetValue", output = output))
+          )
+        )
+      )
+      .toOption
+      .get("/Api/GetValue")
+      .reads
+      .head
+  }
+
+  private def decode(read: ReadPlan, bytes: Array[Byte]): Json =
+    read.decodeCodec.get.decode(BitVector(bytes)).toOption.get.value
+
+  test("decodes primitive codecs compiled from IR") {
+    val cases = List(
+      (
+        IrPrimitive.U8,
+        Some(32),
+        IrEndian.Big,
+        Array(0x7f.toByte),
+        Json.fromLong(127L)
+      ),
+      (
+        IrPrimitive.S8,
+        Some(32),
+        IrEndian.Big,
+        Array(0xff.toByte),
+        Json.fromLong(-1L)
+      ),
+      (
+        IrPrimitive.U16,
+        Some(32),
+        IrEndian.Little,
+        Array(0x34.toByte, 0x12.toByte),
+        Json.fromLong(0x1234L)
+      ),
+      (
+        IrPrimitive.S16,
+        Some(32),
+        IrEndian.Big,
+        Array(0xff.toByte, 0xfe.toByte),
+        Json.fromLong(-2L)
+      ),
+      (
+        IrPrimitive.U32,
+        Some(32),
+        IrEndian.Big,
+        Array(0x00.toByte, 0x00.toByte, 0x00.toByte, 0x2a.toByte),
+        Json.fromLong(42L)
+      ),
+      (
+        IrPrimitive.S32,
+        Some(32),
+        IrEndian.Big,
+        Array(0xff.toByte, 0xff.toByte, 0xff.toByte, 0xd6.toByte),
+        Json.fromLong(-42L)
+      ),
+      (
+        IrPrimitive.U64,
+        Some(32),
+        IrEndian.Big,
+        Array.fill[Byte](8)(0xff.toByte),
+        Json.fromString("18446744073709551615")
+      ),
+      (
+        IrPrimitive.S64,
+        Some(32),
+        IrEndian.Big,
+        Array.fill[Byte](8)(0xff.toByte),
+        Json.fromLong(-1L)
+      ),
+      (
+        IrPrimitive.F8,
+        Some(32),
+        IrEndian.Big,
+        Array(0x00.toByte),
+        Json.fromDoubleOrNull(0.0)
+      ),
+      (
+        IrPrimitive.F16,
+        Some(32),
+        IrEndian.Big,
+        Array(0x00.toByte, 0x00.toByte),
+        Json.fromDoubleOrNull(0.0)
+      ),
+      (
+        IrPrimitive.F32,
+        Some(32),
+        IrEndian.Big,
+        Array(0x3f.toByte, 0x80.toByte, 0x00.toByte, 0x00.toByte),
+        Json.fromFloatOrNull(1.0f)
+      ),
+      (
+        IrPrimitive.F64,
+        Some(32),
+        IrEndian.Big,
+        Array(
+          0x3f.toByte,
+          0xf0.toByte,
+          0x00.toByte,
+          0x00.toByte,
+          0x00.toByte,
+          0x00.toByte,
+          0x00.toByte,
+          0x00.toByte
+        ),
+        Json.fromDoubleOrNull(1.0d)
+      ),
+      (
+        IrPrimitive.Char,
+        Some(32),
+        IrEndian.Big,
+        Array('A'.toByte),
+        Json.fromString("A")
+      ),
+      (
+        IrPrimitive.Bool,
+        Some(32),
+        IrEndian.Big,
+        Array(0x80.toByte),
+        Json.fromBoolean(true)
+      ),
+      (
+        IrPrimitive.LongWord,
+        Some(32),
+        IrEndian.Big,
+        Array(0x00.toByte, 0x00.toByte, 0x00.toByte, 0x2a.toByte),
+        Json.fromLong(42L)
+      )
+    )
+
+    cases.foreach { case (kind, wordSize, endian, bytes, expected) =>
+      val read = compileSingleRead(IrType.Primitive(kind), endian = endian, wordSize = wordSize)
+      withClue(s"primitive=$kind") {
+        assert(decode(read, bytes) == expected)
+      }
+    }
+  }
+
+  test("decodes bitmask members into object fields") {
+    val bitmask = IrType.Bitmask(
+      id = id("Flags"),
+      members = List(
+        IrMember(
+          id = id("Flags_ready"),
+          name = "ready",
+          target = IrType.Primitive(IrPrimitive.Bool),
+          staticAddress = None,
+          paddingRepeats = None,
+          isPointer = false,
+          isArray = false,
+          arrayLength = None,
+          endianOverride = None,
+          primitiveOverride = None
+        ),
+        IrMember(
+          id = id("Flags_error"),
+          name = "error",
+          target = IrType.Primitive(IrPrimitive.Bool),
+          staticAddress = None,
+          paddingRepeats = None,
+          isPointer = false,
+          isArray = false,
+          arrayLength = None,
+          endianOverride = None,
+          primitiveOverride = None
+        )
+      ),
+      declaredSizeBits = Some(2)
+    )
+
+    val read = compileSingleRead(bitmask)
+    assert(decode(read, Array(0xc0.toByte)) == Json.obj("ready" -> Json.True, "error" -> Json.True))
+  }
+
+  test("decodes enclosing struct members when nested inside dap struct") {
+    val nested = IrType.EnclosingStruct(
+      id = id("Nested"),
+      members = List(
+        IrMember(
+          id = id("Nested_a"),
+          name = "a",
+          target = IrType.Primitive(IrPrimitive.U8),
+          staticAddress = None,
+          paddingRepeats = None,
+          isPointer = false,
+          isArray = false,
+          arrayLength = None,
+          endianOverride = None,
+          primitiveOverride = None
+        ),
+        IrMember(
+          id = id("Nested_b"),
+          name = "b",
+          target = IrType.Primitive(IrPrimitive.U8),
+          staticAddress = None,
+          paddingRepeats = None,
+          isPointer = false,
+          isArray = false,
+          arrayLength = None,
+          endianOverride = None,
+          primitiveOverride = None
+        )
+      ),
+      declaredSizeBits = None
+    )
+
+    val dapStruct = IrType.MemoryMappedStruct(
+      id = id("WrappedNested"),
+      members = List(
+        IrMember(
+          id = id("WrappedNested_nested"),
+          name = "nested",
+          target = nested,
+          staticAddress = None,
+          paddingRepeats = None,
+          isPointer = false,
+          isArray = false,
+          arrayLength = None,
+          endianOverride = None,
+          primitiveOverride = None
+        )
+      ),
+      declaredSizeBits = Some(2)
+    )
+
+    val read = compileSingleRead(dapStruct)
+    assert(
+      decode(read, Array(0x01.toByte, 0x02.toByte)) ==
+        Json.obj("nested" -> Json.obj("a" -> Json.fromInt(1), "b" -> Json.fromInt(2)))
+    )
+  }
+
+  test("decodes dap struct into json object with corresponding fields") {
+    val dapStruct = IrType.MemoryMappedStruct(
+      id = id("Registers"),
+      members = List(
+        IrMember(
+          id = id("Registers_lo"),
+          name = "lo",
+          target = IrType.Primitive(IrPrimitive.U16),
+          staticAddress = None,
+          paddingRepeats = None,
+          isPointer = false,
+          isArray = false,
+          arrayLength = None,
+          endianOverride = None,
+          primitiveOverride = Some(IrPrimitive.U16)
+        ),
+        IrMember(
+          id = id("Registers_hi"),
+          name = "hi",
+          target = IrType.Primitive(IrPrimitive.U16),
+          staticAddress = None,
+          paddingRepeats = None,
+          isPointer = false,
+          isArray = false,
+          arrayLength = None,
+          endianOverride = None,
+          primitiveOverride = Some(IrPrimitive.U16)
+        )
+      ),
+      declaredSizeBits = Some(4)
+    )
+
+    val read = compileSingleRead(dapStruct)
+    assert(
+      decode(read, Array(0x12.toByte, 0x34.toByte, 0xab.toByte, 0xcd.toByte)) ==
+        Json.obj("lo" -> Json.fromLong(0x1234L), "hi" -> Json.fromLong(0xabcdL))
+    )
+  }
+}

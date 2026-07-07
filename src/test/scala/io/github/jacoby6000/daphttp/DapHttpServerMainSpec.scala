@@ -341,7 +341,8 @@ class DapHttpServerMainSpec extends AnyFunSuite {
     val plans = DapHttpServerMain.buildRoutePlansFromModel(model).toOption.get
     val route = plans("/Api/GetInfo")
     val codec = route.reads.head.decodeCodec.get
-    val decoded = codec.decode(scodec.bits.BitVector(Array(0x34.toByte, 0x12.toByte))).toOption.get.value
+    val decoded =
+      codec.decode(scodec.bits.BitVector(Array(0x34.toByte, 0x12.toByte))).toOption.get.value
 
     assert(decoded == io.circe.Json.fromLong(0x1234L))
   }

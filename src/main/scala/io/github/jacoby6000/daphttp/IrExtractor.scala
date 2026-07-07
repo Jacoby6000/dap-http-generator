@@ -1,18 +1,16 @@
 package io.github.jacoby6000.daphttp
 
 import software.amazon.smithy.model.Model
-import software.amazon.smithy.model.shapes.{
-  ListShape,
-  MapShape,
-  MemberShape,
-  OperationShape,
-  ServiceShape,
-  Shape,
-  ShapeId,
-  ShapeType,
-  StructureShape,
-  UnionShape
-}
+import software.amazon.smithy.model.shapes.ListShape
+import software.amazon.smithy.model.shapes.MapShape
+import software.amazon.smithy.model.shapes.MemberShape
+import software.amazon.smithy.model.shapes.OperationShape
+import software.amazon.smithy.model.shapes.ServiceShape
+import software.amazon.smithy.model.shapes.Shape
+import software.amazon.smithy.model.shapes.ShapeId
+import software.amazon.smithy.model.shapes.ShapeType
+import software.amazon.smithy.model.shapes.StructureShape
+import software.amazon.smithy.model.shapes.UnionShape
 
 import scala.collection.mutable.ListBuffer
 import scala.jdk.CollectionConverters._
@@ -88,7 +86,8 @@ object IrExtractor {
       override val primitive: IrPrimitive = IrPrimitive.Char
     }
 
-    val All: List[PrimitiveTrait] = List(U8, S8, U16, S16, U32, S32, U64, S64, F8, F16, F32, F64, Char)
+    val All: List[PrimitiveTrait] =
+      List(U8, S8, U16, S16, U32, S32, U64, S64, F8, F16, F32, F64, Char)
     val PrimitiveByTraitId: Map[ShapeId, IrPrimitive] = All.map(t => t.traitId -> t.primitive).toMap
   }
   private val BytesShape = ShapeId.from("com.jacoby6000.daphttp#Bytes")
@@ -110,9 +109,7 @@ object IrExtractor {
               .members()
               .asScala
               .toList
-              .map(member =>
-                buildIrMember(member, buildIrType(member.getTarget, stack + shapeId))
-              )
+              .map(member => buildIrMember(member, buildIrType(member.getTarget, stack + shapeId)))
             val declaredSizeBits = intTraitValue(structure, SizeTrait)
             if (structure.hasTrait(BitmaskTrait)) {
               IrType.Bitmask(

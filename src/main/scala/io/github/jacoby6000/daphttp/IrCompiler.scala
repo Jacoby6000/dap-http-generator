@@ -1,7 +1,11 @@
 package io.github.jacoby6000.daphttp
 
 import io.circe.Json
-import scodec.{Attempt, Codec, DecodeResult, Err, SizeBound}
+import scodec.Attempt
+import scodec.Codec
+import scodec.DecodeResult
+import scodec.Err
+import scodec.SizeBound
 import scodec.bits.BitVector
 import scodec.codecs.bits
 
@@ -67,7 +71,8 @@ object IrCompiler {
                       decodeType = Some(struct),
                       endian = endian,
                       wordSizeBits = wordSize,
-                      decodeCodec = compileJsonCodec(Some(struct), endian, wordSize, errors, pathPrefix),
+                      decodeCodec =
+                        compileJsonCodec(Some(struct), endian, wordSize, errors, pathPrefix),
                       cStringPointer = false
                     )
                   )
@@ -80,7 +85,7 @@ object IrCompiler {
             val memberRequiresStaticAddress = member.target match {
               case _: IrType.Bitmask            => true
               case _: IrType.MemoryMappedStruct => true
-              case _                           => false
+              case _                            => false
             }
             val memberAddress =
               if (memberRequiresStaticAddress) {
@@ -119,9 +124,10 @@ object IrCompiler {
                           errors,
                           memberPath
                         ),
-                        cStringPointer = member.isPointer && memberReadType(member) == IrType.Primitive(
-                          IrPrimitive.Char
-                        )
+                        cStringPointer =
+                          member.isPointer && memberReadType(member) == IrType.Primitive(
+                            IrPrimitive.Char
+                          )
                       )
                     )
                   )
@@ -207,13 +213,14 @@ object IrCompiler {
   private def isFloatingPrimitive(kind: IrPrimitive): Boolean = {
     kind match {
       case IrPrimitive.F8 | IrPrimitive.F16 | IrPrimitive.F32 | IrPrimitive.F64 => true
-      case _                                                                     => false
+      case _                                                                    => false
     }
   }
 
   private def isSignedPrimitive(kind: IrPrimitive): Boolean = {
     kind match {
-      case IrPrimitive.S8 | IrPrimitive.S16 | IrPrimitive.S32 | IrPrimitive.S64 | IrPrimitive.LongWord =>
+      case IrPrimitive.S8 | IrPrimitive.S16 | IrPrimitive.S32 | IrPrimitive.S64 |
+          IrPrimitive.LongWord =>
         true
       case _ => false
     }
@@ -233,7 +240,8 @@ object IrCompiler {
       val byteCount = bitWidth / 8
       val bytes = value.take(bitWidth.toLong).toByteArray
       val padded =
-        if (bytes.length == byteCount) bytes else Array.fill[Byte](byteCount - bytes.length)(0) ++ bytes
+        if (bytes.length == byteCount) bytes
+        else Array.fill[Byte](byteCount - bytes.length)(0) ++ bytes
       BitVector(padded.reverse)
     }
   }
@@ -297,8 +305,8 @@ object IrCompiler {
 
   private def primitiveJson(kind: IrPrimitive, bitWidth: Int, raw: Long): Json = {
     kind match {
-      case IrPrimitive.Bool => Json.fromBoolean(raw != 0L)
-      case IrPrimitive.Char => charJson(raw)
+      case IrPrimitive.Bool                          => Json.fromBoolean(raw != 0L)
+      case IrPrimitive.Char                          => charJson(raw)
       case floating if isFloatingPrimitive(floating) =>
         floatingJson(floating, raw)
       case signed if isSignedPrimitive(signed) =>
@@ -315,7 +323,8 @@ object IrCompiler {
   private def primitiveCodec(kind: IrPrimitive, bitWidth: Int, endian: IrEndian): Codec[Json] =
     bits(bitWidth.toLong).xmap[Json](
       value => {
-        val normalized = if (needsEndian(kind)) applyEndianToBits(value, bitWidth, endian) else value
+        val normalized =
+          if (needsEndian(kind)) applyEndianToBits(value, bitWidth, endian) else value
         val raw = bitVectorToUnsignedLong(normalized)
         primitiveJson(kind, bitWidth, raw)
       },
@@ -515,6 +524,9 @@ object IrCompiler {
     }
 
   private def signExtend(value: Long, bitWidth: Int): Long = {
+    if (bitWidth >= 64) {
+      return value
+    }
     val signBit = 1L << (bitWidth - 1)
     if ((value & signBit) == 0L) value else value - (1L << bitWidth)
   }
