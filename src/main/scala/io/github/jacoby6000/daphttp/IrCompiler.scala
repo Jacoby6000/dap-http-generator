@@ -3,7 +3,7 @@ package io.github.jacoby6000.daphttp
 import io.circe.Json
 import scodec.{Attempt, Codec, DecodeResult, Err, SizeBound}
 import scodec.bits.BitVector
-import scodec.codecs.{bits, bool}
+import scodec.codecs.bits
 
 import scala.collection.mutable.ListBuffer
 
@@ -25,6 +25,7 @@ object IrCompiler {
           operation.output,
           None,
           operation.routePath,
+          service.defaultEndian,
           service.wordSizeBits,
           errors
         )
@@ -39,6 +40,7 @@ object IrCompiler {
       irType: IrType,
       baseAddress: Option[Long],
       pathPrefix: String,
+      endian: IrEndian,
       wordSize: Option[Int],
       errors: ListBuffer[String]
   ): List[ReadPlan] = {
@@ -63,8 +65,10 @@ object IrCompiler {
                       address = address,
                       sizeBytes = sizeBytes,
                       decodeType = Some(struct),
+                      endian = endian,
                       wordSizeBits = wordSize,
-                      decodeCodec = compileJsonCodec(Some(struct), wordSize, errors, pathPrefix)
+                      decodeCodec = compileJsonCodec(Some(struct), endian, wordSize, errors, pathPrefix),
+                      cStringPointer = false
                     )
                   )
                 case None => Nil
@@ -89,7 +93,14 @@ object IrCompiler {
               }
             member.target match {
               case nestedStruct: IrType.Struct =>
-                collectReadsForType(nestedStruct, memberAddress, memberPath, wordSize, errors)
+                collectReadsForType(
+                  nestedStruct,
+                  memberAddress,
+                  memberPath,
+                  member.endianOverride.getOrElse(endian),
+                  wordSize,
+                  errors
+                )
               case _ =>
                 memberAddress
                   .flatMap(address =>
@@ -99,12 +110,17 @@ object IrCompiler {
                         address = address,
                         sizeBytes = sizeBytes,
                         decodeType = Some(memberReadType(member)),
+                        endian = member.endianOverride.getOrElse(endian),
                         wordSizeBits = wordSize,
                         decodeCodec = compileJsonCodec(
                           Some(memberReadType(member)),
+                          member.endianOverride.getOrElse(endian),
                           wordSize,
                           errors,
                           memberPath
+                        ),
+                        cStringPointer = member.isPointer && memberReadType(member) == IrType.Primitive(
+                          IrPrimitive.Char
                         )
                       )
                     )
@@ -174,21 +190,137 @@ object IrCompiler {
       }
     }
 
-    member.cStringBytes.map(_ * 8).orElse {
-      member.primitiveOverride.flatMap(bitsForPrimitive(_, wordSize)).orElse {
-        member.target match {
-          case IrType.Primitive(kind) =>
-            bitsForPrimitive(kind, wordSize)
-          case listType: IrType.ListType =>
-            listBitWidth(member, listType, wordSize, errors)
-          case nestedStruct: IrType.Struct =>
-            structureSizeBytes(nestedStruct, wordSize, errors).map(_ * 8)
-          case _ =>
-            None
-        }
+    member.primitiveOverride.flatMap(bitsForPrimitive(_, wordSize)).orElse {
+      member.target match {
+        case IrType.Primitive(kind) =>
+          bitsForPrimitive(kind, wordSize)
+        case listType: IrType.ListType =>
+          listBitWidth(member, listType, wordSize, errors)
+        case nestedStruct: IrType.Struct =>
+          structureSizeBytes(nestedStruct, wordSize, errors).map(_ * 8)
+        case _ =>
+          None
       }
     }
   }
+
+  private def isFloatingPrimitive(kind: IrPrimitive): Boolean = {
+    kind match {
+      case IrPrimitive.F8 | IrPrimitive.F16 | IrPrimitive.F32 | IrPrimitive.F64 => true
+      case _                                                                     => false
+    }
+  }
+
+  private def isSignedPrimitive(kind: IrPrimitive): Boolean = {
+    kind match {
+      case IrPrimitive.S8 | IrPrimitive.S16 | IrPrimitive.S32 | IrPrimitive.S64 | IrPrimitive.LongWord =>
+        true
+      case _ => false
+    }
+  }
+
+  private def needsEndian(kind: IrPrimitive): Boolean = {
+    kind match {
+      case IrPrimitive.Bool | IrPrimitive.Char | IrPrimitive.F8 => false
+      case _                                                    => true
+    }
+  }
+
+  private def applyEndianToBits(value: BitVector, bitWidth: Int, endian: IrEndian): BitVector = {
+    if (bitWidth % 8 != 0 || bitWidth <= 8 || endian == IrEndian.Big) {
+      value
+    } else {
+      val byteCount = bitWidth / 8
+      val bytes = value.take(bitWidth.toLong).toByteArray
+      val padded =
+        if (bytes.length == byteCount) bytes else Array.fill[Byte](byteCount - bytes.length)(0) ++ bytes
+      BitVector(padded.reverse)
+    }
+  }
+
+  private def parseF16(raw: Long): Double = {
+    val sign = if ((raw & 0x8000L) == 0L) 1.0 else -1.0
+    val exponent = ((raw >> 10) & 0x1fL).toInt
+    val fraction = (raw & 0x03ffL).toInt
+    if (exponent == 0) {
+      if (fraction == 0) sign * 0.0 else sign * math.pow(2.0, -14.0) * (fraction.toDouble / 1024.0)
+    } else if (exponent == 31) {
+      if (fraction == 0) sign * Double.PositiveInfinity else Double.NaN
+    } else {
+      sign * math.pow(2.0, exponent - 15.0) * (1.0 + fraction.toDouble / 1024.0)
+    }
+  }
+
+  private def parseF8(raw: Long): Double = {
+    val sign = if ((raw & 0x80L) == 0L) 1.0 else -1.0
+    val exponent = ((raw >> 3) & 0x0fL).toInt
+    val fraction = (raw & 0x07L).toInt
+    if (exponent == 0) {
+      if (fraction == 0) sign * 0.0 else sign * math.pow(2.0, -6.0) * (fraction.toDouble / 8.0)
+    } else if (exponent == 15) {
+      if (fraction == 0) sign * Double.PositiveInfinity else Double.NaN
+    } else {
+      sign * math.pow(2.0, exponent - 7.0) * (1.0 + fraction.toDouble / 8.0)
+    }
+  }
+
+  private def floatingJson(kind: IrPrimitive, raw: Long): Json = {
+    kind match {
+      case IrPrimitive.F8 =>
+        Json.fromDoubleOrNull(parseF8(raw))
+      case IrPrimitive.F16 =>
+        Json.fromDoubleOrNull(parseF16(raw))
+      case IrPrimitive.F32 =>
+        Json.fromFloatOrNull(java.lang.Float.intBitsToFloat((raw & 0xffffffffL).toInt))
+      case IrPrimitive.F64 =>
+        Json.fromDoubleOrNull(java.lang.Double.longBitsToDouble(raw))
+      case _ =>
+        Json.Null
+    }
+  }
+
+  private def signedJson(bitWidth: Int, raw: Long): Json =
+    Json.fromLong(signExtend(raw, bitWidth))
+
+  private def unsignedJson(bitWidth: Int, raw: Long): Json = {
+    if (bitWidth == 64) {
+      Json.fromString(java.lang.Long.toUnsignedString(raw))
+    } else {
+      Json.fromLong(raw)
+    }
+  }
+
+  private def charJson(raw: Long): Json = {
+    val c = (raw & 0xffL).toChar
+    Json.fromString(c.toString)
+  }
+
+  private def primitiveJson(kind: IrPrimitive, bitWidth: Int, raw: Long): Json = {
+    kind match {
+      case IrPrimitive.Bool => Json.fromBoolean(raw != 0L)
+      case IrPrimitive.Char => charJson(raw)
+      case floating if isFloatingPrimitive(floating) =>
+        floatingJson(floating, raw)
+      case signed if isSignedPrimitive(signed) =>
+        signedJson(bitWidth, raw)
+      case _ =>
+        unsignedJson(bitWidth, raw)
+    }
+  }
+
+  private def primitiveToBitVector(bitWidth: Int): BitVector = {
+    BitVector.low(bitWidth.toLong)
+  }
+
+  private def primitiveCodec(kind: IrPrimitive, bitWidth: Int, endian: IrEndian): Codec[Json] =
+    bits(bitWidth.toLong).xmap[Json](
+      value => {
+        val normalized = if (needsEndian(kind)) applyEndianToBits(value, bitWidth, endian) else value
+        val raw = bitVectorToUnsignedLong(normalized)
+        primitiveJson(kind, bitWidth, raw)
+      },
+      _ => primitiveToBitVector(bitWidth)
+    )
 
   private def listBitWidth(
       member: IrMember,
@@ -233,12 +365,19 @@ object IrCompiler {
   private def bitsForPrimitive(kind: IrPrimitive, wordSize: Option[Int]): Option[Int] = {
     kind match {
       case IrPrimitive.Bool     => Some(1)
+      case IrPrimitive.Char     => Some(8)
       case IrPrimitive.U8       => Some(8)
       case IrPrimitive.S8       => Some(8)
       case IrPrimitive.U16      => Some(16)
       case IrPrimitive.S16      => Some(16)
       case IrPrimitive.U32      => Some(32)
       case IrPrimitive.S32      => Some(32)
+      case IrPrimitive.U64      => Some(64)
+      case IrPrimitive.S64      => Some(64)
+      case IrPrimitive.F8       => Some(8)
+      case IrPrimitive.F16      => Some(16)
+      case IrPrimitive.F32      => Some(32)
+      case IrPrimitive.F64      => Some(64)
       case IrPrimitive.LongWord => wordSize.orElse(Some(64))
     }
   }
@@ -251,26 +390,28 @@ object IrCompiler {
 
   private def compileJsonCodec(
       irType: Option[IrType],
+      endian: IrEndian,
       wordSize: Option[Int],
       errors: ListBuffer[String],
       context: String
   ): Option[Codec[Json]] = {
     irType.flatMap { tpe =>
-      compileJsonCodecForType(tpe, wordSize, errors, context)
+      compileJsonCodecForType(tpe, endian, wordSize, errors, context)
     }
   }
 
   private def compileJsonCodecForType(
       irType: IrType,
+      endian: IrEndian,
       wordSize: Option[Int],
       errors: ListBuffer[String],
       context: String
   ): Option[Codec[Json]] = {
     irType match {
       case struct: IrType.Struct =>
-        compileStructCodec(struct, wordSize, errors, context)
+        compileStructCodec(struct, endian, wordSize, errors, context)
       case IrType.Primitive(kind) =>
-        compilePrimitiveCodec(kind, wordSize)
+        compilePrimitiveCodec(kind, endian, wordSize)
       case _ =>
         errors += s"$context: Unable to derive decode codec for output type."
         None
@@ -281,6 +422,7 @@ object IrCompiler {
 
   private def compileStructCodec(
       struct: IrType.Struct,
+      endian: IrEndian,
       wordSize: Option[Int],
       errors: ListBuffer[String],
       context: String
@@ -288,7 +430,9 @@ object IrCompiler {
     val compiledMembers = struct.members.flatMap { member =>
       val memberType = memberReadType(member)
       val memberContext = s"$context.${member.name}"
-      val memberCodec = compileJsonCodecForType(memberType, wordSize, errors, memberContext)
+      val memberEndian = member.endianOverride.getOrElse(endian)
+      val memberCodec =
+        compileJsonCodecForType(memberType, memberEndian, wordSize, errors, memberContext)
       val memberWidth = memberBitWidth(member, wordSize, errors)
       (memberCodec, memberWidth) match {
         case (Some(codec), Some(width)) =>
@@ -357,41 +501,11 @@ object IrCompiler {
 
   private def compilePrimitiveCodec(
       kind: IrPrimitive,
-      wordSize: Option[Int]
-  ): Option[Codec[Json]] = {
-    kind match {
-      case IrPrimitive.Bool =>
-        Some(
-          bool.xmap[Json](value => Json.fromBoolean(value), _.asBoolean.getOrElse(false))
-        )
-      case IrPrimitive.S8 | IrPrimitive.S16 | IrPrimitive.S32 =>
-        primitiveSignedCodec(kind, wordSize)
-      case _ =>
-        primitiveUnsignedCodec(kind, wordSize)
-    }
-  }
-
-  private def primitiveUnsignedCodec(
-      kind: IrPrimitive,
+      endian: IrEndian,
       wordSize: Option[Int]
   ): Option[Codec[Json]] = {
     bitsForPrimitive(kind, wordSize).map { bitWidth =>
-      bits(bitWidth.toLong).xmap[Json](
-        value => Json.fromLong(bitVectorToUnsignedLong(value)),
-        _ => BitVector.low(bitWidth.toLong)
-      )
-    }
-  }
-
-  private def primitiveSignedCodec(
-      kind: IrPrimitive,
-      wordSize: Option[Int]
-  ): Option[Codec[Json]] = {
-    bitsForPrimitive(kind, wordSize).map { bitWidth =>
-      bits(bitWidth.toLong).xmap[Json](
-        value => Json.fromLong(signExtend(bitVectorToUnsignedLong(value), bitWidth)),
-        _ => BitVector.low(bitWidth.toLong)
-      )
+      primitiveCodec(kind, bitWidth, endian)
     }
   }
 

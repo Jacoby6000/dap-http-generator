@@ -2,9 +2,6 @@ $version: "2"
 
 namespace com.jacoby6000.daphttp
 
-use smithy.api#default
-use smithy.api#required
-
 @trait(selector: ":is(structure)")
 structure dapStruct {}
 
@@ -42,15 +39,6 @@ enum endian {
 integer wordSize
 
 @trait(selector: ":is(member)")
-structure cString {
-    @required
-    bytes: Integer
-
-    @default("ASCII")
-    encoding: String
-}
-
-@trait(selector: ":is(member)")
 structure u8 {}
 
 @trait(selector: ":is(member)")
@@ -67,6 +55,27 @@ structure u32 {}
 
 @trait(selector: ":is(member)")
 structure s32 {}
+
+@trait(selector: ":is(member)")
+structure u64 {}
+
+@trait(selector: ":is(member)")
+structure s64 {}
+
+@trait(selector: ":is(member)")
+structure f8 {}
+
+@trait(selector: ":is(member)")
+structure f16 {}
+
+@trait(selector: ":is(member)")
+structure f32 {}
+
+@trait(selector: ":is(member)")
+structure f64 {}
+
+@trait(selector: ":is(member)")
+structure char {}
 
 list Bytes {
     member: Byte

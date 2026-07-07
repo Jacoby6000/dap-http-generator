@@ -2,18 +2,29 @@ package io.github.jacoby6000.daphttp
 
 import software.amazon.smithy.model.shapes.ShapeId
 
-final case class IrService(name: String, wordSizeBits: Option[Int], operations: List[IrOperation])
+sealed trait IrEndian
+object IrEndian {
+  case object Big extends IrEndian
+  case object Little extends IrEndian
+}
+
+final case class IrService(
+    name: String,
+    wordSizeBits: Option[Int],
+    defaultEndian: IrEndian,
+    operations: List[IrOperation]
+)
 final case class IrOperation(name: String, routePath: String, output: IrType.Struct)
 final case class IrMember(
     id: ShapeId,
     name: String,
     target: IrType,
     staticAddress: Option[Long],
-    cStringBytes: Option[Int],
     paddingRepeats: Option[Int],
     isPointer: Boolean,
     isArray: Boolean,
     arrayLength: Option[Int],
+    endianOverride: Option[IrEndian],
     primitiveOverride: Option[IrPrimitive]
 )
 
@@ -25,6 +36,13 @@ object IrPrimitive {
   case object S16 extends IrPrimitive
   case object U32 extends IrPrimitive
   case object S32 extends IrPrimitive
+  case object U64 extends IrPrimitive
+  case object S64 extends IrPrimitive
+  case object F8 extends IrPrimitive
+  case object F16 extends IrPrimitive
+  case object F32 extends IrPrimitive
+  case object F64 extends IrPrimitive
+  case object Char extends IrPrimitive
   case object Bool extends IrPrimitive
   case object LongWord extends IrPrimitive
 }

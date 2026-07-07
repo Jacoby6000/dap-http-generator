@@ -8,7 +8,9 @@ final case class ReadPlan(
     address: Long,
     sizeBytes: Int,
     decodeType: Option[IrType],
+    endian: IrEndian,
     wordSizeBits: Option[Int],
-    decodeCodec: Option[Codec[Json]]
+    decodeCodec: Option[Codec[Json]],
+    cStringPointer: Boolean
 )
 final case class RoutePlan(path: String, reads: List[ReadPlan])

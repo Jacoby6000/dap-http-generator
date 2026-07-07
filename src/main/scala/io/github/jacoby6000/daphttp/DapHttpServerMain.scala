@@ -116,10 +116,13 @@ object DapHttpServerMain extends IOApp {
                     for {
                       acc <- accIO
                       read <- dapClient.readMemory(readPlan.address, readPlan.sizeBytes)
+                      decoded <- read match {
+                        case Right(data) => decodeReadResult(readPlan, data, dapClient)
+                        case Left(_)     => IO.pure(Json.Null)
+                      }
                     } yield {
                       val readJson = read match {
                         case Right(data) =>
-                          val decoded = decodeReadResult(readPlan, data)
                           Json.obj(
                             "path" -> Json.fromString(readPlan.path),
                             "address" -> Json.fromString(f"0x${readPlan.address}%x"),
@@ -191,13 +194,61 @@ object DapHttpServerMain extends IOApp {
     IrExtractor.buildIrFromModel(model).flatMap(IrCompiler.compileRoutePlansFromIr)
   }
 
-  private def decodeReadResult(readPlan: ReadPlan, base64Data: String): Json = {
-    readPlan.decodeCodec match {
-      case None        => Json.Null
-      case Some(codec) =>
-        Try(Base64.getDecoder.decode(base64Data)).toOption
-          .flatMap(bytes => codec.decode(BitVector(bytes)).toOption.map(_.value))
-          .getOrElse(Json.Null)
+  private def decodeReadResult(readPlan: ReadPlan, base64Data: String, dapClient: DapClient): IO[Json] = {
+    if (readPlan.cStringPointer) {
+      decodeCStringPointer(readPlan, base64Data, dapClient)
+    } else {
+      IO.pure {
+        readPlan.decodeCodec match {
+          case None        => Json.Null
+          case Some(codec) =>
+            Try(Base64.getDecoder.decode(base64Data)).toOption
+              .flatMap(bytes => codec.decode(BitVector(bytes)).toOption.map(_.value))
+              .getOrElse(Json.Null)
+        }
+      }
+    }
+  }
+
+  private def pointerValue(bytes: Array[Byte], endian: IrEndian): Long = {
+    val ordered = endian match {
+      case IrEndian.Big    => bytes
+      case IrEndian.Little => bytes.reverse
+    }
+    ordered.foldLeft(0L) { (acc, byte) =>
+      (acc << 8) | (byte.toLong & 0xffL)
+    }
+  }
+
+  private def decodeCStringPointer(
+      readPlan: ReadPlan,
+      base64Data: String,
+      dapClient: DapClient
+  ): IO[Json] = {
+    val pointer = Try(Base64.getDecoder.decode(base64Data)).toOption.map(bytes =>
+      pointerValue(bytes, readPlan.endian)
+    )
+    pointer match {
+      case None => IO.pure(Json.Null)
+      case Some(address) =>
+        def readChars(currentAddress: Long, acc: Vector[Byte]): IO[Vector[Byte]] =
+          dapClient.readMemory(currentAddress, 1).flatMap {
+            case Right(data) =>
+              Try(Base64.getDecoder.decode(data)).toOption match {
+                case Some(bytes) if bytes.nonEmpty && bytes.head != 0 =>
+                  readChars(currentAddress + 1, acc :+ bytes.head)
+                case Some(_) =>
+                  IO.pure(acc)
+                case None =>
+                  IO.pure(acc)
+              }
+            case Left(_) =>
+              IO.pure(acc)
+          }
+
+        readChars(address, Vector.empty).map(bytes =>
+          Json.fromString(new String(bytes.toArray, StandardCharsets.US_ASCII))
+        )
     }
   }
 

@@ -21,8 +21,8 @@ Traits are defined in `src/main/smithy/dap-http-traits.smithy`:
 - `@staticAddress(<address>)` marks the debugger memory address used for members inside non-`@dapStruct` shapes.
 - `@endian("big" | "little")` sets default service/member byte order (member overrides service default).
 - `@wordSize(<n>)` is required on services and sets pointer/`Long` bit width.
-- `@cString(bytes: <n>, encoding: <name>)` marks fixed-size C-style string members; encoding defaults to `ASCII`.
-- Numeric member traits: `@u8`, `@s8`, `@u16`, `@s16`, `@u32`, `@s32`.
+- Model C strings as `@pointer` members targeting `@char`; decoding follows the pointer and reads ASCII bytes until a null terminator.
+- Numeric member traits: `@u8`, `@s8`, `@u16`, `@s16`, `@u32`, `@s32`, `@u64`, `@s64`, `@f8`, `@f16`, `@f32`, `@f64`, `@char`.
 - Convenience list types: `Bytes` (`list<Byte>`) and `Bits` (`list<Boolean>`).
 
 ### Runtime behavior

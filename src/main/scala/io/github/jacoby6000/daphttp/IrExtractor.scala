@@ -27,7 +27,7 @@ object IrExtractor {
   private val PointerTrait = ShapeId.from("com.jacoby6000.daphttp#pointer")
   private val ArrayTrait = ShapeId.from("com.jacoby6000.daphttp#array")
   private val LengthTrait = ShapeId.from("com.jacoby6000.daphttp#length")
-  private val CStringTrait = ShapeId.from("com.jacoby6000.daphttp#cString")
+  private val EndianTrait = ShapeId.from("com.jacoby6000.daphttp#endian")
   private val WordSizeTrait = ShapeId.from("com.jacoby6000.daphttp#wordSize")
   private val StaticAddressTrait = ShapeId.from("com.jacoby6000.daphttp#staticAddress")
   sealed trait PrimitiveTrait {
@@ -59,8 +59,36 @@ object IrExtractor {
       override val traitId: ShapeId = ShapeId.from("com.jacoby6000.daphttp#s32")
       override val primitive: IrPrimitive = IrPrimitive.S32
     }
+    case object U64 extends PrimitiveTrait {
+      override val traitId: ShapeId = ShapeId.from("com.jacoby6000.daphttp#u64")
+      override val primitive: IrPrimitive = IrPrimitive.U64
+    }
+    case object S64 extends PrimitiveTrait {
+      override val traitId: ShapeId = ShapeId.from("com.jacoby6000.daphttp#s64")
+      override val primitive: IrPrimitive = IrPrimitive.S64
+    }
+    case object F8 extends PrimitiveTrait {
+      override val traitId: ShapeId = ShapeId.from("com.jacoby6000.daphttp#f8")
+      override val primitive: IrPrimitive = IrPrimitive.F8
+    }
+    case object F16 extends PrimitiveTrait {
+      override val traitId: ShapeId = ShapeId.from("com.jacoby6000.daphttp#f16")
+      override val primitive: IrPrimitive = IrPrimitive.F16
+    }
+    case object F32 extends PrimitiveTrait {
+      override val traitId: ShapeId = ShapeId.from("com.jacoby6000.daphttp#f32")
+      override val primitive: IrPrimitive = IrPrimitive.F32
+    }
+    case object F64 extends PrimitiveTrait {
+      override val traitId: ShapeId = ShapeId.from("com.jacoby6000.daphttp#f64")
+      override val primitive: IrPrimitive = IrPrimitive.F64
+    }
+    case object Char extends PrimitiveTrait {
+      override val traitId: ShapeId = ShapeId.from("com.jacoby6000.daphttp#char")
+      override val primitive: IrPrimitive = IrPrimitive.Char
+    }
 
-    val All: List[PrimitiveTrait] = List(U8, S8, U16, S16, U32, S32)
+    val All: List[PrimitiveTrait] = List(U8, S8, U16, S16, U32, S32, U64, S64, F8, F16, F32, F64, Char)
     val PrimitiveByTraitId: Map[ShapeId, IrPrimitive] = All.map(t => t.traitId -> t.primitive).toMap
   }
   private val BytesShape = ShapeId.from("com.jacoby6000.daphttp#Bytes")
@@ -145,6 +173,7 @@ object IrExtractor {
       if (wordSize.isEmpty) {
         errors += s"${service.getId}: Services must declare @wordSize."
       }
+      val defaultEndian = endianValue(service, EndianTrait).getOrElse(IrEndian.Big)
       val operations = service.getOperations.asScala.toList.flatMap { operationId =>
         val operation = model.expectShape(operationId, classOf[OperationShape])
         operation.getOutput.toScala.flatMap { outputId =>
@@ -158,7 +187,7 @@ object IrExtractor {
           }
         }
       }
-      IrService(service.getId.getName, wordSize, operations)
+      IrService(service.getId.getName, wordSize, defaultEndian, operations)
     }
 
     if (errors.nonEmpty) Left(errors.toList.distinct) else Right(irServices)
@@ -170,11 +199,11 @@ object IrExtractor {
       name = member.getMemberName,
       target = target,
       staticAddress = staticAddress(member),
-      cStringBytes = cStringBytes(member),
       paddingRepeats = intTraitValue(member, PaddingTrait),
       isPointer = member.hasTrait(PointerTrait),
       isArray = member.hasTrait(ArrayTrait),
       arrayLength = intTraitValue(member, LengthTrait),
+      endianOverride = endianValue(member, EndianTrait),
       primitiveOverride = memberPrimitiveOverride(member)
     )
 
@@ -185,6 +214,8 @@ object IrExtractor {
       case ShapeType.SHORT   => Some(IrPrimitive.S16)
       case ShapeType.INTEGER => Some(IrPrimitive.S32)
       case ShapeType.LONG    => Some(IrPrimitive.LongWord)
+      case ShapeType.FLOAT   => Some(IrPrimitive.F32)
+      case ShapeType.DOUBLE  => Some(IrPrimitive.F64)
       case _                 => None
     }
   }
@@ -195,13 +226,15 @@ object IrExtractor {
     })
   }
 
-  private def cStringBytes(member: MemberShape): Option[Int] = {
-    member.findTrait(CStringTrait).toScala.flatMap { rawTrait =>
+  private def endianValue(shape: Shape, traitId: ShapeId): Option[IrEndian] = {
+    shape.findTrait(traitId).toScala.flatMap { rawTrait =>
       val node = rawTrait.toNode
-      if (node.isNumberNode) {
-        Some(node.expectNumberNode.getValue.intValue())
-      } else if (node.isObjectNode) {
-        Some(node.expectObjectNode.expectNumberMember("bytes").getValue.intValue())
+      if (node.isStringNode) {
+        node.expectStringNode.getValue.toLowerCase match {
+          case "big"    => Some(IrEndian.Big)
+          case "little" => Some(IrEndian.Little)
+          case _        => None
+        }
       } else {
         None
       }
