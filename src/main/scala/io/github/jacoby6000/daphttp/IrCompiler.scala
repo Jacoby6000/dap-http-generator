@@ -219,8 +219,8 @@ object IrCompiler {
 
   private def isSignedPrimitive(kind: IrPrimitive): Boolean = {
     kind match {
-      case IrPrimitive.S8 | IrPrimitive.S16 | IrPrimitive.S32 | IrPrimitive.S64 |
-          IrPrimitive.S128 | IrPrimitive.LongWord =>
+      case IrPrimitive.S8 | IrPrimitive.S16 | IrPrimitive.S32 | IrPrimitive.S64 | IrPrimitive.S128 |
+          IrPrimitive.LongWord =>
         true
       case _ => false
     }

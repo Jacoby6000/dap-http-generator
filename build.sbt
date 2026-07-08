@@ -19,6 +19,7 @@ ThisBuild / scalacOptions ++= Seq(
 )
 
 lazy val smithyVersion = "1.72.0"
+lazy val declineVersion = "2.4.1"
 
 lazy val root = (project in file("."))
   .settings(
@@ -35,9 +36,11 @@ lazy val root = (project in file("."))
       "io.joern" % "eclipse-cdt-core" % "8.4.0.202401242025_1",
       "org.eclipse.platform" % "org.eclipse.core.runtime" % "3.33.100",
       "org.eclipse.platform" % "org.eclipse.core.resources" % "3.22.200",
+      "com.monovore" %% "decline" % declineVersion,
+      "com.monovore" %% "decline-effect" % declineVersion,
       "org.scalatest" %% "scalatest" % "3.2.20" % Test
     ),
-    Compile / mainClass := Some("io.github.jacoby6000.daphttp.DapHttpServerMain"),
+    Compile / mainClass := Some("io.github.jacoby6000.daphttp.Cli"),
     Test / fork := true
   )
 
