@@ -16,7 +16,7 @@ import scala.jdk.CollectionConverters._
 import scala.util.control.NonFatal
 
 object CHeaderParser {
-  def parse(headerSource: String): List[CStruct] = {
+  def parse(headerSource: String): List[(String, IASTCompositeTypeSpecifier)] = {
     val source = stripComments(headerSource)
     try {
       val translationUnit = GCCLanguage.getDefault.getASTTranslationUnit(
@@ -34,7 +34,9 @@ object CHeaderParser {
     }
   }
 
-  private def extractStruct(declaration: IASTDeclaration): Option[CStruct] = {
+  private def extractStruct(
+      declaration: IASTDeclaration
+  ): Option[(String, IASTCompositeTypeSpecifier)] = {
     declaration match {
       case simple: IASTSimpleDeclaration =>
         simple.getDeclSpecifier match {
@@ -45,7 +47,7 @@ object CHeaderParser {
                 .map(extractDeclaratorName)
                 .find(_.nonEmpty)
                 .orElse(Option(composite.getName).map(_.toString.trim).filter(_.nonEmpty))
-            structName.map(name => CStruct(name, extractFields(composite)))
+            structName.map(name => name -> composite)
           case _ =>
             None
         }
@@ -54,30 +56,22 @@ object CHeaderParser {
     }
   }
 
-  private def extractFields(composite: IASTCompositeTypeSpecifier): List[CField] = {
+  def extractFields(composite: IASTCompositeTypeSpecifier): List[(String, IASTDeclarator)] = {
     composite.getMembers.toList.flatMap {
       case member: IASTSimpleDeclaration =>
         val baseType = normalizeTypeName(member.getDeclSpecifier.getRawSignature)
         member.getDeclarators.toList.flatMap { declarator =>
-          val fieldName = extractDeclaratorName(declarator)
-          Option.when(fieldName.nonEmpty) {
-            CField(
-              typeName = baseType,
-              name = fieldName,
-              pointerDepth = pointerDepth(declarator),
-              arrayLength = arrayLength(declarator)
-            )
-          }
+          Option.when(extractDeclaratorName(declarator).nonEmpty)(baseType -> declarator)
         }
       case _ => Nil
     }
   }
 
-  private def pointerDepth(declarator: IASTDeclarator): Int = {
+  def pointerDepth(declarator: IASTDeclarator): Int = {
     declaratorChain(declarator).map(_.getPointerOperators.length).sum
   }
 
-  private def arrayLength(declarator: IASTDeclarator): Option[Int] = {
+  def arrayLength(declarator: IASTDeclarator): Option[Int] = {
     declaratorChain(declarator).collectFirst(Function.unlift {
       case arrayDeclarator: IASTArrayDeclarator =>
         arrayDeclarator.getArrayModifiers.toList.collectFirst(Function.unlift { modifier =>
@@ -98,6 +92,10 @@ object CHeaderParser {
       .toList
   }
 
+  def fieldName(declarator: IASTDeclarator): String = {
+    extractDeclaratorName(declarator)
+  }
+
   private def extractDeclaratorName(declarator: IASTDeclarator): String = {
     declaratorChain(declarator).lastOption
       .flatMap(d => Option(d.getName))
@@ -105,7 +103,7 @@ object CHeaderParser {
       .getOrElse("")
   }
 
-  private def normalizeTypeName(raw: String): String = {
+  def normalizeTypeName(raw: String): String = {
     raw.trim
       .stripPrefix("const ")
       .stripPrefix("struct ")

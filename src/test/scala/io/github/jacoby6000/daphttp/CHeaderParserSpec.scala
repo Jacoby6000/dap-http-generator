@@ -24,14 +24,35 @@ class CHeaderParserSpec extends AnyFunSuite {
 
     val structs = CHeaderParser.parse(source)
 
-    assert(structs.map(_.name) == List("Vec3f", "PlayerState"))
-    assert(structs.head.fields.map(_.name) == List("x", "y", "z"))
+    assert(structs.map(_._1) == List("Vec3f", "PlayerState"))
+    assert(
+      CHeaderParser
+        .extractFields(structs.head._2)
+        .map { case (_, declarator) => CHeaderParser.fieldName(declarator) } == List("x", "y", "z")
+    )
 
-    val playerStateFields = structs(1).fields
-    assert(playerStateFields.find(_.name == "buffer").exists(_.pointerDepth == 1))
-    assert(playerStateFields.find(_.name == "table").exists(_.pointerDepth == 2))
-    assert(playerStateFields.find(_.name == "history").flatMap(_.arrayLength).contains(4))
-    assert(playerStateFields.find(_.name == "score").exists(_.typeName == "u128"))
+    val playerStateFields = CHeaderParser.extractFields(structs(1)._2)
+    assert(
+      playerStateFields
+        .find { case (_, declarator) => CHeaderParser.fieldName(declarator) == "buffer" }
+        .exists { case (_, declarator) => CHeaderParser.pointerDepth(declarator) == 1 }
+    )
+    assert(
+      playerStateFields
+        .find { case (_, declarator) => CHeaderParser.fieldName(declarator) == "table" }
+        .exists { case (_, declarator) => CHeaderParser.pointerDepth(declarator) == 2 }
+    )
+    assert(
+      playerStateFields
+        .find { case (_, declarator) => CHeaderParser.fieldName(declarator) == "history" }
+        .flatMap { case (_, declarator) => CHeaderParser.arrayLength(declarator) }
+        .contains(4)
+    )
+    assert(
+      playerStateFields
+        .find { case (_, declarator) => CHeaderParser.fieldName(declarator) == "score" }
+        .exists { case (fieldType, _) => fieldType == "u128" }
+    )
   }
 
   test("parses doldecomp fixture structs") {
@@ -39,10 +60,14 @@ class CHeaderParserSpec extends AnyFunSuite {
       .fromFile("src/test/resources/doldecomp-fixture/include/player_state.h")
       .mkString
     val structs = CHeaderParser.parse(source)
-    val playerState = structs.find(_.name == "PlayerState").get
+    val playerState = structs.find(_._1 == "PlayerState").get
 
     assert(
-      playerState.fields.map(field => field.name -> field.typeName) == List(
+      CHeaderParser
+        .extractFields(playerState._2)
+        .map { case (fieldType, declarator) =>
+          CHeaderParser.fieldName(declarator) -> fieldType
+        } == List(
         "health" -> "u32",
         "score" -> "u128",
         "position" -> "Vec3f"

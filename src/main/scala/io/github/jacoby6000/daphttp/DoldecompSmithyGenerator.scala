@@ -1,5 +1,8 @@
 package io.github.jacoby6000.daphttp
 
+import org.eclipse.cdt.core.dom.ast.IASTCompositeTypeSpecifier
+import org.eclipse.cdt.core.dom.ast.IASTDeclarator
+
 import java.nio.file.Files
 import java.nio.file.Path
 import scala.jdk.CollectionConverters._
@@ -57,15 +60,12 @@ object DoldecompSmithyGenerator {
     }
   }
 
-  private def loadStructs(headerRoots: List[Path]): Map[String, CStruct] = {
+  private def loadStructs(headerRoots: List[Path]): Map[String, IASTCompositeTypeSpecifier] = {
     val headerFiles = headerRoots.flatMap(collectHeaderFiles).distinct
-    headerFiles
-      .flatMap { path =>
-        val source = new String(Files.readAllBytes(path))
-        CHeaderParser.parse(source)
-      }
-      .map(struct => struct.name -> struct)
-      .toMap
+    headerFiles.flatMap { path =>
+      val source = new String(Files.readAllBytes(path))
+      CHeaderParser.parse(source)
+    }.toMap
   }
 
   private def collectHeaderFiles(root: Path): List[Path] = {
@@ -94,7 +94,7 @@ object DoldecompSmithyGenerator {
       serviceName: String,
       wordSizeBits: Int,
       operations: List[OperationModel],
-      headerStructs: Map[String, CStruct]
+      headerStructs: Map[String, IASTCompositeTypeSpecifier]
   ): String = {
     val usedTraits =
       scala.collection.mutable.LinkedHashSet("dapStruct", "staticAddress", "wordSize")
@@ -114,17 +114,19 @@ object DoldecompSmithyGenerator {
     }
 
     val structBlocks = reachableStructs.map { struct =>
-      val members = struct.fields.flatMap { field =>
-        toMemberLines(
-          struct.name,
-          field,
-          reachableStructs.map(_.name).toSet,
-          listAliases,
-          usedTraits
-        )
-      }
+      val members =
+        CHeaderParser.extractFields(struct._2).flatMap { case (fieldTypeName, declarator) =>
+          toMemberLines(
+            struct._1,
+            fieldTypeName,
+            declarator,
+            reachableStructs.map(_._1).toSet,
+            listAliases,
+            usedTraits
+          )
+        }
       s"""@dapStruct
-         |structure ${struct.name} {
+         |structure ${struct._1} {
          |${members.mkString("\n")}
          |}""".stripMargin
     }
@@ -156,16 +158,16 @@ object DoldecompSmithyGenerator {
 
   private def collectReachableStructs(
       operations: List[OperationModel],
-      headerStructs: Map[String, CStruct]
-  ): List[CStruct] = {
+      headerStructs: Map[String, IASTCompositeTypeSpecifier]
+  ): List[(String, IASTCompositeTypeSpecifier)] = {
     val visited = scala.collection.mutable.LinkedHashSet.empty[String]
 
     def visit(structName: String): Unit = {
       if (!visited.contains(structName)) {
         visited += structName
         headerStructs.get(structName).foreach { struct =>
-          struct.fields.foreach { field =>
-            val normalized = normalizeTypeName(field.typeName)
+          CHeaderParser.extractFields(struct).foreach { case (fieldTypeName, _) =>
+            val normalized = normalizeTypeName(fieldTypeName)
             if (headerStructs.contains(normalized)) {
               visit(normalized)
             }
@@ -175,18 +177,22 @@ object DoldecompSmithyGenerator {
     }
 
     operations.foreach(operation => visit(operation.rootStructName))
-    visited.toList.flatMap(headerStructs.get)
+    visited.toList.flatMap(name => headerStructs.get(name).map(name -> _))
   }
 
   private def toMemberLines(
       structName: String,
-      field: CField,
+      fieldTypeName: String,
+      declarator: IASTDeclarator,
       knownStructs: Set[String],
       listAliases: scala.collection.mutable.LinkedHashSet[ListAlias],
       usedTraits: scala.collection.mutable.LinkedHashSet[String]
   ): List[String] = {
-    val normalizedType = normalizeTypeName(field.typeName)
-    val memberName = toCamelCase(field.name)
+    val normalizedType = normalizeTypeName(fieldTypeName)
+    val fieldName = CHeaderParser.fieldName(declarator)
+    val memberName = toCamelCase(fieldName)
+    val isPointer = CHeaderParser.pointerDepth(declarator) > 0
+    val arrayLength = CHeaderParser.arrayLength(declarator)
     if (knownStructs.contains(normalizedType)) {
       List(s"    $memberName: $normalizedType")
     } else {
@@ -197,14 +203,14 @@ object DoldecompSmithyGenerator {
             usedTraits += traitName
             traitAnnotations += s"    @$traitName"
           }
-          if (field.isPointer) {
+          if (isPointer) {
             usedTraits += "pointer"
             traitAnnotations += "    @pointer"
           }
 
-          field.arrayLength match {
+          arrayLength match {
             case Some(length) =>
-              val aliasName = s"${structName}${toPascalCase(field.name)}Array"
+              val aliasName = s"${structName}${toPascalCase(fieldName)}Array"
               listAliases += ListAlias(aliasName, primitive.target)
               usedTraits += "array"
               usedTraits += "length"

@@ -1,5 +1,7 @@
 package io.github.jacoby6000.daphttp
 
+import org.eclipse.cdt.core.dom.ast.IASTCompositeTypeSpecifier
+import org.eclipse.cdt.core.dom.ast.IASTDeclarator
 import software.amazon.smithy.model.shapes.ShapeId
 
 import java.nio.file.Files
@@ -56,7 +58,7 @@ object DoldecompIrGenerator {
         Left(errors.toList)
       } else {
         val reachableStructs = collectReachableStructs(operations, headerStructs)
-        val reachableByName = reachableStructs.map(struct => struct.name -> struct).toMap
+        val reachableByName = reachableStructs.toMap
         val builtStructs = mutable.Map.empty[String, IrType.MemoryMappedStruct]
 
         def buildStruct(name: String): IrType.MemoryMappedStruct = {
@@ -64,9 +66,17 @@ object DoldecompIrGenerator {
             name,
             IrType.MemoryMappedStruct(
               id = ShapeId.from(s"$namespace#$name"),
-              members = reachableByName(name).fields.map(field =>
-                toIrMember(namespace, name, field, reachableByName, buildStruct)
-              ),
+              members = CHeaderParser.extractFields(reachableByName(name)).map {
+                case (fieldTypeName, declarator) =>
+                  toIrMember(
+                    namespace = namespace,
+                    structName = name,
+                    fieldTypeName = fieldTypeName,
+                    fieldDeclarator = declarator,
+                    reachableStructs = reachableByName,
+                    buildStruct = buildStruct
+                  )
+              },
               declaredSizeBits = None
             )
           )
@@ -118,22 +128,26 @@ object DoldecompIrGenerator {
   private def toIrMember(
       namespace: String,
       structName: String,
-      field: CField,
-      reachableStructs: Map[String, CStruct],
+      fieldTypeName: String,
+      fieldDeclarator: IASTDeclarator,
+      reachableStructs: Map[String, IASTCompositeTypeSpecifier],
       buildStruct: String => IrType.MemoryMappedStruct
   ): IrMember = {
-    val normalizedType = normalizeTypeName(field.typeName)
-    val memberName = toCamelCase(field.name)
+    val normalizedType = CHeaderParser.normalizeTypeName(fieldTypeName).replaceAll("\\s+", "")
+    val fieldName = CHeaderParser.fieldName(fieldDeclarator)
+    val memberName = toCamelCase(fieldName)
     val memberId = ShapeId.from(s"$namespace#$structName$$$memberName")
+    val isPointer = CHeaderParser.pointerDepth(fieldDeclarator) > 0
+    val arrayLength = CHeaderParser.arrayLength(fieldDeclarator)
 
-    val resolvedTarget = if (field.isPointer) {
+    val resolvedTarget = if (isPointer) {
       IrType.Primitive(IrPrimitive.LongWord)
     } else {
-      field.arrayLength match {
+      arrayLength match {
         case Some(_) =>
           val elementType = typeForName(normalizedType, reachableStructs, buildStruct)
           IrType.ListType(
-            id = ShapeId.from(s"$namespace#${structName}${toPascalCase(field.name)}Array"),
+            id = ShapeId.from(s"$namespace#${structName}${toPascalCase(fieldName)}Array"),
             element = elementType,
             bytesAlias = false,
             bitsAlias = false
@@ -149,9 +163,9 @@ object DoldecompIrGenerator {
       target = resolvedTarget,
       staticAddress = None,
       paddingRepeats = None,
-      isPointer = field.isPointer,
-      isArray = field.arrayLength.nonEmpty,
-      arrayLength = field.arrayLength,
+      isPointer = isPointer,
+      isArray = arrayLength.nonEmpty,
+      arrayLength = arrayLength,
       endianOverride = None,
       primitiveOverride = None
     )
@@ -159,7 +173,7 @@ object DoldecompIrGenerator {
 
   private def typeForName(
       normalizedType: String,
-      reachableStructs: Map[String, CStruct],
+      reachableStructs: Map[String, IASTCompositeTypeSpecifier],
       buildStruct: String => IrType.MemoryMappedStruct
   ): IrType = {
     if (reachableStructs.contains(normalizedType)) {
@@ -170,7 +184,7 @@ object DoldecompIrGenerator {
   }
 
   private def primitiveForType(typeName: String): Option[IrPrimitive] = {
-    val normalized = normalizeTypeName(typeName)
+    val normalized = CHeaderParser.normalizeTypeName(typeName).replaceAll("\\s+", "")
     normalized match {
       case "u8"    => Some(IrPrimitive.U8)
       case "s8"    => Some(IrPrimitive.S8)
@@ -194,15 +208,12 @@ object DoldecompIrGenerator {
     }
   }
 
-  private def loadStructs(headerRoots: List[Path]): Map[String, CStruct] = {
+  private def loadStructs(headerRoots: List[Path]): Map[String, IASTCompositeTypeSpecifier] = {
     val headerFiles = headerRoots.flatMap(collectHeaderFiles).distinct
-    headerFiles
-      .flatMap { path =>
-        val source = new String(Files.readAllBytes(path))
-        CHeaderParser.parse(source)
-      }
-      .map(struct => struct.name -> struct)
-      .toMap
+    headerFiles.flatMap { path =>
+      val source = new String(Files.readAllBytes(path))
+      CHeaderParser.parse(source)
+    }.toMap
   }
 
   private def collectHeaderFiles(root: Path): List[Path] = {
@@ -228,17 +239,17 @@ object DoldecompIrGenerator {
 
   private def collectReachableStructs(
       operations: List[OperationModel],
-      headerStructs: Map[String, CStruct]
-  ): List[CStruct] = {
+      headerStructs: Map[String, IASTCompositeTypeSpecifier]
+  ): List[(String, IASTCompositeTypeSpecifier)] = {
     val visited = mutable.LinkedHashSet.empty[String]
 
     def visit(structName: String): Unit = {
       if (!visited.contains(structName)) {
         visited += structName
         headerStructs.get(structName).foreach { struct =>
-          struct.fields.foreach { field =>
-            if (!field.isPointer) {
-              val normalized = normalizeTypeName(field.typeName)
+          CHeaderParser.extractFields(struct).foreach { case (fieldTypeName, declarator) =>
+            if (CHeaderParser.pointerDepth(declarator) == 0) {
+              val normalized = CHeaderParser.normalizeTypeName(fieldTypeName).replaceAll("\\s+", "")
               if (headerStructs.contains(normalized)) {
                 visit(normalized)
               }
@@ -249,14 +260,7 @@ object DoldecompIrGenerator {
     }
 
     operations.foreach(operation => visit(operation.rootStructName))
-    visited.toList.flatMap(headerStructs.get)
-  }
-
-  private def normalizeTypeName(value: String): String = {
-    value.trim
-      .stripPrefix("const ")
-      .stripPrefix("struct ")
-      .replaceAll("\\s+", "")
+    visited.toList.flatMap(name => headerStructs.get(name).map(name -> _))
   }
 
   private def toPascalCase(value: String): String =
