@@ -90,33 +90,75 @@ object DoldecompIrGenerator {
         def buildStruct(name: String): IrType.MemoryMappedStruct = {
           builtStructs.getOrElseUpdate(
             name,
-            IrType.MemoryMappedStruct(
-              id = ShapeId.from(s"$namespace#$name"),
-              members = CHeaderParser.extractFields(reachableByName(name)).map {
-                case (fieldTypeName, declarator) =>
-                  toIrMember(
-                    namespace = namespace,
-                    structName = name,
-                    fieldTypeName = fieldTypeName,
-                    fieldDeclarator = declarator,
-                    reachableStructs = reachableByName,
-                    buildStruct = buildStruct
-                  )
-              },
-              declaredSizeBits = None
-            )
+            reachableByName.get(name) match {
+              case None =>
+                throw new IllegalStateException(
+                  s"Missing struct definition for '$name' while building IR."
+                )
+              case Some(composite) =>
+                IrType.MemoryMappedStruct(
+                  id = ShapeId.from(s"$namespace#$name"),
+                  members =
+                    CHeaderParser.extractFields(composite).map { case (fieldTypeName, declarator) =>
+                      toIrMember(
+                        namespace = namespace,
+                        structName = name,
+                        fieldTypeName = fieldTypeName,
+                        fieldDeclarator = declarator,
+                        reachableStructs = reachableByName,
+                        buildStruct = buildStruct
+                      )
+                    },
+                  declaredSizeBits = None
+                )
+            }
           )
         }
 
+        def isStructType(typeName: String): Boolean = reachableByName.contains(typeName)
+
+        def rootElementIrType(typeName: String): IrType =
+          if (isStructType(typeName)) {
+            buildStruct(typeName)
+          } else {
+            IrType.Primitive(primitiveForType(typeName).getOrElse(IrPrimitive.LongWord))
+          }
+
+        def rootOutputIrType(operation: OperationModel): IrType =
+          if (operation.isArray) {
+            IrType.ListType(
+              id = ShapeId.from(s"$namespace#${operation.outputName}ValueArray"),
+              element = rootElementIrType(operation.rootTypeName),
+              bytesAlias = false,
+              bitsAlias = false
+            )
+          } else {
+            rootElementIrType(operation.rootTypeName)
+          }
+
+        def elementSizeBytesForRootType(typeName: String): Option[Int] =
+          if (isStructType(typeName)) {
+            Some(irStructSizeBytes(buildStruct(typeName), wordSizeBits))
+          } else {
+            primitiveForType(typeName).flatMap { kind =>
+              bitsForPrimitive(kind, Some(wordSizeBits))
+                .map(bits => math.ceil(bits.toDouble / 8d).toInt)
+            }
+          }
+
         val operationsWithArrayLengths = operations.flatMap { operation =>
           if (operation.isArray && operation.arrayLength.isEmpty) {
-            val elementStruct = buildStruct(operation.rootTypeName)
-            val elementSizeBytes = irStructSizeBytes(elementStruct, wordSizeBits)
-            inferArrayLength(operation.symbol, elementSizeBytes) match {
-              case Some(length) =>
-                Some(operation.copy(arrayLength = Some(length)))
+            elementSizeBytesForRootType(operation.rootTypeName) match {
+              case Some(elementSizeBytes) =>
+                inferArrayLength(operation.symbol, elementSizeBytes) match {
+                  case Some(length) =>
+                    Some(operation.copy(arrayLength = Some(length)))
+                  case None =>
+                    warnings += s"${operation.symbol.name}: Unable to infer array length for '${operation.rootTypeName}'."
+                    None
+                }
               case None =>
-                warnings += s"${operation.symbol.name}: Unable to infer array length for '${operation.rootTypeName}'."
+                warnings += s"${operation.symbol.name}: Unable to determine element size for '${operation.rootTypeName}'."
                 None
             }
           } else {
@@ -124,53 +166,51 @@ object DoldecompIrGenerator {
           }
         }
 
-        operationsWithArrayLengths.foreach(operation => buildStruct(operation.rootTypeName))
+        operationsWithArrayLengths.foreach { operation =>
+          if (isStructType(operation.rootTypeName)) {
+            buildStruct(operation.rootTypeName)
+          }
+        }
 
-        val irOperations = operationsWithArrayLengths.map { operation =>
-          val outputShapeId = ShapeId.from(s"$namespace#${operation.outputName}")
-          val rootTarget =
-            if (operation.isArray) {
-              IrType.ListType(
-                id = ShapeId.from(s"$namespace#${operation.outputName}ValueArray"),
-                element = buildStruct(operation.rootTypeName),
-                bytesAlias = false,
-                bitsAlias = false
-              )
-            } else if (headerStructs.contains(operation.rootTypeName)) {
-              buildStruct(operation.rootTypeName)
-            } else {
-              IrType.Primitive(
-                primitiveForType(operation.rootTypeName).getOrElse(IrPrimitive.LongWord)
-              )
-            }
-          val outputMember = IrMember(
-            id = ShapeId.from(s"$namespace#${operation.outputName}$$value"),
-            name = "value",
-            target = rootTarget,
-            staticAddress = Some(operation.symbol.address),
-            paddingRepeats = None,
-            isPointer = false,
-            isArray = operation.isArray,
-            arrayLength = operation.arrayLength,
-            endianOverride = None,
-            primitiveOverride =
-              if (operation.isArray || headerStructs.contains(operation.rootTypeName)) {
-                None
-              } else {
-                primitiveForType(operation.rootTypeName).filter(isExplicitSizedPrimitive)
-              },
-            readSizeBytes = operation.symbol.sizeBytes
-          )
-
-          IrOperation(
-            name = operation.operationName,
-            routePath = s"/$serviceName/${operation.operationName}",
-            output = IrType.EnclosingStruct(
-              id = outputShapeId,
-              members = List(outputMember),
-              declaredSizeBits = None
+        val irOperations = operationsWithArrayLengths.flatMap { operation =>
+          try {
+            val outputShapeId = ShapeId.from(s"$namespace#${operation.outputName}")
+            val rootTarget = rootOutputIrType(operation)
+            val outputMember = IrMember(
+              id = ShapeId.from(s"$namespace#${operation.outputName}$$value"),
+              name = "value",
+              target = rootTarget,
+              staticAddress = Some(operation.symbol.address),
+              paddingRepeats = None,
+              isPointer = false,
+              isArray = operation.isArray,
+              arrayLength = operation.arrayLength,
+              endianOverride = None,
+              primitiveOverride =
+                if (operation.isArray || isStructType(operation.rootTypeName)) {
+                  None
+                } else {
+                  primitiveForType(operation.rootTypeName).filter(isExplicitSizedPrimitive)
+                },
+              readSizeBytes = operation.symbol.sizeBytes
             )
-          )
+
+            Some(
+              IrOperation(
+                name = operation.operationName,
+                routePath = s"/$serviceName/${operation.operationName}",
+                output = IrType.EnclosingStruct(
+                  id = outputShapeId,
+                  members = List(outputMember),
+                  declaredSizeBits = None
+                )
+              )
+            )
+          } catch {
+            case ex: Exception =>
+              warnings += s"${operation.symbol.name}: ${ex.getMessage}"
+              None
+          }
         }
 
         IrGenerationResult(
@@ -462,7 +502,11 @@ object DoldecompIrGenerator {
       }
     }
 
-    operations.foreach(operation => visit(operation.rootTypeName))
+    operations.foreach { operation =>
+      if (headerStructs.contains(operation.rootTypeName)) {
+        visit(operation.rootTypeName)
+      }
+    }
     visited.toList.flatMap(name => headerStructs.get(name).map(name -> _))
   }
 

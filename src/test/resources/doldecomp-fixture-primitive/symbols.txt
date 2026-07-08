@@ -1,0 +1,1 @@
+intVar = .data:0x80454000; // type:object size:0x4 scope:global

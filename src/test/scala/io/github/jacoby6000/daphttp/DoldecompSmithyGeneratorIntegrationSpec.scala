@@ -201,4 +201,28 @@ class DoldecompSmithyGeneratorIntegrationSpec extends AnyFunSuite {
     assert(!plans.routes.contains("/MeleeApi/GetBadSymbol"))
     assert(plans.errors.isEmpty)
   }
+
+  test("generates IR for primitive globals without treating them as structs") {
+    val fixtureRoot = Paths.get("src/test/resources/doldecomp-fixture-primitive")
+    val generation = DoldecompIrGenerator
+      .generateFromPaths(
+        symbolsPath = fixtureRoot.resolve("symbols.txt"),
+        headerRoots = List(fixtureRoot),
+        namespace = "example.doldecomp.primitive",
+        serviceName = "MeleeApi",
+        wordSizeBits = 32
+      )
+      .toOption
+      .get
+
+    assert(generation.warnings.isEmpty)
+    assert(generation.services.head.operations.map(_.name) == List("GetIntVar"))
+
+    val valueMember = generation.services.head.operations.head.output.members.head
+    assert(valueMember.target == IrType.Primitive(IrPrimitive.S32))
+
+    val plans = HttpRouteIrEmitter.emitRoutePlansFromIr(generation.services)
+    assert(plans.routes.contains("/MeleeApi/GetIntVar"))
+    assert(plans.routes("/MeleeApi/GetIntVar").reads.head.sizeBytes == 4)
+  }
 }
