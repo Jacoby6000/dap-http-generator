@@ -115,7 +115,9 @@ class DoldecompSmithyGeneratorIntegrationSpec extends AnyFunSuite {
     assert(inventoryMember.isArray)
     assert(inventoryMember.arrayLength.contains(2))
     assert(
-      inventoryMember.target.asInstanceOf[IrType.ListType].element
+      inventoryMember.target
+        .asInstanceOf[IrType.ListType]
+        .element
         .asInstanceOf[IrType.Struct]
         .members
         .exists(_.name == "quantity")

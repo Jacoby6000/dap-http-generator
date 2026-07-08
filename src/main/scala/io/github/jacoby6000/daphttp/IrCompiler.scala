@@ -219,8 +219,8 @@ object IrCompiler {
 
   private def isSignedPrimitive(kind: IrPrimitive): Boolean = {
     kind match {
-      case IrPrimitive.S8 | IrPrimitive.S16 | IrPrimitive.S32 | IrPrimitive.S64 |
-          IrPrimitive.S128 | IrPrimitive.LongWord =>
+      case IrPrimitive.S8 | IrPrimitive.S16 | IrPrimitive.S32 | IrPrimitive.S64 | IrPrimitive.S128 |
+          IrPrimitive.LongWord =>
         true
       case _ => false
     }
@@ -289,7 +289,7 @@ object IrCompiler {
 
   private def signedJson(bitWidth: Int, raw: BigInt): Json = {
     val value = signExtend(raw, bitWidth)
-    if (bitWidth > 63) Json.fromString(value.toString) else Json.fromLong(value.longValue)
+    if (bitWidth > 64) Json.fromString(value.toString) else Json.fromLong(value.longValue)
   }
 
   private def unsignedJson(bitWidth: Int, raw: BigInt): Json = {
@@ -441,11 +441,10 @@ object IrCompiler {
       context: String
   ): Option[Codec[Json]] = {
     val compiledMembers = struct.members.flatMap { member =>
-      val memberType = memberReadType(member)
       val memberContext = s"$context.${member.name}"
       val memberEndian = member.endianOverride.getOrElse(endian)
       val memberCodec =
-        compileJsonCodecForType(memberType, memberEndian, wordSize, errors, memberContext)
+        compileMemberCodec(member, memberEndian, wordSize, errors, memberContext)
       val memberWidth = memberBitWidth(member, wordSize, errors)
       (memberCodec, memberWidth) match {
         case (Some(codec), Some(width)) =>
@@ -511,6 +510,76 @@ object IrCompiler {
       }
     }
   }
+
+  private def compileMemberCodec(
+      member: IrMember,
+      endian: IrEndian,
+      wordSize: Option[Int],
+      errors: ListBuffer[String],
+      context: String
+  ): Option[Codec[Json]] = {
+    member.target match {
+      case listType: IrType.ListType if member.isArray && !member.isPointer =>
+        compileArrayCodec(member, listType, endian, wordSize, errors, context)
+      case _ =>
+        compileJsonCodecForType(memberReadType(member), endian, wordSize, errors, context)
+    }
+  }
+
+  private def compileArrayCodec(
+      member: IrMember,
+      listType: IrType.ListType,
+      endian: IrEndian,
+      wordSize: Option[Int],
+      errors: ListBuffer[String],
+      context: String
+  ): Option[Codec[Json]] = {
+    val length = member.arrayLength.orElse {
+      errors += s"$context: Non-pointer arrays must declare @length."
+      None
+    }
+    val elementCodec = compileJsonCodecForType(listType.element, endian, wordSize, errors, context)
+    val elementWidth = listElementBitWidth(listType.element, wordSize).orElse {
+      errors += s"$context: Unable to determine array element width."
+      None
+    }
+    (length, elementCodec, elementWidth) match {
+      case (Some(count), Some(codec), Some(width)) => Some(arrayCodec(count, width, codec))
+      case _                                       => None
+    }
+  }
+
+  private def arrayCodec(count: Int, elementBits: Int, elementCodec: Codec[Json]): Codec[Json] =
+    new Codec[Json] {
+      private val totalBits = count.toLong * elementBits.toLong
+
+      override def sizeBound: SizeBound = SizeBound.exact(totalBits)
+
+      override def encode(value: Json): Attempt[BitVector] =
+        Attempt.failure(Err("Encoding is not supported for read-only DAP proxy codecs."))
+
+      override def decode(input: BitVector): Attempt[DecodeResult[Json]] = {
+        if (input.size < totalBits) {
+          Attempt.failure(
+            Err(
+              s"Insufficient bits for array decode. Needed $totalBits bits, got ${input.size} bits."
+            )
+          )
+        } else {
+          (0 until count)
+            .foldLeft(Attempt.successful((input, List.empty[Json]))) { (accAttempt, _) =>
+              accAttempt.flatMap { case (remainingBits, elements) =>
+                elementCodec.decode(remainingBits).map { decoded =>
+                  (decoded.remainder, elements :+ decoded.value)
+                }
+              }
+            }
+            .map { case (remainder, elements) =>
+              DecodeResult(Json.arr(elements: _*), remainder)
+            }
+        }
+      }
+    }
 
   private def compilePrimitiveCodec(
       kind: IrPrimitive,
