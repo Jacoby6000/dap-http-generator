@@ -53,6 +53,7 @@ object DoldecompIrGenerator {
     )
     val headerStructs = loadStructs(headerRoots)
     val globalDeclarations = loadGlobalDeclarations(headerRoots)
+    val fieldInitializerLengths = loadFieldInitializerLengths(headerRoots, headerStructs)
     val dataObjectSymbols =
       symbols.filter(_.symbolType.contains("object")).filter(_.section.contains(".data"))
     val resolvedSymbols = dataObjectSymbols.flatMap(resolveSymbol(_, globalDeclarations))
@@ -115,7 +116,8 @@ object DoldecompIrGenerator {
                         fieldTypeName = fieldTypeName,
                         fieldDeclarator = declarator,
                         reachableStructs = reachableByName,
-                        buildStruct = buildStruct
+                        buildStruct = buildStruct,
+                        fieldInitializerLengths = fieldInitializerLengths
                       )
                     },
                   declaredSizeBits = None
@@ -253,14 +255,18 @@ object DoldecompIrGenerator {
       fieldTypeName: String,
       fieldDeclarator: IASTDeclarator,
       reachableStructs: Map[String, IASTCompositeTypeSpecifier],
-      buildStruct: String => IrType.MemoryMappedStruct
+      buildStruct: String => IrType.MemoryMappedStruct,
+      fieldInitializerLengths: Map[(String, String), Int]
   ): IrMember = {
     val normalizedType = CHeaderParser.normalizeTypeName(fieldTypeName).replaceAll("\\s+", "")
     val fieldName = CHeaderParser.fieldName(fieldDeclarator)
     val memberName = toCamelCase(fieldName)
     val memberId = ShapeId.from(s"$namespace#$structName$$$memberName")
     val isPointer = CHeaderParser.pointerDepth(fieldDeclarator) > 0
-    val arrayLength = CHeaderParser.arrayLength(fieldDeclarator)
+    val arrayLength =
+      CHeaderParser
+        .arrayLength(fieldDeclarator)
+        .orElse(fieldInitializerLengths.get((structName, fieldName)))
 
     val resolvedTarget = if (isPointer) {
       IrType.Primitive(IrPrimitive.LongWord)
@@ -288,7 +294,7 @@ object DoldecompIrGenerator {
       staticAddress = None,
       paddingRepeats = None,
       isPointer = isPointer,
-      isArray = arrayLength.nonEmpty,
+      isArray = CHeaderParser.isArrayField(fieldDeclarator),
       arrayLength = arrayLength,
       endianOverride = None,
       primitiveOverride =
@@ -372,7 +378,7 @@ object DoldecompIrGenerator {
             symbol = symbol,
             typeName = declaration.typeName,
             isArray = declaration.isArray,
-            arrayLength = declaration.arrayLength
+            arrayLength = declaration.resolvedArrayLength
           )
         }
       }
@@ -470,7 +476,36 @@ object DoldecompIrGenerator {
       }
       .groupBy(_.name)
       .view
-      .mapValues(_.last)
+      .mapValues(mergeGlobalDeclarations)
+      .toMap
+  }
+
+  private def mergeGlobalDeclarations(
+      declarations: List[GlobalVariableDeclaration]
+  ): GlobalVariableDeclaration = {
+    val primary = declarations.head
+    GlobalVariableDeclaration(
+      name = primary.name,
+      typeName = declarations.map(_.typeName).find(_.nonEmpty).getOrElse(primary.typeName),
+      isArray = declarations.exists(_.isArray),
+      declaratorLength = declarations.flatMap(_.declaratorLength).headOption,
+      initializerLength = declarations.flatMap(_.initializerLength).headOption
+    )
+  }
+
+  private def loadFieldInitializerLengths(
+      headerRoots: List[Path],
+      headerStructs: Map[String, IASTCompositeTypeSpecifier]
+  ): Map[(String, String), Int] = {
+    val sourceFiles = headerRoots.flatMap(collectSourceFiles).distinct
+    sourceFiles
+      .flatMap { path =>
+        val source = new String(Files.readAllBytes(path))
+        CHeaderParser.parseStructFieldInitializerLengths(source, headerStructs).toList
+      }
+      .groupBy(_._1)
+      .view
+      .mapValues(_.map(_._2).max)
       .toMap
   }
 

@@ -176,7 +176,7 @@ class DoldecompSmithyGeneratorIntegrationSpec extends AnyFunSuite {
     val route = plans("/MeleeApi/GetGm803DDAC0Scenes")
 
     assert(route.reads.head.address == 0x803ddac0L)
-    assert(route.reads.head.sizeBytes == 48)
+    assert(route.reads.head.sizeBytes == 42)
     assert(route.reads.head.decodeCodec.nonEmpty)
   }
 

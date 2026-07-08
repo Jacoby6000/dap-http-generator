@@ -4,7 +4,11 @@ import org.eclipse.cdt.core.dom.ast.IASTArrayDeclarator
 import org.eclipse.cdt.core.dom.ast.IASTCompositeTypeSpecifier
 import org.eclipse.cdt.core.dom.ast.IASTDeclaration
 import org.eclipse.cdt.core.dom.ast.IASTDeclarator
+import org.eclipse.cdt.core.dom.ast.IASTEqualsInitializer
 import org.eclipse.cdt.core.dom.ast.IASTFunctionDeclarator
+import org.eclipse.cdt.core.dom.ast.IASTInitializer
+import org.eclipse.cdt.core.dom.ast.IASTInitializerClause
+import org.eclipse.cdt.core.dom.ast.IASTInitializerList
 import org.eclipse.cdt.core.dom.ast.IASTSimpleDeclaration
 import org.eclipse.cdt.core.dom.ast.IASTTranslationUnit
 import org.eclipse.cdt.core.dom.ast.gnu.c.GCCLanguage
@@ -21,8 +25,11 @@ final case class GlobalVariableDeclaration(
     name: String,
     typeName: String,
     isArray: Boolean,
-    arrayLength: Option[Int]
-)
+    declaratorLength: Option[Int],
+    initializerLength: Option[Int]
+) {
+  def resolvedArrayLength: Option[Int] = declaratorLength.orElse(initializerLength)
+}
 
 object CHeaderParser {
   def parse(headerSource: String): List[(String, IASTCompositeTypeSpecifier)] =
@@ -34,6 +41,25 @@ object CHeaderParser {
     parseTranslationUnit(source, "source.c")
       .map(_.getDeclarations.toList.flatMap(extractGlobalDeclaration))
       .getOrElse(Nil)
+
+  def parseStructFieldInitializerLengths(
+      source: String,
+      structs: Map[String, IASTCompositeTypeSpecifier]
+  ): Map[(String, String), Int] =
+    parseTranslationUnit(source, "source.c")
+      .map { translationUnit =>
+        translationUnit.getDeclarations.toList.flatMap { declaration =>
+          extractGlobalDeclaration(declaration).flatMap { global =>
+            structs.get(global.typeName).toList.flatMap { struct =>
+              extractGlobalDeclaratorWithInitializer(declaration, global.typeName).toList.flatMap {
+                declarator =>
+                  extractFieldInitializerLengths(struct, global.typeName, declarator).toList
+              }
+            }
+          }
+        }.toMap
+      }
+      .getOrElse(Map.empty)
 
   private def parseTranslationUnit(
       source: String,
@@ -87,12 +113,15 @@ object CHeaderParser {
         Nil
       } else {
         val isArray = isArrayDeclarator(declarator)
+        val declaratorLength = if (isArray) arrayLength(declarator) else None
+        val initializerLength = if (isArray) initializerElementCount(declarator) else None
         List(
           GlobalVariableDeclaration(
             name = name,
             typeName = typeName,
             isArray = isArray,
-            arrayLength = if (isArray) arrayLength(declarator) else None
+            declaratorLength = declaratorLength,
+            initializerLength = initializerLength
           )
         )
       }
@@ -103,6 +132,8 @@ object CHeaderParser {
 
   private def isArrayDeclarator(declarator: IASTDeclarator): Boolean =
     declaratorChain(declarator).exists(_.isInstanceOf[IASTArrayDeclarator])
+
+  def isArrayField(declarator: IASTDeclarator): Boolean = isArrayDeclarator(declarator)
 
   private def extractStruct(
       declaration: IASTDeclaration
@@ -152,6 +183,80 @@ object CHeaderParser {
       case _ =>
         None
     })
+  }
+
+  def initializerElementCount(declarator: IASTDeclarator): Option[Int] =
+    Option(declarator.getInitializer).flatMap(initializerElementCount)
+
+  private def initializerElementCount(initializer: IASTInitializer): Option[Int] =
+    initializer match {
+      case equalsInitializer: IASTEqualsInitializer =>
+        Option(equalsInitializer.getInitializerClause).flatMap(countInitializerClause)
+      case _ =>
+        None
+    }
+
+  private def countInitializerClause(clause: IASTInitializerClause): Option[Int] =
+    clause match {
+      case initializerList: IASTInitializerList =>
+        Some(initializerList.getClauses.length)
+      case _ =>
+        Some(1)
+    }
+
+  private def extractGlobalDeclaratorWithInitializer(
+      declaration: IASTDeclaration,
+      typeName: String
+  ): Option[IASTDeclarator] =
+    declaration match {
+      case simple: IASTSimpleDeclaration =>
+        val declaredType = simple.getDeclSpecifier match {
+          case composite: IASTCompositeTypeSpecifier if composite.getMembers.isEmpty =>
+            normalizeTypeName(Option(composite.getName).map(_.toString).getOrElse(""))
+          case _ =>
+            normalizeTypeName(simple.getDeclSpecifier.getRawSignature)
+        }
+        if (declaredType != typeName) {
+          None
+        } else {
+          simple.getDeclarators.toList.find(declarator =>
+            Option(declarator.getInitializer).nonEmpty
+          )
+        }
+      case _ =>
+        None
+    }
+
+  private def extractFieldInitializerLengths(
+      struct: IASTCompositeTypeSpecifier,
+      structName: String,
+      declarator: IASTDeclarator
+  ): Map[(String, String), Int] = {
+    val fields = extractFields(struct)
+    val initializerClause =
+      Option(declarator.getInitializer).flatMap(initializerElementCount).flatMap { _ =>
+        Option(declarator.getInitializer).collect { case equals: IASTEqualsInitializer =>
+          equals.getInitializerClause
+        }
+      }
+
+    initializerClause match {
+      case Some(clause: IASTInitializerList) =>
+        fields
+          .zip(clause.getClauses)
+          .flatMap { case ((_, fieldDeclarator), fieldClause) =>
+            if (isArrayDeclarator(fieldDeclarator) && arrayLength(fieldDeclarator).isEmpty) {
+              countInitializerClause(fieldClause).map { count =>
+                (structName, fieldName(fieldDeclarator)) -> count
+              }
+            } else {
+              None
+            }
+          }
+          .toMap
+      case _ =>
+        Map.empty
+    }
   }
 
   private def declaratorChain(declarator: IASTDeclarator): List[IASTDeclarator] = {

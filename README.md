@@ -146,8 +146,10 @@ sbt "run cheaders \
 
 `cheaders` matches `.data` object symbols to global variable declarations in `.h` and `.c`
 files under `--headers` (for example `GameScene gm_803DDAC0_Scenes[]` in source paired with
-`gm_803DDAC0_Scenes = .data:0x803DDAC0;` in `symbols.txt`). The optional `ctype:` symbol
-attribute still overrides inferred types when present.
+`gm_803DDAC0_Scenes = .data:0x803DDAC0;` in `symbols.txt`). Unsized array lengths are inferred
+from the number of entries in a matching C initializer when present (for example two `{ ... }`
+elements in a `.c` definition). The optional `ctype:` symbol attribute still overrides inferred
+types when present.
 
 Generate Smithy from C headers, then serve it:
 

@@ -1,1 +1,1 @@
-gm_803DDAC0_Scenes = .data:0x803DDAC0; // type:object size:0x30 scope:global
+gm_803DDAC0_Scenes = .data:0x803DDAC0; // type:object scope:global

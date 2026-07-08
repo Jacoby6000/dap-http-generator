@@ -93,8 +93,66 @@ class CHeaderParserSpec extends AnyFunSuite {
     assert(declarations.map(_.name) == List("gm_803DDAC0_Scenes", "gm_804D68C0"))
     assert(declarations.head.typeName == "GameScene")
     assert(declarations.head.isArray)
-    assert(declarations.head.arrayLength.isEmpty)
+    assert(declarations.head.declaratorLength.isEmpty)
+    assert(declarations.head.initializerLength.contains(1))
+    assert(declarations.head.resolvedArrayLength.contains(1))
     assert(!declarations(1).isArray)
   }
 
+  test("infers global array length from C initializer entry count") {
+    val source =
+      """
+        |typedef struct GameScene {
+        |    u8 idx;
+        |    u8 preload;
+        |    u16 flags;
+        |} GameScene;
+        |
+        |GameScene gm_803DDAC0_Scenes[] = {
+        |    { 0x00, 0x03, 0 },
+        |    { 0x01, 0x03, 0 },
+        |};
+        |""".stripMargin
+
+    val declaration = CHeaderParser.parseGlobalDeclarations(source).head
+
+    assert(declaration.isArray)
+    assert(declaration.declaratorLength.isEmpty)
+    assert(declaration.initializerLength.contains(2))
+    assert(declaration.resolvedArrayLength.contains(2))
+  }
+
+  test("infers struct field array length from accompanying C initializer") {
+    val header =
+      """
+        |typedef struct GameScene {
+        |    u8 idx;
+        |    u8 preload;
+        |    u16 flags;
+        |} GameScene;
+        |
+        |typedef struct SceneTable {
+        |    u8 count;
+        |    GameScene scenes[];
+        |} SceneTable;
+        |""".stripMargin
+
+    val source =
+      """
+        |#include "scene_table.h"
+        |
+        |SceneTable gm_scene_table = {
+        |    2,
+        |    {
+        |        { 0x00, 0x03, 0 },
+        |        { 0x01, 0x03, 0 },
+        |    },
+        |};
+        |""".stripMargin
+
+    val structs = CHeaderParser.parse(header).toMap
+    val lengths = CHeaderParser.parseStructFieldInitializerLengths(source, structs)
+
+    assert(lengths(("SceneTable", "scenes")) == 2)
+  }
 }
