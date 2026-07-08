@@ -18,6 +18,8 @@ entrypoint also exists at `io.github.jacoby6000.daphttp.DapHttpServerMain`.
 Server subcommands (`smithy`, `cheaders`) share these flags:
 
 - `--dap-host` / `--dap-port` (default `127.0.0.1:4711`) — DAP debug adapter
+- `--dap-timeout-ms` (default `5000`) — DAP socket read timeout for memory reads
+- `--dap-continue-timeout-ms` (default `30000`) — DAP socket read timeout for `POST /resume`
 - `--bind-host` / `--bind-port` (default `0.0.0.0:8080`) — HTTP server bind address
 
 `smithy` also supports `--watch` to reload models when files change.
@@ -109,9 +111,9 @@ The server:
 - resolves DAP-backed structs (`@dapStruct`/`@bitmask`) and reads memory through a DAP `readMemory` request,
 - watches Smithy sources and reloads routes when model files change (`smithy --watch`).
 
-`/health`, `/routes`, and `POST /resume` work without generated data routes. `/resume` sends a DAP
-`continue` request to the debug adapter (useful when the target is stopped and `readMemory` times
-out). Generated **data** routes open a fresh
+`/health`, `/routes`, and `POST /resume` work without generated data routes. `/resume` opens a DAP
+session (initialize handshake, optional `configurationDone`, then `continue`) on the debug adapter.
+Use it when the target is stopped and `readMemory` times out. Generated **data** routes open a fresh
 TCP socket per read to the DAP adapter; if nothing is listening they return per-read `error`
 fields while the HTTP request still succeeds.
 

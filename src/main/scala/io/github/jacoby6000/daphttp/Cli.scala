@@ -28,6 +28,8 @@ object Cli
   private final case class ServerConfig(
       dapHost: String,
       dapPort: Int,
+      dapTimeoutMs: Int,
+      dapContinueTimeoutMs: Int,
       bindHost: String,
       bindPort: Int
   )
@@ -39,6 +41,16 @@ object Cli
     Opts
       .option[Int]("dap-port", "DAP debug adapter port", metavar = "port")
       .withDefault(4711),
+    Opts
+      .option[Int]("dap-timeout-ms", "DAP socket read timeout in milliseconds", metavar = "ms")
+      .withDefault(5000),
+    Opts
+      .option[Int](
+        "dap-continue-timeout-ms",
+        "DAP socket read timeout for continue/resume in milliseconds",
+        metavar = "ms"
+      )
+      .withDefault(30000),
     Opts
       .option[String]("bind-host", "HTTP server bind host", metavar = "host")
       .withDefault("0.0.0.0"),
@@ -243,7 +255,12 @@ object Cli
       _ <-
         if (watch && watchPaths.nonEmpty) startSmithyWatcher(watchPaths, plansRef)
         else IO.unit
-      dapClient = new DapHttpServerMain.SocketDapClient(config.dapHost, config.dapPort)
+      dapClient = new DapHttpServerMain.SocketDapClient(
+        config.dapHost,
+        config.dapPort,
+        config.dapTimeoutMs,
+        config.dapContinueTimeoutMs
+      )
       app = HttpLoggingMiddleware(
         DapHttpServerMain.routes(plansRef, dapClient).orNotFound
       )
