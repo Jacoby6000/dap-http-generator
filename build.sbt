@@ -38,6 +38,8 @@ lazy val root = (project in file("."))
       "org.eclipse.platform" % "org.eclipse.core.resources" % "3.22.200",
       "com.monovore" %% "decline" % declineVersion,
       "com.monovore" %% "decline-effect" % declineVersion,
+      "org.slf4j" % "slf4j-api" % "2.0.17",
+      "ch.qos.logback" % "logback-classic" % "1.5.18",
       "org.scalatest" %% "scalatest" % "3.2.20" % Test
     ),
     Compile / mainClass := Some("io.github.jacoby6000.daphttp.Cli"),

@@ -195,7 +195,29 @@ object SmithyIrGenerator {
       IrService(service.getId.getName, wordSize, defaultEndian, operations)
     }
 
-    if (errors.nonEmpty) Left(errors.toList.distinct) else Right(irServices)
+    if (errors.nonEmpty) {
+      errors.foreach(error => DapHttpLoggers.irSourceSmithy.warn("{}", error))
+      DapHttpLoggers.irSourceSmithy.info(
+        "Smithy IR generation failed with {} error(s)",
+        Integer.valueOf(errors.distinct.size)
+      )
+      Left(errors.toList.distinct)
+    } else {
+      val operationCount = irServices.map(_.operations.size).sum
+      DapHttpLoggers.irSourceSmithy.info(
+        "Generated IR for {} service(s) and {} operation(s)",
+        Integer.valueOf(irServices.size),
+        Integer.valueOf(operationCount)
+      )
+      irServices.foreach { service =>
+        DapHttpLoggers.irSourceSmithy.debug(
+          "Service {} has {} operation(s)",
+          service.name,
+          Integer.valueOf(service.operations.size)
+        )
+      }
+      Right(irServices)
+    }
   }
 
   private def buildIrMember(member: MemberShape, target: IrType): IrMember =

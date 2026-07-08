@@ -46,6 +46,11 @@ object DoldecompIrGenerator {
       serviceName: String = "DolDecompApi",
       wordSizeBits: Int = 32
   ): IrGenerationResult = {
+    DapHttpLoggers.irSourceDoldecomp.info(
+      "Generating IR from {} symbol(s) across {} header root(s)",
+      Integer.valueOf(symbols.size),
+      Integer.valueOf(headerRoots.size)
+    )
     val headerStructs = loadStructs(headerRoots)
     val globalDeclarations = loadGlobalDeclarations(headerRoots)
     val dataObjectSymbols =
@@ -54,6 +59,9 @@ object DoldecompIrGenerator {
     val warnings = mutable.ListBuffer.empty[String]
 
     if (resolvedSymbols.isEmpty) {
+      DapHttpLoggers.irSourceDoldecomp.warn(
+        "No .data object symbols with a matching C declaration were found"
+      )
       IrGenerationResult(
         warnings = List("No .data object symbols with a matching C declaration were found."),
         services = Nil
@@ -63,6 +71,7 @@ object DoldecompIrGenerator {
         validateResolvedType(resolved.symbol.name, resolved.typeName, headerStructs) match {
           case Some(error) =>
             warnings += error
+            DapHttpLoggers.irSourceDoldecomp.debug("Skipping symbol: {}", error)
             false
           case None =>
             true
@@ -213,7 +222,7 @@ object DoldecompIrGenerator {
           }
         }
 
-        IrGenerationResult(
+        val result = IrGenerationResult(
           warnings = warnings.toList,
           services = List(
             IrService(
@@ -224,6 +233,16 @@ object DoldecompIrGenerator {
             )
           )
         )
+        DapHttpLoggers.irSourceDoldecomp.info(
+          "Generated {} operation(s) with {} warning(s) from {} resolved symbol(s)",
+          Integer.valueOf(irOperations.size),
+          Integer.valueOf(result.warnings.size),
+          Integer.valueOf(resolvedSymbols.size)
+        )
+        irOperations.foreach { operation =>
+          DapHttpLoggers.irSourceDoldecomp.debug("Operation {}", operation.routePath)
+        }
+        result
       }
     }
   }

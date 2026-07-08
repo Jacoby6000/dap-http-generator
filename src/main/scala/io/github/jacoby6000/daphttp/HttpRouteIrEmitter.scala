@@ -22,6 +22,7 @@ object HttpRouteIrEmitter {
       service.wordSizeBits match {
         case None =>
           errors += s"${service.name}: Services must declare @wordSize."
+          DapHttpLoggers.irEmit.warn("{}: Services must declare @wordSize.", service.name)
         case Some(wordSizeBits) =>
           service.operations.foreach { operation =>
             val operationErrors = ListBuffer.empty[String]
@@ -34,15 +35,29 @@ object HttpRouteIrEmitter {
               operationErrors
             )
             if (operationErrors.nonEmpty) {
+              operationErrors.foreach(error =>
+                DapHttpLoggers.irEmit.warn("{}: {}", operation.routePath, error)
+              )
               errors ++= operationErrors.toList
             } else {
+              DapHttpLoggers.irEmit.debug(
+                "Compiled route {} with {} read(s)",
+                operation.routePath,
+                Integer.valueOf(reads.size)
+              )
               routes += operation.routePath -> RoutePlan(operation.routePath, reads)
             }
           }
       }
     }
 
-    RoutePlansLoadResult(routes.toMap, errors.toList.distinct)
+    val result = RoutePlansLoadResult(routes.toMap, errors.toList.distinct)
+    DapHttpLoggers.irEmit.info(
+      "Emitted {} route(s) with {} error(s)",
+      Integer.valueOf(result.routes.size),
+      Integer.valueOf(result.errors.size)
+    )
+    result
   }
 
   private def collectReadsForType(

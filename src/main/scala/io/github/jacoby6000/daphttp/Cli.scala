@@ -165,9 +165,11 @@ object Cli
   ): RoutePlansLoadResult =
     loadIrFromCHeaders(symbolsPath, headerPaths, namespace, service, wordSize) match {
       case Left(errors) =>
+        errors.foreach(error => DapHttpLoggers.irSourceDoldecomp.warn("{}", error))
         RoutePlansLoadResult(Map.empty, errors)
       case Right(generation) =>
         IrSizingWarnings.writeToStderr(generation.services)
+        generation.warnings.foreach(warning => DapHttpLoggers.irSourceDoldecomp.warn("{}", warning))
         val plans = HttpRouteIrEmitter.emitRoutePlansFromIr(generation.services)
         RoutePlansLoadResult(
           routes = plans.routes,
@@ -242,7 +244,9 @@ object Cli
         if (watch && watchPaths.nonEmpty) startSmithyWatcher(watchPaths, plansRef)
         else IO.unit
       dapClient = new DapHttpServerMain.SocketDapClient(config.dapHost, config.dapPort)
-      app = DapHttpServerMain.routes(plansRef, dapClient).orNotFound
+      app = HttpLoggingMiddleware(
+        DapHttpServerMain.routes(plansRef, dapClient).orNotFound
+      )
       exit <- EmberServerBuilder
         .default[IO]
         .withHost(Host.fromString(config.bindHost).getOrElse(Host.fromString("0.0.0.0").get))

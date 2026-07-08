@@ -48,7 +48,9 @@ object DapHttpServerMain extends IOApp {
           plansRef <- Ref.of[IO, RoutePlansLoadResult](loadPlans(config.smithyPaths))
           _ <- watchSmithySources(config, plansRef)
           dapClient = new SocketDapClient(config.dapHost, config.dapPort)
-          app = routes(plansRef, dapClient).orNotFound
+          app = HttpLoggingMiddleware(
+            DapHttpServerMain.routes(plansRef, dapClient).orNotFound
+          )
           exit <- EmberServerBuilder
             .default[IO]
             .withHost(Host.fromString(config.bindHost).getOrElse(Host.fromString("0.0.0.0").get))
@@ -309,6 +311,14 @@ object DapHttpServerMain extends IOApp {
   private[daphttp] final class SocketDapClient(host: String, port: Int) extends DapClient {
     override def readMemory(address: Long, sizeBytes: Int): IO[Either[String, String]] =
       IO.blocking {
+        DapHttpLoggers.dap.debug(
+          "readMemory host={} port={} address=0x{} bytes={}",
+          host,
+          Integer.valueOf(port),
+          java.lang.Long.toHexString(address),
+          Integer.valueOf(sizeBytes)
+        )
+
         val socket = new Socket(host, port)
         socket.setSoTimeout(5000)
         val out = new BufferedOutputStream(socket.getOutputStream)
@@ -345,19 +355,39 @@ object DapHttpServerMain extends IOApp {
               .as[String]
               .toOption
               .getOrElse(Base64.getEncoder.encodeToString(body.getBytes(StandardCharsets.UTF_8)))
+            DapHttpLoggers.dap.debug(
+              "readMemory address=0x{} succeeded bytes={}",
+              java.lang.Long.toHexString(address),
+              Integer.valueOf(sizeBytes)
+            )
             Right(value)
           case Some(json) =>
-            Left(
-              json.hcursor
-                .downField("message")
-                .as[String]
-                .toOption
-                .getOrElse("DAP readMemory failed")
+            val message = json.hcursor
+              .downField("message")
+              .as[String]
+              .toOption
+              .getOrElse("DAP readMemory failed")
+            DapHttpLoggers.dap.warn(
+              "readMemory address=0x{} failed: {}",
+              java.lang.Long.toHexString(address),
+              message
             )
+            Left(message)
           case None =>
+            DapHttpLoggers.dap.warn(
+              "readMemory address=0x{} failed: unable to parse DAP response payload",
+              java.lang.Long.toHexString(address)
+            )
             Left("Failed to parse DAP response payload.")
         }
-      }.handleError(error => Left(error.getMessage))
+      }.handleError { error =>
+        DapHttpLoggers.dap.warn(
+          "readMemory address=0x{} failed: {}",
+          java.lang.Long.toHexString(address),
+          error.getMessage
+        )
+        Left(error.getMessage)
+      }
 
     private def readContentLength(in: BufferedInputStream): Int = {
       var contentLength = 0

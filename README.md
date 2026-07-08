@@ -168,3 +168,27 @@ sbt fmt
 sbt fix
 sbt test
 ```
+
+### Logging
+
+Logging uses SLF4J with Logback. Configure levels in `src/main/resources/logback.xml`:
+
+| Logger | Layer |
+|--------|-------|
+| `io.github.jacoby6000.daphttp.dap` | DAP `readMemory` requests/responses |
+| `io.github.jacoby6000.daphttp.http` | HTTP request/response lines |
+| `io.github.jacoby6000.daphttp.ir.emit` | IR → route plans (`HttpRouteIrEmitter`) |
+| `io.github.jacoby6000.daphttp.ir.source.smithy` | Smithy model → IR |
+| `io.github.jacoby6000.daphttp.ir.source.doldecomp` | C headers/symbols → IR |
+
+Set a logger to `DEBUG` for per-route or per-symbol detail. Example:
+
+```xml
+<logger name="io.github.jacoby6000.daphttp.ir.source.doldecomp" level="DEBUG"/>
+```
+
+Override the config file at runtime with:
+
+```bash
+java -Dlogback.configurationFile=/path/to/logback.xml -jar ...
+```

@@ -1,0 +1,26 @@
+<configuration>
+  <appender name="STDOUT" class="ch.qos.logback.core.ConsoleAppender">
+    <encoder>
+      <pattern>%d{HH:mm:ss.SSS} [%thread] %-5level %logger{36} - %msg%n</pattern>
+    </encoder>
+  </appender>
+
+  <!-- DAP readMemory requests and responses -->
+  <logger name="io.github.jacoby6000.daphttp.dap" level="INFO"/>
+
+  <!-- HTTP request/response lines -->
+  <logger name="io.github.jacoby6000.daphttp.http" level="INFO"/>
+
+  <!-- IR -> route plans / decode codecs (HttpRouteIrEmitter) -->
+  <logger name="io.github.jacoby6000.daphttp.ir.emit" level="INFO"/>
+
+  <!-- Smithy model -> IR (SmithyIrGenerator) -->
+  <logger name="io.github.jacoby6000.daphttp.ir.source.smithy" level="INFO"/>
+
+  <!-- C headers + symbols -> IR (DoldecompIrGenerator) -->
+  <logger name="io.github.jacoby6000.daphttp.ir.source.doldecomp" level="INFO"/>
+
+  <root level="WARN">
+    <appender-ref ref="STDOUT"/>
+  </root>
+</configuration>
