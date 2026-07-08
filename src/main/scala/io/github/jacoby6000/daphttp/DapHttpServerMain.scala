@@ -10,6 +10,7 @@ import io.circe.Json
 import io.circe.syntax._
 import org.http4s.HttpRoutes
 import org.http4s.Method.GET
+import org.http4s.Method.POST
 import org.http4s.circe.CirceEntityCodec._
 import org.http4s.dsl.io._
 import org.http4s.ember.server.EmberServerBuilder
@@ -108,6 +109,14 @@ object DapHttpServerMain extends IOApp {
               "errors" -> result.errors.asJson
             )
           )
+        }
+
+      case POST -> Root / "resume" =>
+        dapClient.continueExecution().flatMap {
+          case Right(response) =>
+            Ok(Json.obj("status" -> Json.fromString("ok"), "dap" -> response))
+          case Left(error) =>
+            InternalServerError(Json.obj("error" -> Json.fromString(error)))
         }
 
       case request @ GET -> _ =>
@@ -306,9 +315,12 @@ object DapHttpServerMain extends IOApp {
 
   private[daphttp] trait DapClient {
     def readMemory(address: Long, sizeBytes: Int): IO[Either[String, String]]
+    def continueExecution(): IO[Either[String, Json]]
   }
 
   private[daphttp] final class SocketDapClient(host: String, port: Int) extends DapClient {
+    private val socketTimeoutMs = 5000
+
     override def readMemory(address: Long, sizeBytes: Int): IO[Either[String, String]] =
       IO.blocking {
         DapHttpLoggers.dap.debug(
@@ -319,66 +331,40 @@ object DapHttpServerMain extends IOApp {
           Integer.valueOf(sizeBytes)
         )
 
-        val socket = new Socket(host, port)
-        socket.setSoTimeout(5000)
-        val out = new BufferedOutputStream(socket.getOutputStream)
-        val in = new BufferedInputStream(socket.getInputStream)
-
-        val request =
-          Json
-            .obj(
-              "seq" -> Json.fromInt(1),
-              "type" -> Json.fromString("request"),
-              "command" -> Json.fromString("readMemory"),
-              "arguments" -> Json.obj(
+        withSocket { (out, in) =>
+          sendRequest(
+            out,
+            in,
+            seq = 1,
+            command = "readMemory",
+            arguments = Some(
+              Json.obj(
                 "memoryReference" -> Json.fromString(f"0x$address%x"),
                 "count" -> Json.fromInt(sizeBytes)
               )
             )
-            .noSpaces
-
-        val payload = request.getBytes(StandardCharsets.UTF_8)
-        out.write(s"Content-Length: ${payload.length}\r\n\r\n".getBytes(StandardCharsets.UTF_8))
-        out.write(payload)
-        out.flush()
-
-        val contentLength = readContentLength(in)
-        val body = readBody(in, contentLength)
-
-        socket.close()
-
-        io.circe.parser.parse(body).toOption match {
-          case Some(json) if json.hcursor.downField("success").as[Boolean].getOrElse(false) =>
-            val value = json.hcursor
-              .downField("body")
+          ).flatMap { body =>
+            body.hcursor
               .downField("data")
               .as[String]
               .toOption
-              .getOrElse(Base64.getEncoder.encodeToString(body.getBytes(StandardCharsets.UTF_8)))
-            DapHttpLoggers.dap.debug(
-              "readMemory address=0x{} succeeded bytes={}",
-              java.lang.Long.toHexString(address),
-              Integer.valueOf(sizeBytes)
-            )
-            Right(value)
-          case Some(json) =>
-            val message = json.hcursor
-              .downField("message")
-              .as[String]
-              .toOption
-              .getOrElse("DAP readMemory failed")
-            DapHttpLoggers.dap.warn(
-              "readMemory address=0x{} failed: {}",
-              java.lang.Long.toHexString(address),
-              message
-            )
-            Left(message)
-          case None =>
-            DapHttpLoggers.dap.warn(
-              "readMemory address=0x{} failed: unable to parse DAP response payload",
-              java.lang.Long.toHexString(address)
-            )
-            Left("Failed to parse DAP response payload.")
+              .toRight("DAP readMemory response did not include body.data.")
+          } match {
+            case Right(value) =>
+              DapHttpLoggers.dap.debug(
+                "readMemory address=0x{} succeeded bytes={}",
+                java.lang.Long.toHexString(address),
+                Integer.valueOf(sizeBytes)
+              )
+              Right(value)
+            case Left(error) =>
+              DapHttpLoggers.dap.warn(
+                "readMemory address=0x{} failed: {}",
+                java.lang.Long.toHexString(address),
+                error
+              )
+              Left(error)
+          }
         }
       }.handleError { error =>
         DapHttpLoggers.dap.warn(
@@ -388,6 +374,113 @@ object DapHttpServerMain extends IOApp {
         )
         Left(error.getMessage)
       }
+
+    override def continueExecution(): IO[Either[String, Json]] =
+      IO.blocking {
+        DapHttpLoggers.dap.info("continue host={} port={}", host, Integer.valueOf(port))
+        withSocket { (out, in) =>
+          val threadId =
+            sendRequest(out, in, seq = 1, command = "threads", arguments = None) match {
+              case Right(json) => parseThreadIds(json).headOption.getOrElse(1)
+              case Left(error) =>
+                DapHttpLoggers.dap.debug(
+                  "threads request failed ({}); continuing with threadId=1",
+                  error
+                )
+                1
+            }
+          sendRequest(
+            out,
+            in,
+            seq = 2,
+            command = "continue",
+            arguments = Some(Json.obj("threadId" -> Json.fromInt(threadId)))
+          ).map { response =>
+            DapHttpLoggers.dap.info("continue threadId={} succeeded", Integer.valueOf(threadId))
+            response
+          }.left
+            .map { error =>
+              DapHttpLoggers.dap.warn(
+                "continue threadId={} failed: {}",
+                Integer.valueOf(threadId),
+                error
+              )
+              error
+            }
+        }
+      }.handleError { error =>
+        DapHttpLoggers.dap.warn("continue failed: {}", error.getMessage)
+        Left(error.getMessage)
+      }
+
+    private def withSocket[A](f: (BufferedOutputStream, BufferedInputStream) => A): A = {
+      val socket = new Socket(host, port)
+      socket.setSoTimeout(socketTimeoutMs)
+      try {
+        f(
+          new BufferedOutputStream(socket.getOutputStream),
+          new BufferedInputStream(socket.getInputStream)
+        )
+      } finally {
+        socket.close()
+      }
+    }
+
+    private def sendRequest(
+        out: BufferedOutputStream,
+        in: BufferedInputStream,
+        seq: Int,
+        command: String,
+        arguments: Option[Json]
+    ): Either[String, Json] = {
+      val request = arguments match {
+        case Some(args) =>
+          Json.obj(
+            "seq" -> Json.fromInt(seq),
+            "type" -> Json.fromString("request"),
+            "command" -> Json.fromString(command),
+            "arguments" -> args
+          )
+        case None =>
+          Json.obj(
+            "seq" -> Json.fromInt(seq),
+            "type" -> Json.fromString("request"),
+            "command" -> Json.fromString(command)
+          )
+      }
+
+      val payload = request.noSpaces.getBytes(StandardCharsets.UTF_8)
+      out.write(s"Content-Length: ${payload.length}\r\n\r\n".getBytes(StandardCharsets.UTF_8))
+      out.write(payload)
+      out.flush()
+
+      val contentLength = readContentLength(in)
+      val body = readBody(in, contentLength)
+      parseDapResponse(body, command)
+    }
+
+    private def parseDapResponse(body: String, command: String): Either[String, Json] =
+      io.circe.parser.parse(body).toOption match {
+        case Some(json) if json.hcursor.downField("success").as[Boolean].getOrElse(false) =>
+          Right(json.hcursor.downField("body").focus.getOrElse(Json.Null))
+        case Some(json) =>
+          val message = json.hcursor
+            .downField("message")
+            .as[String]
+            .toOption
+            .getOrElse(s"DAP $command failed")
+          Left(message)
+        case None =>
+          Left(s"Failed to parse DAP $command response payload.")
+      }
+
+    private def parseThreadIds(responseBody: Json): List[Int] =
+      responseBody.hcursor
+        .downField("threads")
+        .values
+        .getOrElse(Vector.empty)
+        .flatMap(_.hcursor.downField("id").as[Int].toOption)
+        .toList
 
     private def readContentLength(in: BufferedInputStream): Int = {
       var contentLength = 0

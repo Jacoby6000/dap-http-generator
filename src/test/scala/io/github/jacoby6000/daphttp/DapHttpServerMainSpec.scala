@@ -390,4 +390,34 @@ class DapHttpServerMainSpec extends AnyFunSuite {
     assert(route.reads.head.sizeBytes == 4)
     assert(route.reads.head.cStringPointer)
   }
+
+  test("POST /resume issues a DAP continue request") {
+    import cats.effect.IO
+    import cats.effect.Ref
+    import cats.effect.unsafe.implicits.global
+    import io.circe.Json
+    import org.http4s.Method.POST
+    import org.http4s.Request
+    import org.http4s.Status
+    import org.http4s.implicits._
+
+    val resumed = new java.util.concurrent.atomic.AtomicBoolean(false)
+    val dapClient = new DapHttpServerMain.DapClient {
+      override def readMemory(address: Long, sizeBytes: Int): IO[Either[String, String]] =
+        IO.pure(Right(""))
+
+      override def continueExecution(): IO[Either[String, Json]] =
+        IO {
+          resumed.set(true)
+          Right(Json.obj("allThreadsContinued" -> Json.True))
+        }
+    }
+
+    val plansRef = Ref.unsafe[IO, RoutePlansLoadResult](RoutePlansLoadResult(Map.empty, Nil))
+    val app = HttpLoggingMiddleware(DapHttpServerMain.routes(plansRef, dapClient).orNotFound)
+    val response = app.run(Request[IO](POST, uri"/resume")).unsafeRunSync()
+
+    assert(response.status == Status.Ok)
+    assert(resumed.get())
+  }
 }

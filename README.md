@@ -109,7 +109,9 @@ The server:
 - resolves DAP-backed structs (`@dapStruct`/`@bitmask`) and reads memory through a DAP `readMemory` request,
 - watches Smithy sources and reloads routes when model files change (`smithy --watch`).
 
-`/health` and `/routes` work without a debugger attached. Generated **data** routes open a fresh
+`/health`, `/routes`, and `POST /resume` work without generated data routes. `/resume` sends a DAP
+`continue` request to the debug adapter (useful when the target is stopped and `readMemory` times
+out). Generated **data** routes open a fresh
 TCP socket per read to the DAP adapter; if nothing is listening they return per-read `error`
 fields while the HTTP request still succeeds.
 
@@ -119,6 +121,12 @@ From Smithy models:
 
 ```bash
 sbt "run smithy --smithy /absolute/path/to/models --watch --bind-port 8080"
+```
+
+Resume a stopped debug target before reading memory:
+
+```bash
+curl -X POST localhost:8080/resume
 ```
 
 From C headers (direct to server):
