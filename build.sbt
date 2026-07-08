@@ -32,6 +32,9 @@ lazy val root = (project in file("."))
       "io.circe" %% "circe-parser" % "0.14.16",
       "co.fs2" %% "fs2-core" % "3.13.0",
       "org.scodec" %% "scodec-core" % "1.11.10",
+      "io.joern" % "eclipse-cdt-core" % "8.4.0.202401242025_1",
+      "org.eclipse.platform" % "org.eclipse.core.runtime" % "3.33.100",
+      "org.eclipse.platform" % "org.eclipse.core.resources" % "3.22.200",
       "org.scalatest" %% "scalatest" % "3.2.20" % Test
     ),
     Compile / mainClass := Some("io.github.jacoby6000.daphttp.DapHttpServerMain"),

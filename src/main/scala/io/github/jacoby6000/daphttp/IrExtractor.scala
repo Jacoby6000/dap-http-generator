@@ -65,6 +65,14 @@ object IrExtractor {
       override val traitId: ShapeId = ShapeId.from("com.jacoby6000.daphttp#s64")
       override val primitive: IrPrimitive = IrPrimitive.S64
     }
+    case object U128 extends PrimitiveTrait {
+      override val traitId: ShapeId = ShapeId.from("com.jacoby6000.daphttp#u128")
+      override val primitive: IrPrimitive = IrPrimitive.U128
+    }
+    case object S128 extends PrimitiveTrait {
+      override val traitId: ShapeId = ShapeId.from("com.jacoby6000.daphttp#s128")
+      override val primitive: IrPrimitive = IrPrimitive.S128
+    }
     case object F8 extends PrimitiveTrait {
       override val traitId: ShapeId = ShapeId.from("com.jacoby6000.daphttp#f8")
       override val primitive: IrPrimitive = IrPrimitive.F8
@@ -87,7 +95,7 @@ object IrExtractor {
     }
 
     val All: List[PrimitiveTrait] =
-      List(U8, S8, U16, S16, U32, S32, U64, S64, F8, F16, F32, F64, Char)
+      List(U8, S8, U16, S16, U32, S32, U64, S64, U128, S128, F8, F16, F32, F64, Char)
     val PrimitiveByTraitId: Map[ShapeId, IrPrimitive] = All.map(t => t.traitId -> t.primitive).toMap
   }
   private val BytesShape = ShapeId.from("com.jacoby6000.daphttp#Bytes")

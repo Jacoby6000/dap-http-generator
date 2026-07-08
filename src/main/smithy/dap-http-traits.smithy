@@ -63,6 +63,12 @@ structure u64 {}
 structure s64 {}
 
 @trait(selector: ":is(member)")
+structure u128 {}
+
+@trait(selector: ":is(member)")
+structure s128 {}
+
+@trait(selector: ":is(member)")
 structure f8 {}
 
 @trait(selector: ":is(member)")
