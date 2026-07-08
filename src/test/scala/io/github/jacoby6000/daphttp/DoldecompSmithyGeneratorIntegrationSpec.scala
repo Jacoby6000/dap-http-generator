@@ -74,4 +74,53 @@ class DoldecompSmithyGeneratorIntegrationSpec extends AnyFunSuite {
     assert(cursor.downField("position").downField("y").as[Double].toOption.contains(2.0d))
     assert(cursor.downField("position").downField("z").as[Double].toOption.contains(3.0d))
   }
+
+  test("generates IR from multiple headers with includes and compiles all routes") {
+    val fixtureRoot = Paths.get("src/test/resources/doldecomp-fixture-multi-header")
+    val irServices = DoldecompIrGenerator
+      .generateFromPaths(
+        symbolsPath = fixtureRoot.resolve("symbols.txt"),
+        headerRoots = List(fixtureRoot.resolve("include")),
+        namespace = "example.doldecomp.multi",
+        serviceName = "MeleeApi",
+        wordSizeBits = 32
+      )
+      .toOption
+      .get
+
+    val service = irServices.head
+    val plans = IrCompiler.compileRoutePlansFromIr(irServices).toOption.get
+    val playerRoute = plans("/MeleeApi/GetGPlayerState")
+    val worldRoute = plans("/MeleeApi/GetGWorldState")
+
+    assert(service.operations.map(_.name).toSet == Set("GetGPlayerState", "GetGWorldState"))
+    assert(playerRoute.reads.head.address == 0x80453100L)
+    assert(worldRoute.reads.head.address == 0x80453200L)
+    assert(playerRoute.reads.head.sizeBytes == 32)
+    assert(worldRoute.reads.head.sizeBytes == 36)
+    assert(playerRoute.reads.head.decodeCodec.nonEmpty)
+    assert(worldRoute.reads.head.decodeCodec.nonEmpty)
+
+    val playerState = service.operations
+      .find(_.name == "GetGPlayerState")
+      .get
+      .output
+      .members
+      .head
+      .target
+      .asInstanceOf[IrType.Struct]
+    val inventoryMember = playerState.members.find(_.name == "inventory").get
+    val scratchMember = playerState.members.find(_.name == "scratch").get
+
+    assert(inventoryMember.isArray)
+    assert(inventoryMember.arrayLength.contains(2))
+    assert(
+      inventoryMember.target.asInstanceOf[IrType.ListType].element
+        .asInstanceOf[IrType.Struct]
+        .members
+        .exists(_.name == "quantity")
+    )
+    assert(scratchMember.isPointer)
+    assert(scratchMember.target == IrType.Primitive(IrPrimitive.LongWord))
+  }
 }

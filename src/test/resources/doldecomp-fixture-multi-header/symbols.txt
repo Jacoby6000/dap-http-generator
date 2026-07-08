@@ -1,0 +1,2 @@
+gPlayerState = .data:0x80453100; // type:object size:0x20 ctype:PlayerState
+gWorldState = .data:0x80453200; // type:object size:0x24 ctype:WorldState
