@@ -26,9 +26,13 @@ Standard build/lint/test commands are documented in `README.md` and `.github/wor
 
 Input formats converge on a shared IR before route compilation:
 
-- Smithy → `IrExtractor` → IR → `IrCompiler` → HTTP routes
-- C headers + symbols → `DoldecompIrGenerator` → IR → `IrCompiler` → HTTP routes
-- C headers + symbols → `DoldecompIrGenerator` → IR → `IrSmithyEmitter` → `.smithy` file
+```mermaid
+flowchart LR
+  Smithy["Smithy models"] --> IrExtractor --> IR
+  CHeaders["C headers + symbols"] --> DoldecompIrGenerator --> IR
+  IR --> IrCompiler --> Routes["HTTP routes"]
+  IR --> IrSmithyEmitter --> SmithyFile[".smithy files"]
+```
 
 `IrSmithyEmitter` builds a Smithy `Model` with smithy-model shape builders and serializes it via
 `SmithyIdlModelSerializer` (do not hand-render Smithy IDL text).

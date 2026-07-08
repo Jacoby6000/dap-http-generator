@@ -56,12 +56,12 @@ members that lack explicit sizing. Pointer members are excluded (they intentiona
 
 All input pipelines converge on a shared IR, then compile to HTTP route plans:
 
-```
-Smithy models ──→ IrExtractor ──┐
-                                 ├──→ IR ──→ IrCompiler ──→ HTTP routes
-C headers + symbols ──→ DoldecompIrGenerator ──┘
-                                 │
-                                 └──→ IrSmithyEmitter ──→ .smithy files
+```mermaid
+flowchart LR
+  Smithy["Smithy models"] --> IrExtractor --> IR
+  CHeaders["C headers + symbols"] --> DoldecompIrGenerator --> IR
+  IR --> IrCompiler --> Routes["HTTP routes"]
+  IR --> IrSmithyEmitter --> SmithyFile[".smithy files"]
 ```
 
 - **`IrExtractor`** — Smithy model → IR
