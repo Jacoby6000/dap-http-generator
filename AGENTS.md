@@ -70,13 +70,13 @@ flowchart LR
 ### Non-obvious caveats
 
 - `scalafmtOnCompile := true`, so `sbt compile` will reformat sources in place.
-- The `/health` and `/routes` endpoints work without a debugger. Generated **data** routes reuse a
-  persistent TCP connection to the DAP adapter on `--dap-port` (one connection per HTTP server
-  process, serialized across concurrent requests); if the adapter is not listening they return
-  per-read `error` fields (the HTTP request still succeeds). To exercise data routes locally
-  without a real debugger, run a small mock TCP server that speaks the DAP `readMemory` framing
-  (`Content-Length: N\r\n\r\n` + JSON body, responding with
-  `{"success":true,"body":{"data":"<base64>"}}`).
+- The `/health` and `/routes` endpoints work without a debugger. On startup the server immediately
+  tries to connect to the DAP adapter on `--dap-port` (1s TCP timeout per attempt, retrying every
+  5s until connected). Generated **data** routes reuse that persistent TCP connection (serialized
+  across concurrent requests); if the adapter is not listening they return per-read `error` fields
+  (the HTTP request still succeeds). To exercise data routes locally without a real debugger, run a
+  small mock TCP server that speaks the DAP `readMemory` framing (`Content-Length: N\r\n\r\n` +
+  JSON body, responding with `{"success":true,"body":{"data":"<base64>"}}`).
 - `IrSizingWarnings` logs non-fatal warnings to stderr when IR members use ambiguous Smithy
   prelude types (`Integer`, `Long`, `Float`, `Double`) without explicit width traits (`@u32`,
   `@f64`, etc.). Pointer members are excluded.

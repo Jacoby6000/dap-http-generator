@@ -30,6 +30,8 @@ object Cli
       dapPort: Int,
       dapTimeoutMs: Int,
       dapContinueTimeoutMs: Int,
+      dapConnectTimeoutMs: Int,
+      dapConnectRetryMs: Int,
       bindHost: String,
       bindPort: Int
   )
@@ -51,6 +53,20 @@ object Cli
         metavar = "ms"
       )
       .withDefault(30000),
+    Opts
+      .option[Int](
+        "dap-connect-timeout-ms",
+        "DAP TCP connect timeout per attempt in milliseconds",
+        metavar = "ms"
+      )
+      .withDefault(1000),
+    Opts
+      .option[Int](
+        "dap-connect-retry-ms",
+        "Delay between DAP connect attempts in milliseconds",
+        metavar = "ms"
+      )
+      .withDefault(5000),
     Opts
       .option[String]("bind-host", "HTTP server bind host", metavar = "host")
       .withDefault("0.0.0.0"),
@@ -259,8 +275,11 @@ object Cli
         config.dapHost,
         config.dapPort,
         config.dapTimeoutMs,
-        config.dapContinueTimeoutMs
+        config.dapContinueTimeoutMs,
+        config.dapConnectTimeoutMs,
+        config.dapConnectRetryMs
       )
+      _ <- dapClient.startConnectionManager()
       app = HttpLoggingMiddleware(
         DapHttpServerMain.routes(plansRef, dapClient).orNotFound
       )

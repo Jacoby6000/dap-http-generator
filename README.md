@@ -20,6 +20,8 @@ Server subcommands (`smithy`, `cheaders`) share these flags:
 - `--dap-host` / `--dap-port` (default `127.0.0.1:4711`) — DAP debug adapter
 - `--dap-timeout-ms` (default `5000`) — DAP socket read timeout for memory reads
 - `--dap-continue-timeout-ms` (default `30000`) — DAP socket read timeout for `POST /resume`
+- `--dap-connect-timeout-ms` (default `1000`) — TCP connect timeout per DAP attempt
+- `--dap-connect-retry-ms` (default `5000`) — delay between DAP connect attempts at startup
 - `--bind-host` / `--bind-port` (default `0.0.0.0:8080`) — HTTP server bind address
 
 `smithy` also supports `--watch` to reload models when files change.
@@ -111,8 +113,9 @@ The server:
 - resolves DAP-backed structs (`@dapStruct`/`@bitmask`) and reads memory through a DAP `readMemory` request,
 - watches Smithy sources and reloads routes when model files change (`smithy --watch`).
 
-`/health`, `/routes`, and `POST /resume` work without generated data routes. `/resume` reuses a
-persistent DAP TCP session (initialize handshake on first use, then `continue`). Use it when the
+`/health`, `/routes`, and `POST /resume` work without generated data routes. On startup the server
+immediately tries to connect to the DAP adapter (1s TCP timeout per attempt, retrying every 5s until
+connected). `/resume` reuses the persistent DAP TCP session (then sends `continue`). Use it when the
 target is stopped and `readMemory` times out. Generated **data** routes use the same connection for
 `readMemory` (serialized under a lock); if the connection drops the client reconnects. If nothing
 is listening they return per-read `error` fields while the HTTP request still succeeds.

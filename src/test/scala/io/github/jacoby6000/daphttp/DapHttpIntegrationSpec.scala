@@ -340,6 +340,34 @@ class DapHttpIntegrationSpec extends AnyFunSuite {
     }
   }
 
+  test("connects to DAP on startup via background connection manager") {
+    val dummyDap = new DummyDapServer(Map.empty)
+    try {
+      val client = new DapHttpServerMain.SocketDapClient(
+        "127.0.0.1",
+        dummyDap.port,
+        dapConnectRetryMs = 50
+      )
+      client.startConnectionManager().unsafeRunSync()(cats.effect.unsafe.IORuntime.global)
+      eventuallyConnected(client)
+    } finally {
+      dummyDap.close()
+    }
+  }
+
+  private def eventuallyConnected(
+      client: DapHttpServerMain.SocketDapClient,
+      timeoutMs: Long = 5000L
+  ): Unit = {
+    val deadline = System.nanoTime() + timeoutMs * 1000000L
+    while (!client.isConnected && System.nanoTime() < deadline) {
+      Thread.sleep(25L)
+    }
+    if (!client.isConnected) {
+      fail("DAP client did not connect before timeout")
+    }
+  }
+
   test("reuses one DAP connection across continue and readMemory") {
     val dummyDap = new DummyDapServer(Map((0x1000L, 4) -> Array(0x01, 0x02, 0x03, 0x04)))
     try {

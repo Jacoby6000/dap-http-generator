@@ -20,6 +20,7 @@ import software.amazon.smithy.model.Model
 
 import java.io.BufferedInputStream
 import java.io.BufferedOutputStream
+import java.net.InetSocketAddress
 import java.net.Socket
 import java.nio.charset.StandardCharsets
 import java.nio.file.Files
@@ -37,6 +38,8 @@ object DapHttpServerMain extends IOApp {
       dapPort: Int,
       dapTimeoutMs: Int,
       dapContinueTimeoutMs: Int,
+      dapConnectTimeoutMs: Int,
+      dapConnectRetryMs: Int,
       bindHost: String,
       bindPort: Int,
       watch: Boolean
@@ -54,8 +57,11 @@ object DapHttpServerMain extends IOApp {
             config.dapHost,
             config.dapPort,
             config.dapTimeoutMs,
-            config.dapContinueTimeoutMs
+            config.dapContinueTimeoutMs,
+            config.dapConnectTimeoutMs,
+            config.dapConnectRetryMs
           )
+          _ <- dapClient.startConnectionManager()
           app = HttpLoggingMiddleware(
             DapHttpServerMain.routes(plansRef, dapClient).orNotFound
           )
@@ -98,6 +104,10 @@ object DapHttpServerMain extends IOApp {
             .get("dapContinueTimeoutMs")
             .flatMap(v => Try(v.toInt).toOption)
             .getOrElse(30000),
+          dapConnectTimeoutMs =
+            values.get("dapConnectTimeoutMs").flatMap(v => Try(v.toInt).toOption).getOrElse(1000),
+          dapConnectRetryMs =
+            values.get("dapConnectRetryMs").flatMap(v => Try(v.toInt).toOption).getOrElse(5000),
           bindHost = values.getOrElse("bindHost", "0.0.0.0"),
           bindPort = values.get("bindPort").flatMap(v => Try(v.toInt).toOption).getOrElse(8080),
           watch = values.get("watch").forall(_.toBooleanOption.getOrElse(true))
@@ -329,16 +339,49 @@ object DapHttpServerMain extends IOApp {
   private[daphttp] trait DapClient {
     def readMemory(address: Long, sizeBytes: Int): IO[Either[String, String]]
     def continueExecution(): IO[Either[String, Json]]
+    def startConnectionManager(): IO[Unit] = IO.unit
   }
 
   private[daphttp] final class SocketDapClient(
       host: String,
       port: Int,
       dapTimeoutMs: Int = 5000,
-      dapContinueTimeoutMs: Int = 30000
+      dapContinueTimeoutMs: Int = 30000,
+      dapConnectTimeoutMs: Int = 1000,
+      dapConnectRetryMs: Int = 5000
   ) extends DapClient {
     private val connectionLock = new AnyRef
     private var session: Option[DapSocketSession] = None
+
+    private[daphttp] def isConnected: Boolean =
+      connectionLock.synchronized(session.exists(_.isOpen))
+
+    override def startConnectionManager(): IO[Unit] = {
+      def maintainConnection: IO[Unit] =
+        IO.blocking(isConnected).flatMap {
+          case true =>
+            IO.sleep(dapConnectRetryMs.millis) *> maintainConnection
+          case false =>
+            IO.blocking(tryEstablishSession()) flatMap {
+              case Right(_) =>
+                DapHttpLoggers.dap.info(
+                  "DAP session ready host={} port={}",
+                  host,
+                  Integer.valueOf(port)
+                )
+                IO.sleep(dapConnectRetryMs.millis) *> maintainConnection
+              case Left(error) =>
+                DapHttpLoggers.dap.warn(
+                  "DAP connect failed ({}); retrying in {} ms",
+                  error,
+                  Integer.valueOf(dapConnectRetryMs)
+                )
+                IO.sleep(dapConnectRetryMs.millis) *> maintainConnection
+            }
+        }
+
+      maintainConnection.start.void
+    }
 
     override def readMemory(address: Long, sizeBytes: Int): IO[Either[String, String]] =
       IO.blocking {
@@ -459,27 +502,63 @@ object DapHttpServerMain extends IOApp {
     }
 
     private def ensureSession(timeoutMs: Int): DapSocketSession =
-      session.filter(_.isOpen) match {
-        case Some(activeSession) =>
-          activeSession.setTimeout(timeoutMs)
-          activeSession
-        case None =>
-          DapHttpLoggers.dap.info(
-            "connecting DAP session host={} port={}",
-            host,
-            Integer.valueOf(port)
-          )
-          val socket = new Socket(host, port)
-          socket.setSoTimeout(timeoutMs)
-          val activeSession = new DapSocketSession(
-            socket,
-            new BufferedOutputStream(socket.getOutputStream),
-            new BufferedInputStream(socket.getInputStream),
-            timeoutMs
-          )
-          session = Some(activeSession)
-          activeSession
+      connectionLock.synchronized {
+        session.filter(_.isOpen) match {
+          case Some(activeSession) =>
+            activeSession.setTimeout(timeoutMs)
+            activeSession
+          case None =>
+            establishSession(timeoutMs, dapConnectTimeoutMs) match {
+              case Right(activeSession) =>
+                session = Some(activeSession)
+                activeSession
+              case Left(error) =>
+                throw new java.io.IOException(error)
+            }
+        }
       }
+
+    private def tryEstablishSession(): Either[String, Unit] =
+      connectionLock.synchronized {
+        session.filter(_.isOpen) match {
+          case Some(_) => Right(())
+          case None    =>
+            establishSession(dapTimeoutMs, dapConnectTimeoutMs).map { activeSession =>
+              session = Some(activeSession)
+            }
+        }
+      }
+
+    private def establishSession(
+        requestTimeoutMs: Int,
+        connectTimeoutMs: Int
+    ): Either[String, DapSocketSession] = {
+      DapHttpLoggers.dap.info(
+        "connecting DAP session host={} port={}",
+        host,
+        Integer.valueOf(port)
+      )
+      val socket = new Socket()
+      try {
+        socket.connect(new InetSocketAddress(host, port), connectTimeoutMs)
+        socket.setSoTimeout(requestTimeoutMs)
+        val activeSession = new DapSocketSession(
+          socket,
+          new BufferedOutputStream(socket.getOutputStream),
+          new BufferedInputStream(socket.getInputStream),
+          requestTimeoutMs
+        )
+        activeSession.initialize().map(_ => activeSession)
+      } catch {
+        case error: Exception =>
+          try {
+            socket.close()
+          } catch {
+            case _: Exception => ()
+          }
+          Left(error.getMessage)
+      }
+    }
 
     private def invalidateSession(): Unit =
       connectionLock.synchronized {
@@ -512,37 +591,13 @@ object DapHttpServerMain extends IOApp {
         }
 
       def sendRequest(command: String, arguments: Option[Json]): Either[String, Json] =
-        ensureInitialized().flatMap { _ =>
+        initialize().flatMap { _ =>
           val requestSeq = nextSeq()
           writeRequest(requestSeq, command, arguments)
           readUntilResponse(requestSeq, command)
         }
 
-      def trySendRequest(
-          command: String,
-          arguments: Option[Json],
-          requestTimeoutMs: Int
-      ): Option[Json] = {
-        val previousTimeout = timeoutMs
-        setTimeout(requestTimeoutMs)
-        val result =
-          try {
-            sendRequest(command, arguments).toOption
-          } catch {
-            case _: java.net.SocketTimeoutException =>
-              DapHttpLoggers.dap.debug(
-                "DAP {} timed out after {} ms",
-                command,
-                Integer.valueOf(requestTimeoutMs)
-              )
-              None
-          } finally {
-            setTimeout(previousTimeout)
-          }
-        result
-      }
-
-      private def ensureInitialized(): Either[String, Unit] =
+      def initialize(): Either[String, Unit] =
         if (initialized) {
           Right(())
         } else {
@@ -580,6 +635,30 @@ object DapHttpServerMain extends IOApp {
             }
           }
         }
+
+      def trySendRequest(
+          command: String,
+          arguments: Option[Json],
+          requestTimeoutMs: Int
+      ): Option[Json] = {
+        val previousTimeout = timeoutMs
+        setTimeout(requestTimeoutMs)
+        val result =
+          try {
+            sendRequest(command, arguments).toOption
+          } catch {
+            case _: java.net.SocketTimeoutException =>
+              DapHttpLoggers.dap.debug(
+                "DAP {} timed out after {} ms",
+                command,
+                Integer.valueOf(requestTimeoutMs)
+              )
+              None
+          } finally {
+            setTimeout(previousTimeout)
+          }
+        result
+      }
 
       private def nextSeq(): Int = {
         val value = seqCounter
