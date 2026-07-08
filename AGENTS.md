@@ -70,12 +70,13 @@ flowchart LR
 ### Non-obvious caveats
 
 - `scalafmtOnCompile := true`, so `sbt compile` will reformat sources in place.
-- The `/health` and `/routes` endpoints work without a debugger. Generated **data** routes
-  (e.g. `/DolDecompApi/GetGPlayerState`) open a fresh TCP socket per read to a DAP adapter on
-  `--dap-port`; with no adapter listening they return per-read `error` fields (the HTTP request
-  still succeeds). To exercise data routes locally without a real debugger, run a small mock TCP
-  server that speaks the DAP `readMemory` framing (`Content-Length: N\r\n\r\n` + JSON body,
-  responding with `{"success":true,"body":{"data":"<base64>"}}`).
+- The `/health` and `/routes` endpoints work without a debugger. Generated **data** routes reuse a
+  persistent TCP connection to the DAP adapter on `--dap-port` (one connection per HTTP server
+  process, serialized across concurrent requests); if the adapter is not listening they return
+  per-read `error` fields (the HTTP request still succeeds). To exercise data routes locally
+  without a real debugger, run a small mock TCP server that speaks the DAP `readMemory` framing
+  (`Content-Length: N\r\n\r\n` + JSON body, responding with
+  `{"success":true,"body":{"data":"<base64>"}}`).
 - `IrSizingWarnings` logs non-fatal warnings to stderr when IR members use ambiguous Smithy
   prelude types (`Integer`, `Long`, `Float`, `Double`) without explicit width traits (`@u32`,
   `@f64`, etc.). Pointer members are excluded.

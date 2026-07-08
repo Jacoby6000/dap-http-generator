@@ -111,11 +111,11 @@ The server:
 - resolves DAP-backed structs (`@dapStruct`/`@bitmask`) and reads memory through a DAP `readMemory` request,
 - watches Smithy sources and reloads routes when model files change (`smithy --watch`).
 
-`/health`, `/routes`, and `POST /resume` work without generated data routes. `/resume` opens a DAP
-session (initialize handshake, optional `configurationDone`, then `continue`) on the debug adapter.
-Use it when the target is stopped and `readMemory` times out. Generated **data** routes open a fresh
-TCP socket per read to the DAP adapter; if nothing is listening they return per-read `error`
-fields while the HTTP request still succeeds.
+`/health`, `/routes`, and `POST /resume` work without generated data routes. `/resume` reuses a
+persistent DAP TCP session (initialize handshake on first use, then `continue`). Use it when the
+target is stopped and `readMemory` times out. Generated **data** routes use the same connection for
+`readMemory` (serialized under a lock); if the connection drops the client reconnects. If nothing
+is listening they return per-read `error` fields while the HTTP request still succeeds.
 
 ### Running locally
 

@@ -337,6 +337,8 @@ object DapHttpServerMain extends IOApp {
       dapTimeoutMs: Int = 5000,
       dapContinueTimeoutMs: Int = 30000
   ) extends DapClient {
+    private val connectionLock = new AnyRef
+    private var session: Option[DapSocketSession] = None
 
     override def readMemory(address: Long, sizeBytes: Int): IO[Either[String, String]] =
       IO.blocking {
@@ -348,8 +350,8 @@ object DapHttpServerMain extends IOApp {
           Integer.valueOf(sizeBytes)
         )
 
-        withSession(dapTimeoutMs) { session =>
-          session
+        withPersistentSession(dapTimeoutMs) { activeSession =>
+          activeSession
             .sendRequest(
               command = "readMemory",
               arguments = Some(
@@ -394,13 +396,13 @@ object DapHttpServerMain extends IOApp {
     override def continueExecution(): IO[Either[String, Json]] =
       IO.blocking {
         DapHttpLoggers.dap.info("continue host={} port={}", host, Integer.valueOf(port))
-        withSession(dapContinueTimeoutMs) { session =>
+        withPersistentSession(dapContinueTimeoutMs) { activeSession =>
           val threadId =
-            session
+            activeSession
               .trySendRequest(
                 command = "threads",
                 arguments = None,
-                timeoutMs = math.min(dapTimeoutMs, 2000)
+                requestTimeoutMs = math.min(dapTimeoutMs, 2000)
               )
               .flatMap(json => parseThreadIds(json).headOption)
               .getOrElse {
@@ -408,7 +410,7 @@ object DapHttpServerMain extends IOApp {
                 1
               }
 
-          session
+          activeSession
             .sendRequest(
               command = "continue",
               arguments = Some(Json.obj("threadId" -> Json.fromInt(threadId)))
@@ -432,31 +434,82 @@ object DapHttpServerMain extends IOApp {
         Left(error.getMessage)
       }
 
-    private def withSession[A](timeoutMs: Int)(
+    private def withPersistentSession[A](timeoutMs: Int)(
         f: DapSocketSession => A
     ): A = {
-      val socket = new Socket(host, port)
-      socket.setSoTimeout(timeoutMs)
-      try {
-        f(
-          new DapSocketSession(
+      def run(retrying: Boolean): A =
+        connectionLock.synchronized {
+          val activeSession = ensureSession(timeoutMs)
+          try {
+            f(activeSession)
+          } catch {
+            case error: Exception =>
+              DapHttpLoggers.dap.warn(
+                "DAP connection error (retrying={}): {}",
+                java.lang.Boolean.valueOf(!retrying),
+                error.getMessage
+              )
+              invalidateSession()
+              if (!retrying) run(retrying = true)
+              else throw error
+          }
+        }
+
+      run(retrying = false)
+    }
+
+    private def ensureSession(timeoutMs: Int): DapSocketSession =
+      session.filter(_.isOpen) match {
+        case Some(activeSession) =>
+          activeSession.setTimeout(timeoutMs)
+          activeSession
+        case None =>
+          DapHttpLoggers.dap.info(
+            "connecting DAP session host={} port={}",
+            host,
+            Integer.valueOf(port)
+          )
+          val socket = new Socket(host, port)
+          socket.setSoTimeout(timeoutMs)
+          val activeSession = new DapSocketSession(
             socket,
             new BufferedOutputStream(socket.getOutputStream),
-            new BufferedInputStream(socket.getInputStream)
+            new BufferedInputStream(socket.getInputStream),
+            timeoutMs
           )
-        )
-      } finally {
-        socket.close()
+          session = Some(activeSession)
+          activeSession
       }
-    }
+
+    private def invalidateSession(): Unit =
+      connectionLock.synchronized {
+        session.foreach(_.close())
+        session = None
+      }
 
     private final class DapSocketSession(
         socket: Socket,
         out: BufferedOutputStream,
-        in: BufferedInputStream
+        in: BufferedInputStream,
+        initialTimeoutMs: Int
     ) {
       private var seqCounter = 1
       private var initialized = false
+      private var timeoutMs = initialTimeoutMs
+
+      def isOpen: Boolean = !socket.isClosed && socket.isConnected
+
+      def setTimeout(ms: Int): Unit = {
+        timeoutMs = ms
+        socket.setSoTimeout(ms)
+      }
+
+      def close(): Unit =
+        try {
+          socket.close()
+        } catch {
+          case _: Exception => ()
+        }
 
       def sendRequest(command: String, arguments: Option[Json]): Either[String, Json] =
         ensureInitialized().flatMap { _ =>
@@ -468,10 +521,10 @@ object DapHttpServerMain extends IOApp {
       def trySendRequest(
           command: String,
           arguments: Option[Json],
-          timeoutMs: Int
+          requestTimeoutMs: Int
       ): Option[Json] = {
-        val previousTimeout = socket.getSoTimeout
-        socket.setSoTimeout(timeoutMs)
+        val previousTimeout = timeoutMs
+        setTimeout(requestTimeoutMs)
         val result =
           try {
             sendRequest(command, arguments).toOption
@@ -480,11 +533,11 @@ object DapHttpServerMain extends IOApp {
               DapHttpLoggers.dap.debug(
                 "DAP {} timed out after {} ms",
                 command,
-                Integer.valueOf(timeoutMs)
+                Integer.valueOf(requestTimeoutMs)
               )
               None
           } finally {
-            socket.setSoTimeout(previousTimeout)
+            setTimeout(previousTimeout)
           }
         result
       }

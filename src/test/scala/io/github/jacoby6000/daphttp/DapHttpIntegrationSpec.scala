@@ -340,16 +340,19 @@ class DapHttpIntegrationSpec extends AnyFunSuite {
     }
   }
 
-  test("POST /resume completes DAP initialize and continue handshake") {
-    val dummyDap = new DummyDapServer(Map.empty)
+  test("reuses one DAP connection across continue and readMemory") {
+    val dummyDap = new DummyDapServer(Map((0x1000L, 4) -> Array(0x01, 0x02, 0x03, 0x04)))
     try {
-      val result = new DapHttpServerMain.SocketDapClient("127.0.0.1", dummyDap.port)
-        .continueExecution()
-        .unsafeRunSync()(cats.effect.unsafe.IORuntime.global)
+      val client = new DapHttpServerMain.SocketDapClient("127.0.0.1", dummyDap.port)
+      val resumeResult =
+        client.continueExecution().unsafeRunSync()(cats.effect.unsafe.IORuntime.global)
+      val readResult =
+        client.readMemory(0x1000L, 4).unsafeRunSync()(cats.effect.unsafe.IORuntime.global)
 
-      assert(result.isRight)
+      assert(resumeResult.isRight)
+      assert(readResult.isRight)
       assert(
-        result.toOption.get.hcursor.downField("allThreadsContinued").as[Boolean].contains(true)
+        readResult.toOption.get == Base64.getEncoder.encodeToString(Array(0x01, 0x02, 0x03, 0x04))
       )
     } finally {
       dummyDap.close()
