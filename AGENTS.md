@@ -28,7 +28,4 @@ and CI's `scalafmtCheckAll;scalafmtSbtCheck` / `scalafixAll --check`).
   still succeeds). To exercise data routes locally without a real debugger, run a small mock TCP
   server that speaks the DAP `readMemory` framing (`Content-Length: N\r\n\r\n` + JSON body,
   responding with `{"success":true,"body":{"data":"<base64>"}}`).
-- Two tests currently fail on `main` as well and are unrelated to environment setup:
-  `IrCompilerCodecSpec` (S64 JSON-string vs int) and `DoldecompSmithyGeneratorIntegrationSpec`
-  (multi-header `None.get`). Do not assume the suite is fully green.
 - First `sbt` invocation downloads sbt/Scala launchers and Coursier deps; expect a slow cold start.
