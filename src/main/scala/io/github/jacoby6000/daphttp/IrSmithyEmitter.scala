@@ -1,19 +1,34 @@
 package io.github.jacoby6000.daphttp
 
+import software.amazon.smithy.model.Model
+import software.amazon.smithy.model.node.Node
+import software.amazon.smithy.model.shapes.ListShape
+import software.amazon.smithy.model.shapes.MapShape
+import software.amazon.smithy.model.shapes.MemberShape
+import software.amazon.smithy.model.shapes.OperationShape
+import software.amazon.smithy.model.shapes.ServiceShape
+import software.amazon.smithy.model.shapes.Shape
 import software.amazon.smithy.model.shapes.ShapeId
+import software.amazon.smithy.model.shapes.SmithyIdlModelSerializer
+import software.amazon.smithy.model.shapes.StructureShape
+import software.amazon.smithy.model.shapes.UnionShape
+import software.amazon.smithy.model.traits.DynamicTrait
+import software.amazon.smithy.model.traits.Trait
 
 import java.nio.file.Files
 import java.nio.file.Path
+import java.nio.file.Paths
+import java.util.function.Consumer
+import scala.jdk.CollectionConverters._
 
 object IrSmithyEmitter {
   private val TraitsNamespace = "com.jacoby6000.daphttp"
-  private val BytesShapeName = "Bytes"
-  private val BitsShapeName = "Bits"
+  private val TraitsPath = Paths.get("src/main/smithy/dap-http-traits.smithy")
+  private val BytesShapeId = ShapeId.from(s"$TraitsNamespace#Bytes")
+  private val BitsShapeId = ShapeId.from(s"$TraitsNamespace#Bits")
 
   private final case class CollectionState(
       shapes: List[(ShapeId, IrType)] = Nil,
-      usedTraits: Set[String] = Set.empty,
-      usedShapeImports: Set[String] = Set.empty,
       errors: List[String] = Nil,
       visiting: Set[ShapeId] = Set.empty
   ) {
@@ -21,12 +36,6 @@ object IrSmithyEmitter {
 
     def withError(message: String): CollectionState =
       copy(errors = message :: errors)
-
-    def withTraits(traitNames: Set[String]): CollectionState =
-      copy(usedTraits = usedTraits ++ traitNames)
-
-    def withShapeImport(name: String): CollectionState =
-      copy(usedShapeImports = usedShapeImports + name)
 
     def withShape(id: ShapeId, irType: IrType): CollectionState =
       if (shapeIds.contains(id)) this else copy(shapes = shapes :+ (id -> irType))
@@ -39,21 +48,7 @@ object IrSmithyEmitter {
   }
 
   def emit(services: List[IrService]): Either[List[String], String] =
-    if (services.isEmpty) {
-      Left(List("At least one IR service is required to emit Smithy."))
-    } else {
-      val namespace = services
-        .flatMap(_.operations.map(_.output.id.getNamespace))
-        .headOption
-        .getOrElse("generated")
-      collectShapes(services) match {
-        case state if state.errors.nonEmpty =>
-          Left(state.errors.distinct)
-        case state =>
-          val traits = state.usedTraits ++ serviceTraits(services) ++ shapeTraits(state.shapes)
-          Right(renderModel(namespace, services, state.shapes, traits, state.usedShapeImports))
-      }
-    }
+    buildModel(services).map(serializeModel)
 
   def emitToPath(services: List[IrService], outputPath: Path): Either[List[String], Unit] =
     emit(services).map { content =>
@@ -65,60 +60,66 @@ object IrSmithyEmitter {
       ()
     }
 
+  def buildModel(services: List[IrService]): Either[List[String], Model] =
+    if (services.isEmpty) {
+      Left(List("At least one IR service is required to emit Smithy."))
+    } else {
+      val namespaces = services.flatMap(_.operations.map(_.output.id.getNamespace)).toSet
+      collectShapes(services) match {
+        case state if state.errors.nonEmpty =>
+          Left(state.errors.distinct)
+        case state =>
+          val shapes = state.shapes.flatMap { case (id, irType) => buildShape(id, irType) }
+          val operations = services.flatMap(_.operations.flatMap(buildOperation))
+          val serviceShapes = services.flatMap(service => buildService(service, namespaces))
+          val model = Model
+            .builder()
+            .addShapes(traitsModel)
+            .addShapes((shapes ++ operations ++ serviceShapes): _*)
+            .build()
+          validateModel(model)
+      }
+    }
+
+  private lazy val traitsModel: Model =
+    Model.assembler().addImport(TraitsPath.toString).assemble().unwrap()
+
+  private def validateModel(model: Model): Either[List[String], Model] = {
+    val result = Model.assembler().addModel(model).assemble()
+    if (result.isBroken) {
+      Left(result.getValidationEvents.asScala.map(_.toString).toList.distinct)
+    } else {
+      Right(result.unwrap())
+    }
+  }
+
+  private def serializeModel(model: Model): String = {
+    val namespaces = model
+      .shapes()
+      .iterator()
+      .asScala
+      .map(_.getId.getNamespace)
+      .filter(ns => ns != "smithy.api" && ns != TraitsNamespace)
+      .toSet
+
+    val serializer = SmithyIdlModelSerializer
+      .builder()
+      .shapeFilter(shape => namespaces.contains(shape.getId.getNamespace))
+      .build()
+
+    serializer
+      .serialize(model)
+      .asScala
+      .toList
+      .sortBy(_._1.toString)
+      .map(_._2)
+      .mkString("\n\n")
+  }
+
   private def collectShapes(services: List[IrService]): CollectionState =
     services
       .flatMap(_.operations.map(_.output))
       .foldLeft(CollectionState())(visitType)
-
-  private def memberTraits(member: IrMember): Set[String] =
-    (Set(
-      Option.when(member.isPointer)("pointer"),
-      Option.when(member.isArray)("array"),
-      member.staticAddress.map(_ => "staticAddress"),
-      member.paddingRepeats.map(_ => "padding"),
-      member.arrayLength.map(_ => "length"),
-      member.endianOverride.map(_ => "endian")
-    ).flatten ++ memberTraitNames(member)).toSet
-
-  private def memberTraitNames(member: IrMember): List[String] =
-    member.primitiveOverride match {
-      case Some(kind) =>
-        primitiveTraitFor(kind).toList
-      case None =>
-        member.target match {
-          case IrType.Primitive(kind) => unsignedOrCustomTrait(kind).toList
-          case _                      => Nil
-        }
-    }
-
-  private def unsignedOrCustomTrait(kind: IrPrimitive): Option[String] =
-    kind match {
-      case IrPrimitive.U8 | IrPrimitive.U16 | IrPrimitive.U32 | IrPrimitive.U64 | IrPrimitive.U128 |
-          IrPrimitive.F8 | IrPrimitive.F16 | IrPrimitive.Char =>
-        primitiveTraitFor(kind)
-      case _ =>
-        None
-    }
-
-  private def serviceTraits(services: List[IrService]): Set[String] =
-    services.flatMap { service =>
-      List(
-        service.wordSizeBits.map(_ => "wordSize"),
-        Option.when(service.defaultEndian != IrEndian.Big)("endian")
-      ).flatten
-    }.toSet
-
-  private def shapeTraits(shapes: List[(ShapeId, IrType)]): Set[String] =
-    shapes.flatMap { case (_, irType) =>
-      irType match {
-        case _: IrType.Bitmask => List("bitmask", "size")
-        case struct: IrType.MemoryMappedStruct if struct.declaredSizeBits.nonEmpty =>
-          List("dapStruct", "size")
-        case _: IrType.MemoryMappedStruct                              => List("dapStruct")
-        case struct: IrType.Struct if struct.declaredSizeBits.nonEmpty => List("size")
-        case _                                                         => Nil
-      }
-    }.toSet
 
   private def visitType(state: CollectionState, irType: IrType): CollectionState =
     irType match {
@@ -126,10 +127,8 @@ object IrSmithyEmitter {
         visitNamedShape(state, struct.id, struct)
       case union: IrType.Union =>
         visitNamedShape(state, union.id, union)
-      case listType: IrType.ListType if listType.bytesAlias =>
-        visitType(state.withShapeImport(BytesShapeName), listType.element)
-      case listType: IrType.ListType if listType.bitsAlias =>
-        visitType(state.withShapeImport(BitsShapeName), listType.element)
+      case listType: IrType.ListType if listType.bytesAlias || listType.bitsAlias =>
+        visitType(state, listType.element)
       case listType: IrType.ListType =>
         visitNamedShape(state, listType.id, listType)
       case mapType: IrType.MapType =>
@@ -144,7 +143,7 @@ object IrSmithyEmitter {
     }
 
   private def visitMemberTarget(state: CollectionState, member: IrMember): CollectionState =
-    visitType(state.withTraits(memberTraits(member)), member.target)
+    visitType(state, member.target)
 
   private def isPreludeShape(id: ShapeId): Boolean =
     id.getNamespace == "smithy.api"
@@ -177,142 +176,194 @@ object IrSmithyEmitter {
       afterChildren.withoutVisiting(id).withShape(id, irType)
     }
 
-  private def renderModel(
-      namespace: String,
-      services: List[IrService],
-      shapes: List[(ShapeId, IrType)],
-      usedTraits: Set[String],
-      usedShapeImports: Set[String]
-  ): String = {
-    val sections = List(
-      """$version: "2"""",
-      "",
-      s"namespace $namespace",
-      "",
-      renderTraitUses(usedTraits, usedShapeImports)
-    ) ++ shapes.flatMap { case (id, irType) =>
-      renderShape(id, irType) :+ ""
-    } ++ services.flatMap { service =>
-      renderService(service) :+ ""
-    }
-    sections.mkString("\n")
-  }
+  private def buildService(service: IrService, namespaces: Set[String]): Option[ServiceShape] = {
+    val namespace = service.operations.headOption.map(_.output.id.getNamespace)
+    namespace.flatMap { ns =>
+      if (namespaces.contains(ns)) {
+        val builder = ServiceShape
+          .builder()
+          .id(ShapeId.from(s"$ns#${service.name}"))
+          .version("1")
+          .operations(service.operations.map(op => ShapeId.from(s"$ns#${op.name}")).asJava)
 
-  private def renderTraitUses(usedTraits: Set[String], usedShapeImports: Set[String]): String = {
-    val imports = (usedTraits.toList.sorted ++ usedShapeImports.toList.sorted).distinct
-    if (imports.isEmpty) {
-      ""
-    } else {
-      imports.map(name => s"use $TraitsNamespace#$name").mkString("\n") + "\n"
+        service.wordSizeBits.foreach(bits => builder.addTrait(intTrait("wordSize", bits)))
+        if (service.defaultEndian != IrEndian.Big) {
+          builder.addTrait(stringTrait("endian", "little"))
+        }
+
+        Some(builder.build())
+      } else {
+        None
+      }
     }
   }
 
-  private def renderShape(id: ShapeId, irType: IrType): List[String] =
+  private def buildOperation(operation: IrOperation): Option[OperationShape] = {
+    val namespace = operation.output.id.getNamespace
+    Some(
+      OperationShape
+        .builder()
+        .id(ShapeId.from(s"$namespace#${operation.name}"))
+        .output(operation.output.id)
+        .build()
+    )
+  }
+
+  private def buildShape(id: ShapeId, irType: IrType): Option[Shape] =
     irType match {
-      case bitmask: IrType.Bitmask =>
-        List("@bitmask") ++
-          bitmask.declaredSizeBits.toList.map(size => s"@size($size)") ++
-          List(s"structure ${id.getName} {") ++
-          bitmask.members.flatMap(renderMember) ++
-          List("}")
+      case struct: IrType.Bitmask =>
+        Some(
+          buildStructure(
+            id,
+            struct.members,
+            struct.declaredSizeBits,
+            isBitmask = true,
+            isDapStruct = false
+          )
+        )
       case struct: IrType.MemoryMappedStruct =>
-        List("@dapStruct") ++
-          struct.declaredSizeBits.toList.map(size => s"@size($size)") ++
-          List(s"structure ${id.getName} {") ++
-          struct.members.flatMap(renderMember) ++
-          List("}")
+        Some(
+          buildStructure(
+            id,
+            struct.members,
+            struct.declaredSizeBits,
+            isBitmask = false,
+            isDapStruct = true
+          )
+        )
       case struct: IrType.EnclosingStruct =>
-        struct.declaredSizeBits.toList.map(size => s"@size($size)") ++
-          List(s"structure ${id.getName} {") ++
-          struct.members.flatMap(renderMember) ++
-          List("}")
+        Some(
+          buildStructure(
+            id,
+            struct.members,
+            struct.declaredSizeBits,
+            isBitmask = false,
+            isDapStruct = false
+          )
+        )
       case union: IrType.Union =>
-        List(s"union ${id.getName} {") ++
-          union.members.flatMap(renderMember) ++
-          List("}")
-      case listType: IrType.ListType if listType.bytesAlias =>
-        List(
-          s"list $BytesShapeName {",
-          s"    member: ${renderTypeReference(listType.element)}",
-          "}"
-        )
-      case listType: IrType.ListType if listType.bitsAlias =>
-        List(
-          s"list $BitsShapeName {",
-          s"    member: ${renderTypeReference(listType.element)}",
-          "}"
-        )
+        Some(buildUnion(id, union.members))
+      case listType: IrType.ListType if listType.bytesAlias || listType.bitsAlias =>
+        None
       case listType: IrType.ListType =>
-        List(
-          s"list ${id.getName} {",
-          s"    member: ${renderTypeReference(listType.element)}",
-          "}"
+        Some(
+          ListShape
+            .builder()
+            .id(id)
+            .member(targetShapeId(listType.element))
+            .build()
         )
       case mapType: IrType.MapType =>
-        List(
-          s"map ${id.getName} {",
-          s"    key: ${renderTypeReference(mapType.key)}",
-          s"    value: ${renderTypeReference(mapType.value)}",
-          "}"
+        Some(
+          MapShape
+            .builder()
+            .id(id)
+            .key(targetShapeId(mapType.key))
+            .value(targetShapeId(mapType.value))
+            .build()
         )
       case _ =>
-        Nil
+        None
     }
 
-  private def renderService(service: IrService): List[String] = {
-    val header =
-      service.wordSizeBits.toList.map(wordSize => s"@wordSize($wordSize)") ++
-        Option.when(service.defaultEndian != IrEndian.Big)("""@endian("little")""").toList ++
-        List(
-          s"service ${service.name} {",
-          """    version: "1"""",
-          s"    operations: [${service.operations.map(_.name).mkString(", ")}]",
-          "}"
-        )
-    val operations = service.operations.flatMap { operation =>
-      List(
-        s"operation ${operation.name} {",
-        s"    output: ${operation.output.id.getName}",
-        "}"
-      ) :+ ""
+  private def buildStructure(
+      id: ShapeId,
+      members: List[IrMember],
+      declaredSizeBits: Option[Int],
+      isBitmask: Boolean,
+      isDapStruct: Boolean
+  ): StructureShape = {
+    val builder = StructureShape.builder().id(id)
+    if (isBitmask) {
+      builder.addTrait(annotationTrait("bitmask"))
     }
-    header ++ List("") ++ operations
+    if (isDapStruct) {
+      builder.addTrait(annotationTrait("dapStruct"))
+    }
+    declaredSizeBits.foreach(size => builder.addTrait(intTrait("size", size)))
+    members.foreach(member => addMember(builder, member))
+    builder.build()
   }
 
-  private def renderMember(member: IrMember): List[String] = {
-    val annotations =
-      member.staticAddress.toList.map(address =>
-        s"""    @staticAddress("${formatAddress(address)}")"""
-      ) ++
-        member.paddingRepeats.toList.map(repeats => s"    @padding($repeats)") ++
-        Option.when(member.isPointer)("    @pointer").toList ++
-        Option.when(member.isArray)("    @array").toList ++
-        member.arrayLength.toList.map(length => s"    @length($length)") ++
-        member.endianOverride.toList.map {
-          case IrEndian.Big    => """    @endian("big")"""
-          case IrEndian.Little => """    @endian("little")"""
-        } ++
-        memberTraitNames(member).map(traitName => s"    @$traitName")
-    annotations :+ s"    ${member.name}: ${renderMemberTargetType(member)}"
+  private def buildUnion(id: ShapeId, members: List[IrMember]): UnionShape = {
+    val builder = UnionShape.builder().id(id)
+    members.foreach(member => addMember(builder, member))
+    builder.build()
   }
 
-  private def renderMemberTargetType(member: IrMember): String =
+  private def addMember(
+      builder: StructureShape.Builder,
+      member: IrMember
+  ): StructureShape.Builder =
+    builder.addMember(
+      member.name,
+      memberTargetShapeId(member),
+      memberTraitConsumer(member)
+    )
+
+  private def addMember(
+      builder: UnionShape.Builder,
+      member: IrMember
+  ): UnionShape.Builder =
+    builder.addMember(
+      member.name,
+      memberTargetShapeId(member),
+      memberTraitConsumer(member)
+    )
+
+  private def memberTraitConsumer(member: IrMember): Consumer[MemberShape.Builder] =
+    (update: MemberShape.Builder) => memberSmithyTraits(member).foreach(update.addTrait)
+
+  private def memberTargetShapeId(member: IrMember): ShapeId =
     if (member.isPointer) {
-      "Long"
+      ShapeId.from("smithy.api#Long")
     } else {
-      renderTypeReference(member.target)
+      targetShapeId(member.target)
     }
 
-  private def renderTypeReference(irType: IrType): String =
+  private def targetShapeId(irType: IrType): ShapeId =
     irType match {
-      case struct: IrType.Struct                            => struct.id.getName
-      case union: IrType.Union                              => union.id.getName
-      case listType: IrType.ListType if listType.bytesAlias => BytesShapeName
-      case listType: IrType.ListType if listType.bitsAlias  => BitsShapeName
-      case listType: IrType.ListType                        => listType.id.getName
-      case mapType: IrType.MapType                          => mapType.id.getName
-      case IrType.Ref(id)                                   => id.getName
-      case IrType.Primitive(kind)                           => smithyBaseType(kind)
+      case struct: IrType.Struct                            => struct.id
+      case union: IrType.Union                              => union.id
+      case listType: IrType.ListType if listType.bytesAlias => BytesShapeId
+      case listType: IrType.ListType if listType.bitsAlias  => BitsShapeId
+      case listType: IrType.ListType                        => listType.id
+      case mapType: IrType.MapType                          => mapType.id
+      case IrType.Ref(id)                                   => id
+      case IrType.Primitive(kind)                           => preludeShapeId(kind)
+    }
+
+  private def memberSmithyTraits(member: IrMember): List[Trait] =
+    List(
+      member.staticAddress.map(address => stringTrait("staticAddress", formatAddress(address))),
+      member.paddingRepeats.map(repeats => intTrait("padding", repeats)),
+      Option.when(member.isPointer)(annotationTrait("pointer")),
+      Option.when(member.isArray)(annotationTrait("array")),
+      member.arrayLength.map(length => intTrait("length", length)),
+      member.endianOverride.map {
+        case IrEndian.Big    => stringTrait("endian", "big")
+        case IrEndian.Little => stringTrait("endian", "little")
+      }
+    ).flatten ++ memberTraitNames(member).map(annotationTrait)
+
+  private def memberTraitNames(member: IrMember): List[String] =
+    member.primitiveOverride match {
+      case Some(kind) =>
+        primitiveTraitFor(kind).toList
+      case None =>
+        member.target match {
+          case IrType.Primitive(kind) => unsignedOrCustomTrait(kind).toList
+          case _                      => Nil
+        }
+    }
+
+  private def unsignedOrCustomTrait(kind: IrPrimitive): Option[String] =
+    kind match {
+      case IrPrimitive.U8 | IrPrimitive.U16 | IrPrimitive.U32 | IrPrimitive.U64 | IrPrimitive.U128 |
+          IrPrimitive.F8 | IrPrimitive.F16 | IrPrimitive.Char =>
+        primitiveTraitFor(kind)
+      case _ =>
+        None
     }
 
   private def primitiveTraitFor(kind: IrPrimitive): Option[String] =
@@ -336,7 +387,10 @@ object IrSmithyEmitter {
         None
     }
 
-  private def smithyBaseType(kind: IrPrimitive): String =
+  private def preludeShapeId(kind: IrPrimitive): ShapeId =
+    ShapeId.from(s"smithy.api#${smithyPreludeName(kind)}")
+
+  private def smithyPreludeName(kind: IrPrimitive): String =
     kind match {
       case IrPrimitive.Bool                                                      => "Boolean"
       case IrPrimitive.Char                                                      => "Byte"
@@ -348,6 +402,18 @@ object IrSmithyEmitter {
       case IrPrimitive.F8 | IrPrimitive.F16 | IrPrimitive.F32 => "Float"
       case IrPrimitive.F64                                    => "Double"
     }
+
+  private def traitId(name: String): ShapeId =
+    ShapeId.from(s"$TraitsNamespace#$name")
+
+  private def annotationTrait(name: String): Trait =
+    new DynamicTrait(traitId(name), Node.objectNode())
+
+  private def stringTrait(name: String, value: String): Trait =
+    new DynamicTrait(traitId(name), Node.from(value))
+
+  private def intTrait(name: String, value: Int): Trait =
+    new DynamicTrait(traitId(name), Node.from(value))
 
   private def formatAddress(address: Long): String =
     if (address >= 0) {

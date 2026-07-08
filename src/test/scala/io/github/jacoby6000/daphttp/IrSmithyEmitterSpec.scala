@@ -49,7 +49,7 @@ class IrSmithyEmitterSpec extends AnyFunSuite {
     val smithyText = IrSmithyEmitter.emit(originalIr).toOption.get
     assert(smithyText.contains("@pointer"))
     assert(smithyText.contains("@array"))
-    assert(smithyText.contains("@length(2)"))
+    assert(smithyText.contains("length(2)"))
 
     val roundTrippedIr = assembleAndExtract(smithyText).toOption.get
     IrEquivalence.assertEquivalent(originalIr, roundTrippedIr)
