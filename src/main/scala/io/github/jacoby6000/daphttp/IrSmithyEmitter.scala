@@ -71,15 +71,34 @@ object IrSmithyEmitter {
       .foldLeft(CollectionState())(visitType)
 
   private def memberTraits(member: IrMember): Set[String] =
-    Set(
+    (Set(
       Option.when(member.isPointer)("pointer"),
       Option.when(member.isArray)("array"),
       member.staticAddress.map(_ => "staticAddress"),
       member.paddingRepeats.map(_ => "padding"),
       member.arrayLength.map(_ => "length"),
-      member.endianOverride.map(_ => "endian"),
-      primitiveTraitForMember(member)
-    ).flatten
+      member.endianOverride.map(_ => "endian")
+    ).flatten ++ memberTraitNames(member)).toSet
+
+  private def memberTraitNames(member: IrMember): List[String] =
+    member.primitiveOverride match {
+      case Some(kind) =>
+        primitiveTraitFor(kind).toList
+      case None =>
+        member.target match {
+          case IrType.Primitive(kind) => unsignedOrCustomTrait(kind).toList
+          case _                      => Nil
+        }
+    }
+
+  private def unsignedOrCustomTrait(kind: IrPrimitive): Option[String] =
+    kind match {
+      case IrPrimitive.U8 | IrPrimitive.U16 | IrPrimitive.U32 | IrPrimitive.U64 | IrPrimitive.U128 |
+          IrPrimitive.F8 | IrPrimitive.F16 | IrPrimitive.Char =>
+        primitiveTraitFor(kind)
+      case _ =>
+        None
+    }
 
   private def serviceTraits(services: List[IrService]): Set[String] =
     services.flatMap { service =>
@@ -92,7 +111,9 @@ object IrSmithyEmitter {
   private def shapeTraits(shapes: List[(ShapeId, IrType)]): Set[String] =
     shapes.flatMap { case (_, irType) =>
       irType match {
-        case _: IrType.Bitmask                                         => List("bitmask", "size")
+        case _: IrType.Bitmask => List("bitmask", "size")
+        case struct: IrType.MemoryMappedStruct if struct.declaredSizeBits.nonEmpty =>
+          List("dapStruct", "size")
         case _: IrType.MemoryMappedStruct                              => List("dapStruct")
         case struct: IrType.Struct if struct.declaredSizeBits.nonEmpty => List("size")
         case _                                                         => Nil
@@ -113,6 +134,8 @@ object IrSmithyEmitter {
         visitNamedShape(state, listType.id, listType)
       case mapType: IrType.MapType =>
         visitNamedShape(state, mapType.id, mapType)
+      case IrType.Ref(id) if isPreludeShape(id) =>
+        state
       case IrType.Ref(id) =>
         if (state.shapeIds.contains(id)) state
         else state.withError(s"Unresolved shape reference '${id.toString}'.")
@@ -123,13 +146,8 @@ object IrSmithyEmitter {
   private def visitMemberTarget(state: CollectionState, member: IrMember): CollectionState =
     visitType(state.withTraits(memberTraits(member)), member.target)
 
-  private def primitiveTraitForMember(member: IrMember): Option[String] =
-    member.primitiveOverride
-      .orElse(member.target match {
-        case IrType.Primitive(kind) => Some(kind)
-        case _                      => None
-      })
-      .flatMap(primitiveTraitFor)
+  private def isPreludeShape(id: ShapeId): Boolean =
+    id.getNamespace == "smithy.api"
 
   private def visitNamedShape(
       state: CollectionState,
@@ -274,10 +292,7 @@ object IrSmithyEmitter {
           case IrEndian.Big    => """    @endian("big")"""
           case IrEndian.Little => """    @endian("little")"""
         } ++
-        effectivePrimitive(member)
-          .flatMap(primitiveTraitFor)
-          .toList
-          .map(traitName => s"    @$traitName")
+        memberTraitNames(member).map(traitName => s"    @$traitName")
     annotations :+ s"    ${member.name}: ${renderMemberTargetType(member)}"
   }
 
@@ -298,14 +313,6 @@ object IrSmithyEmitter {
       case mapType: IrType.MapType                          => mapType.id.getName
       case IrType.Ref(id)                                   => id.getName
       case IrType.Primitive(kind)                           => smithyBaseType(kind)
-    }
-
-  private def effectivePrimitive(member: IrMember): Option[IrPrimitive] =
-    member.primitiveOverride.orElse {
-      member.target match {
-        case IrType.Primitive(kind) => Some(kind)
-        case _                      => None
-      }
     }
 
   private def primitiveTraitFor(kind: IrPrimitive): Option[String] =
