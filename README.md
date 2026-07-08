@@ -54,20 +54,50 @@ members that lack explicit sizing. Pointer members are excluded (they intentiona
 
 ### Architecture
 
-All input pipelines converge on a shared IR, then compile to HTTP route plans:
+All input pipelines converge on a shared intermediate representation (IR), then emit HTTP routes or Smithy models:
 
 ```mermaid
+---
+config:
+  flowchart:
+    curve:
+---
+
 flowchart LR
-  Smithy["Smithy models"] --> SmithyIrGenerator --> IR
-  CHeaders["C headers + symbols"] --> DoldecompIrGenerator --> IR
-  IR --> IrCompiler --> Routes["HTTP routes"]
-  IR --> IrSmithyEmitter --> Smithy
+  SMIN["Smithy Models"]
+
+  subgraph Inputs
+    direction TD
+    subgraph smithyIn [Smithy]
+        SMIN --> SmithyIrGenerator
+    end
+    subgraph C
+        CHeaders["C headers symbols"] --> DoldecompIrGenerator
+    end
+  end
+
+  IR["Intermediate Representation"]
+
+  SmithyIrGenerator --> IR
+  DoldecompIrGenerator --> IR
+
+  IR --> HttpRouteIrEmitter
+  IR --> SmithyIrEmitter
+
+  subgraph Outputs
+    subgraph http
+        HttpRouteIrEmitter --> Routes["HTTP routes"]
+    end
+    subgraph smithyOut [Smithy]
+        SmithyIrEmitter --> SMOUT["Smithy Models"]
+    end
+  end
 ```
 
 - **`SmithyIrGenerator`** — Smithy model → IR
 - **`DoldecompIrGenerator`** — C headers + doldecomp symbols → IR
-- **`IrSmithyEmitter`** — IR → Smithy model (via smithy-model builders + `SmithyIdlModelSerializer`)
-- **`IrCompiler`** — IR → route plans (memory reads + JSON codecs)
+- **`SmithyIrEmitter`** — IR → Smithy model (via smithy-model builders + `SmithyIdlModelSerializer`)
+- **`HttpRouteIrEmitter`** — IR → route plans (memory reads + JSON codecs)
 
 ### Runtime behavior
 

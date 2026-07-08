@@ -204,7 +204,7 @@ object DapHttpServerMain extends IOApp {
       services: List[IrService]
   ): Either[List[String], Map[String, RoutePlan]] = {
     IrSizingWarnings.writeToStderr(services)
-    IrCompiler.compileRoutePlansFromIr(services)
+    HttpRouteIrEmitter.emitRoutePlansFromIr(services)
   }
 
   private def decodeReadResult(

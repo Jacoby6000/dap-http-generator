@@ -185,7 +185,7 @@ class IrSmithyRoundTripSpec extends AnyFunSuite {
 
   private def assertLosslessSmithyRoundTrip(exampleSmithy: String): Unit = {
     val originalIr = extractIr(exampleSmithy)
-    val emittedSmithy = IrSmithyEmitter
+    val emittedSmithy = SmithyIrEmitter
       .emit(originalIr)
       .fold(
         errors => fail(errors.mkString("\n")),
@@ -196,7 +196,7 @@ class IrSmithyRoundTripSpec extends AnyFunSuite {
   }
 
   private def roundTripIr(ir: List[IrService]): List[IrService] = {
-    val smithy = IrSmithyEmitter.emit(ir).fold(errors => fail(errors.mkString("\n")), identity)
+    val smithy = SmithyIrEmitter.emit(ir).fold(errors => fail(errors.mkString("\n")), identity)
     extractIr(smithy)
   }
 

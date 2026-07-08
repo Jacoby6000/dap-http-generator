@@ -7,7 +7,7 @@ import java.nio.file.Files
 import java.nio.file.Paths
 import scala.jdk.CollectionConverters._
 
-class IrSmithyEmitterSpec extends AnyFunSuite {
+class SmithyIrEmitterSpec extends AnyFunSuite {
   private val traitsPath = Paths.get("src/main/smithy/dap-http-traits.smithy")
 
   test("emits Smithy that assembles and round-trips doldecomp IR") {
@@ -23,7 +23,7 @@ class IrSmithyEmitterSpec extends AnyFunSuite {
       .toOption
       .get
 
-    val smithyText = IrSmithyEmitter.emit(originalIr).toOption.get
+    val smithyText = SmithyIrEmitter.emit(originalIr).toOption.get
     assert(smithyText.contains("namespace example.doldecomp"))
     assert(smithyText.contains("service MeleeApi"))
     assert(smithyText.contains("@dapStruct"))
@@ -46,7 +46,7 @@ class IrSmithyEmitterSpec extends AnyFunSuite {
       .toOption
       .get
 
-    val smithyText = IrSmithyEmitter.emit(originalIr).toOption.get
+    val smithyText = SmithyIrEmitter.emit(originalIr).toOption.get
     assert(smithyText.contains("@pointer"))
     assert(smithyText.contains("@array"))
     assert(smithyText.contains("length(2)"))
@@ -70,7 +70,7 @@ class IrSmithyEmitterSpec extends AnyFunSuite {
 
     val outputPath = Files.createTempFile("doldecomp", ".smithy")
     try {
-      IrSmithyEmitter.emitToPath(originalIr, outputPath).toOption.get
+      SmithyIrEmitter.emitToPath(originalIr, outputPath).toOption.get
       val written = Files.readString(outputPath)
       assert(written.contains("service MeleeApi"))
       assembleAndExtract(written).toOption.get

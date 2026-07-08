@@ -21,7 +21,7 @@ import java.nio.file.Paths
 import java.util.function.Consumer
 import scala.jdk.CollectionConverters._
 
-object IrSmithyEmitter {
+object SmithyIrEmitter {
   private val TraitsNamespace = "com.jacoby6000.daphttp"
   private val TraitsPath = Paths.get("src/main/smithy/dap-http-traits.smithy")
   private val BytesShapeId = ShapeId.from(s"$TraitsNamespace#Bytes")

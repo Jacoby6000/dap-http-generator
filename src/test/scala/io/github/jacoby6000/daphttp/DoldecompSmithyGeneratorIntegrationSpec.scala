@@ -18,7 +18,7 @@ class DoldecompSmithyGeneratorIntegrationSpec extends AnyFunSuite {
       .toOption
       .get
 
-    val plans = IrCompiler.compileRoutePlansFromIr(irServices).toOption.get
+    val plans = HttpRouteIrEmitter.emitRoutePlansFromIr(irServices).toOption.get
     val route = plans("/MeleeApi/GetGPlayerState")
     val playerState =
       irServices.head.operations.head.output.members.head.target.asInstanceOf[IrType.Struct]
@@ -89,7 +89,7 @@ class DoldecompSmithyGeneratorIntegrationSpec extends AnyFunSuite {
       .get
 
     val service = irServices.head
-    val plans = IrCompiler.compileRoutePlansFromIr(irServices).toOption.get
+    val plans = HttpRouteIrEmitter.emitRoutePlansFromIr(irServices).toOption.get
     val playerRoute = plans("/MeleeApi/GetGPlayerState")
     val worldRoute = plans("/MeleeApi/GetGWorldState")
 

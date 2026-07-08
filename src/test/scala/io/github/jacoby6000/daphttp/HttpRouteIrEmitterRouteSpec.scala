@@ -3,7 +3,7 @@ package io.github.jacoby6000.daphttp
 import org.scalatest.funsuite.AnyFunSuite
 import software.amazon.smithy.model.shapes.ShapeId
 
-class IrCompilerRouteSpec extends AnyFunSuite {
+class HttpRouteIrEmitterRouteSpec extends AnyFunSuite {
   private def id(value: String): ShapeId = ShapeId.from(s"example#$value")
 
   test("compiles IR into route reads for dap-backed members") {
@@ -57,8 +57,8 @@ class IrCompilerRouteSpec extends AnyFunSuite {
       declaredSizeBits = None
     )
 
-    val plans = IrCompiler
-      .compileRoutePlansFromIr(
+    val plans = HttpRouteIrEmitter
+      .emitRoutePlansFromIr(
         List(
           IrService(
             name = "Api",
@@ -131,8 +131,8 @@ class IrCompilerRouteSpec extends AnyFunSuite {
       declaredSizeBits = None
     )
 
-    val plans = IrCompiler
-      .compileRoutePlansFromIr(
+    val plans = HttpRouteIrEmitter
+      .emitRoutePlansFromIr(
         List(
           IrService(
             name = "Api",
