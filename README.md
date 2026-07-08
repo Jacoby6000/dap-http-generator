@@ -61,7 +61,7 @@ flowchart LR
   Smithy["Smithy models"] --> IrExtractor --> IR
   CHeaders["C headers + symbols"] --> DoldecompIrGenerator --> IR
   IR --> IrCompiler --> Routes["HTTP routes"]
-  IR --> IrSmithyEmitter --> SmithyFile[".smithy files"]
+  IR --> IrSmithyEmitter --> SmithyOut[".smithy files"]
 ```
 
 - **`IrExtractor`** — Smithy model → IR
