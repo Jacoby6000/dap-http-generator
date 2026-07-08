@@ -31,7 +31,7 @@ flowchart LR
   Smithy["Smithy models"] --> SmithyIrGenerator --> IR
   CHeaders["C headers + symbols"] --> DoldecompIrGenerator --> IR
   IR --> IrCompiler --> Routes["HTTP routes"]
-  IR --> IrSmithyEmitter --> SmithyFile[".smithy files"]
+  IR --> IrSmithyEmitter --> Smithy
 ```
 
 `IrSmithyEmitter` builds a Smithy `Model` with smithy-model shape builders and serializes it via
