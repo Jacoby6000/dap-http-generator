@@ -16,14 +16,16 @@ object DoldecompIrGenerator {
       outputName: String,
       rootTypeName: String,
       isArray: Boolean,
-      arrayLength: Option[Int]
+      arrayLength: Option[Int],
+      pointerDepth: Int
   )
 
   private final case class ResolvedSymbol(
       symbol: DoldecompSymbol,
       typeName: String,
       isArray: Boolean,
-      arrayLength: Option[Int]
+      arrayLength: Option[Int],
+      pointerDepth: Int
   )
 
   def generateFromPaths(
@@ -89,7 +91,8 @@ object DoldecompIrGenerator {
             outputName = s"Get${toPascalCase(resolved.symbol.name)}Output",
             rootTypeName = resolved.typeName,
             isArray = resolved.isArray,
-            arrayLength = resolved.arrayLength
+            arrayLength = resolved.arrayLength,
+            pointerDepth = resolved.pointerDepth
           )
         }
 
@@ -108,18 +111,18 @@ object DoldecompIrGenerator {
               case Some(composite) =>
                 IrType.MemoryMappedStruct(
                   id = ShapeId.from(s"$namespace#$name"),
-                  members =
-                    CHeaderParser.extractFields(composite).map { case (fieldTypeName, declarator) =>
-                      toIrMember(
-                        namespace = namespace,
-                        structName = name,
-                        fieldTypeName = fieldTypeName,
-                        fieldDeclarator = declarator,
-                        reachableStructs = reachableByName,
-                        buildStruct = buildStruct,
-                        fieldInitializerLengths = fieldInitializerLengths
-                      )
-                    },
+                  members = CHeaderParser.extractFields(composite).map { field =>
+                    toIrMember(
+                      namespace = namespace,
+                      structName = name,
+                      fieldTypeName = field.typeName,
+                      fieldDeclarator = field.declarator,
+                      unionGroup = field.unionGroup,
+                      reachableStructs = reachableByName,
+                      buildStruct = buildStruct,
+                      fieldInitializerLengths = fieldInitializerLengths
+                    )
+                  },
                   declaredSizeBits = None
                 )
             }
@@ -128,8 +131,10 @@ object DoldecompIrGenerator {
 
         def isStructType(typeName: String): Boolean = reachableByName.contains(typeName)
 
-        def rootElementIrType(typeName: String): IrType =
-          if (isStructType(typeName)) {
+        def rootElementIrType(typeName: String, pointerDepth: Int): IrType =
+          if (pointerDepth > 0) {
+            IrType.Primitive(IrPrimitive.LongWord)
+          } else if (isStructType(typeName)) {
             buildStruct(typeName)
           } else {
             IrType.Primitive(primitiveForType(typeName).getOrElse(IrPrimitive.LongWord))
@@ -139,16 +144,18 @@ object DoldecompIrGenerator {
           if (operation.isArray) {
             IrType.ListType(
               id = ShapeId.from(s"$namespace#${operation.outputName}ValueArray"),
-              element = rootElementIrType(operation.rootTypeName),
+              element = rootElementIrType(operation.rootTypeName, operation.pointerDepth),
               bytesAlias = false,
               bitsAlias = false
             )
           } else {
-            rootElementIrType(operation.rootTypeName)
+            rootElementIrType(operation.rootTypeName, operation.pointerDepth)
           }
 
-        def elementSizeBytesForRootType(typeName: String): Option[Int] =
-          if (isStructType(typeName)) {
+        def elementSizeBytesForRootType(typeName: String, pointerDepth: Int): Option[Int] =
+          if (pointerDepth > 0) {
+            Some(wordSizeBits / 8)
+          } else if (isStructType(typeName)) {
             Some(irStructSizeBytes(buildStruct(typeName), wordSizeBits))
           } else {
             primitiveForType(typeName).flatMap { kind =>
@@ -159,7 +166,7 @@ object DoldecompIrGenerator {
 
         val operationsWithArrayLengths = operations.flatMap { operation =>
           if (operation.isArray && operation.arrayLength.isEmpty) {
-            elementSizeBytesForRootType(operation.rootTypeName) match {
+            elementSizeBytesForRootType(operation.rootTypeName, operation.pointerDepth) match {
               case Some(elementSizeBytes) =>
                 inferArrayLength(operation.symbol, elementSizeBytes) match {
                   case Some(length) =>
@@ -178,7 +185,9 @@ object DoldecompIrGenerator {
         }
 
         operationsWithArrayLengths.foreach { operation =>
-          if (isStructType(operation.rootTypeName)) {
+          if (operation.pointerDepth == 0 && isStructType(operation.rootTypeName)) {
+            buildStruct(operation.rootTypeName)
+          } else if (operation.pointerDepth > 0 && isStructType(operation.rootTypeName)) {
             buildStruct(operation.rootTypeName)
           }
         }
@@ -193,12 +202,16 @@ object DoldecompIrGenerator {
               target = rootTarget,
               staticAddress = Some(operation.symbol.address),
               paddingRepeats = None,
-              isPointer = false,
+              isPointer = operation.pointerDepth > 0,
               isArray = operation.isArray,
               arrayLength = operation.arrayLength,
               endianOverride = None,
               primitiveOverride =
-                if (operation.isArray || isStructType(operation.rootTypeName)) {
+                if (
+                  operation.pointerDepth > 0 || operation.isArray || isStructType(
+                    operation.rootTypeName
+                  )
+                ) {
                   None
                 } else {
                   primitiveForType(operation.rootTypeName).filter(isExplicitSizedPrimitive)
@@ -214,7 +227,19 @@ object DoldecompIrGenerator {
                   id = outputShapeId,
                   members = List(outputMember),
                   declaredSizeBits = None
-                )
+                ),
+                pointerChain =
+                  if (operation.pointerDepth > 0) {
+                    Some(
+                      IrPointerChain(
+                        pointeeType = rootElementIrType(operation.rootTypeName, pointerDepth = 0),
+                        pointerDepth = operation.pointerDepth,
+                        outerArrayLength = if (operation.isArray) operation.arrayLength else None
+                      )
+                    )
+                  } else {
+                    None
+                  }
               )
             )
           } catch {
@@ -254,6 +279,7 @@ object DoldecompIrGenerator {
       structName: String,
       fieldTypeName: String,
       fieldDeclarator: IASTDeclarator,
+      unionGroup: Option[String],
       reachableStructs: Map[String, IASTCompositeTypeSpecifier],
       buildStruct: String => IrType.MemoryMappedStruct,
       fieldInitializerLengths: Map[(String, String), Int]
@@ -304,7 +330,8 @@ object DoldecompIrGenerator {
           None
         } else {
           explicitPrimitive.filter(isExplicitSizedPrimitive)
-        }
+        },
+      unionGroup = unionGroup
     )
   }
 
@@ -369,7 +396,8 @@ object DoldecompIrGenerator {
           symbol = symbol,
           typeName = explicitType,
           isArray = false,
-          arrayLength = None
+          arrayLength = None,
+          pointerDepth = 0
         )
       }
       .orElse {
@@ -378,7 +406,8 @@ object DoldecompIrGenerator {
             symbol = symbol,
             typeName = declaration.typeName,
             isArray = declaration.isArray,
-            arrayLength = declaration.resolvedArrayLength
+            arrayLength = declaration.resolvedArrayLength,
+            pointerDepth = declaration.pointerDepth
           )
         }
       }
@@ -489,7 +518,8 @@ object DoldecompIrGenerator {
       typeName = declarations.map(_.typeName).find(_.nonEmpty).getOrElse(primary.typeName),
       isArray = declarations.exists(_.isArray),
       declaratorLength = declarations.flatMap(_.declaratorLength).headOption,
-      initializerLength = declarations.flatMap(_.initializerLength).headOption
+      initializerLength = declarations.flatMap(_.initializerLength).headOption,
+      pointerDepth = declarations.map(_.pointerDepth).max
     )
   }
 
@@ -553,12 +583,10 @@ object DoldecompIrGenerator {
       if (!visited.contains(structName)) {
         visited += structName
         headerStructs.get(structName).foreach { struct =>
-          CHeaderParser.extractFields(struct).foreach { case (fieldTypeName, declarator) =>
-            if (CHeaderParser.pointerDepth(declarator) == 0) {
-              val normalized = CHeaderParser.normalizeTypeName(fieldTypeName).replaceAll("\\s+", "")
-              if (headerStructs.contains(normalized)) {
-                visit(normalized)
-              }
+          CHeaderParser.extractFields(struct).foreach { field =>
+            val normalized = CHeaderParser.normalizeTypeName(field.typeName).replaceAll("\\s+", "")
+            if (headerStructs.contains(normalized)) {
+              visit(normalized)
             }
           }
         }

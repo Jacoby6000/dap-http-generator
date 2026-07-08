@@ -27,10 +27,17 @@ final case class GlobalVariableDeclaration(
     typeName: String,
     isArray: Boolean,
     declaratorLength: Option[Int],
-    initializerLength: Option[Int]
+    initializerLength: Option[Int],
+    pointerDepth: Int
 ) {
   def resolvedArrayLength: Option[Int] = declaratorLength.orElse(initializerLength)
 }
+
+final case class StructFieldDecl(
+    typeName: String,
+    declarator: IASTDeclarator,
+    unionGroup: Option[String]
+)
 
 object CHeaderParser {
   def parse(headerSource: String): List[(String, IASTCompositeTypeSpecifier)] =
@@ -110,7 +117,7 @@ object CHeaderParser {
   ): List[GlobalVariableDeclaration] =
     simple.getDeclarators.toList.flatMap { declarator =>
       val name = extractDeclaratorName(declarator)
-      if (name.isEmpty || isFunctionDeclarator(declarator) || pointerDepth(declarator) > 0) {
+      if (name.isEmpty || isFunctionDeclarator(declarator)) {
         Nil
       } else {
         val isArray = isArrayDeclarator(declarator)
@@ -122,7 +129,8 @@ object CHeaderParser {
             typeName = typeName,
             isArray = isArray,
             declaratorLength = declaratorLength,
-            initializerLength = initializerLength
+            initializerLength = initializerLength,
+            pointerDepth = pointerDepth(declarator)
           )
         )
       }
@@ -158,12 +166,32 @@ object CHeaderParser {
     }
   }
 
-  def extractFields(composite: IASTCompositeTypeSpecifier): List[(String, IASTDeclarator)] = {
+  def extractFields(composite: IASTCompositeTypeSpecifier): List[StructFieldDecl] = {
+    var unionCounter = 0
     composite.getMembers.toList.flatMap {
       case member: IASTSimpleDeclaration =>
-        val baseType = normalizeTypeName(member.getDeclSpecifier.getRawSignature)
-        member.getDeclarators.toList.flatMap { declarator =>
-          Option.when(extractDeclaratorName(declarator).nonEmpty)(baseType -> declarator)
+        member.getDeclSpecifier match {
+          case unionSpec: IASTCompositeTypeSpecifier
+              if unionSpec.getKey == IASTCompositeTypeSpecifier.k_union =>
+            val unionGroup = Some(s"union${unionCounter}")
+            unionCounter += 1
+            unionSpec.getMembers.toList.flatMap {
+              case unionMember: IASTSimpleDeclaration =>
+                val baseType = normalizeTypeName(unionMember.getDeclSpecifier.getRawSignature)
+                unionMember.getDeclarators.toList.flatMap { declarator =>
+                  Option.when(extractDeclaratorName(declarator).nonEmpty) {
+                    StructFieldDecl(baseType, declarator, unionGroup)
+                  }
+                }
+              case _ => Nil
+            }
+          case _ =>
+            val baseType = normalizeTypeName(member.getDeclSpecifier.getRawSignature)
+            member.getDeclarators.toList.flatMap { declarator =>
+              Option.when(extractDeclaratorName(declarator).nonEmpty) {
+                StructFieldDecl(baseType, declarator, unionGroup = None)
+              }
+            }
         }
       case _ => Nil
     }
@@ -255,10 +283,10 @@ object CHeaderParser {
       case Some(clause: IASTInitializerList) =>
         fields
           .zip(clause.getClauses)
-          .flatMap { case ((_, fieldDeclarator), fieldClause) =>
-            if (isArrayDeclarator(fieldDeclarator) && arrayLength(fieldDeclarator).isEmpty) {
+          .flatMap { case (field, fieldClause) =>
+            if (isArrayDeclarator(field.declarator) && arrayLength(field.declarator).isEmpty) {
               countInitializerClause(fieldClause).map { count =>
-                (structName, fieldName(fieldDeclarator)) -> count
+                (structName, fieldName(field.declarator)) -> count
               }
             } else {
               None
@@ -290,10 +318,22 @@ object CHeaderParser {
   }
 
   def normalizeTypeName(raw: String): String = {
-    raw.trim
-      .stripPrefix("const ")
-      .stripPrefix("struct ")
-      .replaceAll("\\s+", " ")
+    val storageClasses =
+      Set("static", "extern", "volatile", "register", "inline", "auto", "thread_local")
+    var normalized = raw.trim.replaceAll("\\s+", " ")
+    var changed = true
+    while (changed) {
+      val previous = normalized
+      normalized = normalized.stripPrefix("const ").stripPrefix("struct ")
+      storageClasses.foreach { qualifier =>
+        val prefixed = s"$qualifier "
+        if (normalized.startsWith(prefixed)) {
+          normalized = normalized.stripPrefix(prefixed)
+        }
+      }
+      changed = normalized != previous
+    }
+    normalized
   }
 
   private def stripComments(content: String): String = {

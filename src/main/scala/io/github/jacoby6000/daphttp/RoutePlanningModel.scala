@@ -13,7 +13,21 @@ final case class ReadPlan(
     decodeCodec: Option[Codec[Json]],
     cStringPointer: Boolean
 )
-final case class RoutePlan(path: String, reads: List[ReadPlan])
+final case class PointerChainPlan(
+    pointeeType: IrType,
+    pointerDepth: Int,
+    outerArrayLength: Option[Int],
+    baseAddress: Long,
+    endian: IrEndian,
+    wordSizeBits: Int,
+    pointeeSizeBytes: Int,
+    pointeeDecodeCodec: Option[Codec[Json]]
+)
+final case class RoutePlan(
+    path: String,
+    reads: List[ReadPlan],
+    pointerChain: Option[PointerChainPlan] = None
+)
 final case class RoutePlansLoadResult(
     routes: Map[String, RoutePlan],
     errors: List[String]

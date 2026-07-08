@@ -14,7 +14,17 @@ final case class IrService(
     defaultEndian: IrEndian,
     operations: List[IrOperation]
 )
-final case class IrOperation(name: String, routePath: String, output: IrType.Struct)
+final case class IrOperation(
+    name: String,
+    routePath: String,
+    output: IrType.Struct,
+    pointerChain: Option[IrPointerChain] = None
+)
+final case class IrPointerChain(
+    pointeeType: IrType,
+    pointerDepth: Int,
+    outerArrayLength: Option[Int]
+)
 final case class IrMember(
     id: ShapeId,
     name: String,
@@ -26,7 +36,8 @@ final case class IrMember(
     arrayLength: Option[Int],
     endianOverride: Option[IrEndian],
     primitiveOverride: Option[IrPrimitive],
-    readSizeBytes: Option[Int] = None
+    readSizeBytes: Option[Int] = None,
+    unionGroup: Option[String] = None
 )
 
 sealed trait IrPrimitive

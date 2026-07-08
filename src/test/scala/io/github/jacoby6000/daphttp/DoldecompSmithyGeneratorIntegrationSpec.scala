@@ -285,4 +285,58 @@ class DoldecompSmithyGeneratorIntegrationSpec extends AnyFunSuite {
     assert(route.reads.head.sizeBytes == 17)
     assert(decoded == Json.fromString("pLoadCommonData"))
   }
+
+  test("generates routes for static u8 arrays and pointer table globals") {
+    val fixtureRoot = Paths.get("src/test/resources/doldecomp-fixture-pointer-chain")
+    val generation = DoldecompIrGenerator
+      .generateFromPaths(
+        symbolsPath = fixtureRoot.resolve("symbols.txt"),
+        headerRoots = List(fixtureRoot),
+        namespace = "example.doldecomp.pointer",
+        serviceName = "MeleeApi",
+        wordSizeBits = 32
+      )
+      .toOption
+      .get
+
+    assert(
+      !generation.warnings.exists(
+        _.contains("Missing struct or primitive definition for resolved type 'static u8'")
+      )
+    )
+    assert(
+      generation.services.head.operations.map(_.name).toSet == Set(
+        "GetEventInitDataLevelTable",
+        "GetEventMatchSelectionIndexToEventMatchIdMapping"
+      )
+    )
+
+    val mappingMember =
+      generation.services.head.operations
+        .find(_.name == "GetEventMatchSelectionIndexToEventMatchIdMapping")
+        .get
+        .output
+        .members
+        .head
+    assert(mappingMember.isArray)
+    assert(mappingMember.arrayLength.contains(5))
+    assert(
+      mappingMember.target.asInstanceOf[IrType.ListType].element == IrType.Primitive(IrPrimitive.U8)
+    )
+
+    val tableOperation =
+      generation.services.head.operations.find(_.name == "GetEventInitDataLevelTable").get
+    assert(tableOperation.pointerChain.nonEmpty)
+    assert(tableOperation.pointerChain.get.pointerDepth == 2)
+    assert(tableOperation.pointerChain.get.outerArrayLength.contains(2))
+
+    val plans = HttpRouteIrEmitter.emitRoutePlansFromIr(generation.services)
+    assert(plans.errors.isEmpty)
+    val tableRoute = plans.routes("/MeleeApi/GetEventInitDataLevelTable")
+    assert(tableRoute.pointerChain.nonEmpty)
+    assert(tableRoute.reads.head.sizeBytes == 8)
+
+    val mappingRoute = plans.routes("/MeleeApi/GetEventMatchSelectionIndexToEventMatchIdMapping")
+    assert(mappingRoute.reads.head.sizeBytes == 0x33)
+  }
 }

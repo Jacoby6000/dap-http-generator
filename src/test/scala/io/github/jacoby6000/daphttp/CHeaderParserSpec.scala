@@ -28,30 +28,30 @@ class CHeaderParserSpec extends AnyFunSuite {
     assert(
       CHeaderParser
         .extractFields(structs.head._2)
-        .map { case (_, declarator) => CHeaderParser.fieldName(declarator) } == List("x", "y", "z")
+        .map(field => CHeaderParser.fieldName(field.declarator)) == List("x", "y", "z")
     )
 
     val playerStateFields = CHeaderParser.extractFields(structs(1)._2)
     assert(
       playerStateFields
-        .find { case (_, declarator) => CHeaderParser.fieldName(declarator) == "buffer" }
-        .exists { case (_, declarator) => CHeaderParser.pointerDepth(declarator) == 1 }
+        .find(field => CHeaderParser.fieldName(field.declarator) == "buffer")
+        .exists(field => CHeaderParser.pointerDepth(field.declarator) == 1)
     )
     assert(
       playerStateFields
-        .find { case (_, declarator) => CHeaderParser.fieldName(declarator) == "table" }
-        .exists { case (_, declarator) => CHeaderParser.pointerDepth(declarator) == 2 }
+        .find(field => CHeaderParser.fieldName(field.declarator) == "table")
+        .exists(field => CHeaderParser.pointerDepth(field.declarator) == 2)
     )
     assert(
       playerStateFields
-        .find { case (_, declarator) => CHeaderParser.fieldName(declarator) == "history" }
-        .flatMap { case (_, declarator) => CHeaderParser.arrayLength(declarator) }
+        .find(field => CHeaderParser.fieldName(field.declarator) == "history")
+        .flatMap(field => CHeaderParser.arrayLength(field.declarator))
         .contains(4)
     )
     assert(
       playerStateFields
-        .find { case (_, declarator) => CHeaderParser.fieldName(declarator) == "score" }
-        .exists { case (fieldType, _) => fieldType == "u128" }
+        .find(field => CHeaderParser.fieldName(field.declarator) == "score")
+        .exists(field => field.typeName == "u128")
     )
   }
 
@@ -65,9 +65,7 @@ class CHeaderParserSpec extends AnyFunSuite {
     assert(
       CHeaderParser
         .extractFields(playerState._2)
-        .map { case (fieldType, declarator) =>
-          CHeaderParser.fieldName(declarator) -> fieldType
-        } == List(
+        .map(field => CHeaderParser.fieldName(field.declarator) -> field.typeName) == List(
         "health" -> "u32",
         "score" -> "u128",
         "position" -> "Vec3f"
@@ -167,5 +165,59 @@ class CHeaderParserSpec extends AnyFunSuite {
     val lengths = CHeaderParser.parseStructFieldInitializerLengths(source, structs)
 
     assert(lengths(("SceneTable", "scenes")) == 2)
+  }
+
+  test("strips static qualifier from global declaration types") {
+    val source =
+      """
+        |static u8 event_match_selection_index_to_event_match_id_mapping[] = {
+        |    0x00, 0x11, 0x02,
+        |};
+        |""".stripMargin
+
+    val declaration = CHeaderParser.parseGlobalDeclarations(source).head
+
+    assert(declaration.typeName == "u8")
+    assert(declaration.isArray)
+    assert(declaration.initializerLength.contains(3))
+    assert(declaration.pointerDepth == 0)
+  }
+
+  test("parses pointer global declarations") {
+    val source =
+      """
+        |typedef struct EventInitDataLevelTbl {
+        |    u8 kind;
+        |} EventInitDataLevelTbl;
+        |
+        |static struct EventInitDataLevelTbl** event_init_data_level_table[2];
+        |""".stripMargin
+
+    val declaration = CHeaderParser.parseGlobalDeclarations(source).head
+
+    assert(declaration.name == "event_init_data_level_table")
+    assert(declaration.typeName == "EventInitDataLevelTbl")
+    assert(declaration.isArray)
+    assert(declaration.declaratorLength.contains(2))
+    assert(declaration.pointerDepth == 2)
+  }
+
+  test("parses anonymous union members with shared union groups") {
+    val source =
+      """
+        |typedef struct EventInitDataLevelTbl {
+        |    u8 kind;
+        |    union {
+        |        int* extra_character_init_data;
+        |        int coin_goal;
+        |    };
+        |} EventInitDataLevelTbl;
+        |""".stripMargin
+
+    val fields = CHeaderParser.extractFields(CHeaderParser.parse(source).head._2)
+    val unionFields = fields.filter(_.unionGroup.nonEmpty)
+
+    assert(unionFields.size == 2)
+    assert(unionFields.map(_.unionGroup).distinct.size == 1)
   }
 }

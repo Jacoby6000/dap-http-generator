@@ -41,12 +41,29 @@ object HttpRouteIrEmitter {
               )
               errors ++= operationErrors.toList
             } else {
-              DapHttpLoggers.irEmit.debug(
-                "Compiled route {} with {} read(s)",
-                operation.routePath,
-                Integer.valueOf(reads.size)
+              val pointerChainPlan = buildPointerChainPlan(
+                operation = operation,
+                defaultEndian = service.defaultEndian,
+                wordSizeBits = wordSizeBits,
+                errors = operationErrors
               )
-              routes += operation.routePath -> RoutePlan(operation.routePath, reads)
+              if (operationErrors.nonEmpty) {
+                operationErrors.foreach(error =>
+                  DapHttpLoggers.irEmit.warn("{}: {}", operation.routePath, error)
+                )
+                errors ++= operationErrors.toList
+              } else {
+                DapHttpLoggers.irEmit.debug(
+                  "Compiled route {} with {} read(s)",
+                  operation.routePath,
+                  Integer.valueOf(reads.size)
+                )
+                routes += operation.routePath -> RoutePlan(
+                  operation.routePath,
+                  reads,
+                  pointerChainPlan
+                )
+              }
             }
           }
       }
@@ -60,6 +77,61 @@ object HttpRouteIrEmitter {
     )
     result
   }
+
+  private def buildPointerChainPlan(
+      operation: IrOperation,
+      defaultEndian: IrEndian,
+      wordSizeBits: Int,
+      errors: ListBuffer[String]
+  ): Option[PointerChainPlan] =
+    operation.pointerChain.flatMap { chain =>
+      operation.output.members
+        .collectFirst {
+          case member if member.staticAddress.isDefined =>
+            val context = s"${operation.routePath}/chain"
+            val resolvedPointeeSizeBytes =
+              pointeeSizeBytes(chain.pointeeType, Some(wordSizeBits), errors)
+            val pointeeDecodeCodec =
+              compileJsonCodecForType(
+                chain.pointeeType,
+                defaultEndian,
+                Some(wordSizeBits),
+                errors,
+                context
+              )
+            (member.staticAddress.get, resolvedPointeeSizeBytes, pointeeDecodeCodec)
+        }
+        .flatMap { case (baseAddress, resolvedSizeBytes, codecOpt) =>
+          for {
+            sizeBytes <- resolvedSizeBytes
+            codec <- codecOpt
+          } yield PointerChainPlan(
+            pointeeType = chain.pointeeType,
+            pointerDepth = chain.pointerDepth,
+            outerArrayLength = chain.outerArrayLength,
+            baseAddress = baseAddress,
+            endian = defaultEndian,
+            wordSizeBits = wordSizeBits,
+            pointeeSizeBytes = sizeBytes,
+            pointeeDecodeCodec = Some(codec)
+          )
+        }
+    }
+
+  private def pointeeSizeBytes(
+      pointeeType: IrType,
+      wordSize: Option[Int],
+      errors: ListBuffer[String]
+  ): Option[Int] =
+    pointeeType match {
+      case struct: IrType.Struct =>
+        structureSizeBytes(struct, wordSize, errors)
+      case IrType.Primitive(kind) =>
+        bitsForPrimitive(kind, wordSize).map(bits => math.ceil(bits.toDouble / 8d).toInt)
+      case _ =>
+        errors += s"$pointeeType: Unsupported pointer chain pointee type."
+        None
+    }
 
   private def collectReadsForType(
       irType: IrType,
@@ -411,7 +483,16 @@ object HttpRouteIrEmitter {
       errors: ListBuffer[String]
   ): Option[Int] = {
     val isPointerArray = member.isArray && member.isPointer
-    if (member.isArray && !isPointerArray) {
+    if (isPointerArray) {
+      member.arrayLength
+        .flatMap { length =>
+          bitsForPrimitive(IrPrimitive.LongWord, wordSize).map(_ * length)
+        }
+        .orElse {
+          errors += s"${member.id}: Pointer arrays must declare @length."
+          None
+        }
+    } else if (member.isArray && !isPointerArray) {
       member.arrayLength
         .flatMap { length =>
           listElementBitWidth(listType.element, wordSize).map(_ * length)
@@ -504,6 +585,48 @@ object HttpRouteIrEmitter {
 
   private final case class CompiledMemberCodec(name: String, bitWidth: Int, codec: Codec[Json])
 
+  private sealed trait LayoutSlot {
+    def bitWidth: Int
+  }
+  private final case class NormalLayoutSlot(compiled: CompiledMemberCodec) extends LayoutSlot {
+    override def bitWidth: Int = compiled.bitWidth
+  }
+  private final case class UnionLayoutSlot(
+      groupName: String,
+      members: List[CompiledMemberCodec]
+  ) extends LayoutSlot {
+    override def bitWidth: Int = members.map(_.bitWidth).max
+  }
+
+  private def groupMembersForLayout(members: List[IrMember]): List[List[IrMember]] = {
+    val groups = ListBuffer.empty[List[IrMember]]
+    val currentUnion = ListBuffer.empty[IrMember]
+    var currentUnionGroup: Option[String] = None
+
+    def flushUnion(): Unit =
+      if (currentUnion.nonEmpty) {
+        groups += currentUnion.toList
+        currentUnion.clear()
+        currentUnionGroup = None
+      }
+
+    members.foreach { member =>
+      member.unionGroup match {
+        case Some(group) if currentUnionGroup.contains(group) =>
+          currentUnion += member
+        case Some(group) =>
+          flushUnion()
+          currentUnionGroup = Some(group)
+          currentUnion += member
+        case None =>
+          flushUnion()
+          groups += List(member)
+      }
+    }
+    flushUnion()
+    groups.toList
+  }
+
   private def compileStructCodec(
       struct: IrType.Struct,
       endian: IrEndian,
@@ -511,23 +634,46 @@ object HttpRouteIrEmitter {
       errors: ListBuffer[String],
       context: String
   ): Option[Codec[Json]] = {
-    val compiledMembers = struct.members.flatMap { member =>
-      val memberContext = s"$context.${member.name}"
-      val memberEndian = member.endianOverride.getOrElse(endian)
-      val memberCodec =
-        compileMemberCodec(member, memberEndian, wordSize, errors, memberContext)
-      val memberWidth = memberBitWidth(member, wordSize, errors)
-      (memberCodec, memberWidth) match {
-        case (Some(codec), Some(width)) =>
-          Some(CompiledMemberCodec(member.name, width, codec))
-        case _ => None
+    val layoutGroups = groupMembersForLayout(struct.members)
+    val compiledSlots = layoutGroups.flatMap { group =>
+      if (group.size == 1 && group.head.unionGroup.isEmpty) {
+        val member = group.head
+        val memberContext = s"$context.${member.name}"
+        val memberEndian = member.endianOverride.getOrElse(endian)
+        val memberCodec =
+          compileMemberCodec(member, memberEndian, wordSize, errors, memberContext)
+        val memberWidth = memberBitWidth(member, wordSize, errors)
+        (memberCodec, memberWidth) match {
+          case (Some(codec), Some(width)) =>
+            Some(NormalLayoutSlot(CompiledMemberCodec(member.name, width, codec)))
+          case _ => None
+        }
+      } else {
+        val compiledMembers = group.flatMap { member =>
+          val memberContext = s"$context.${member.name}"
+          val memberEndian = member.endianOverride.getOrElse(endian)
+          val memberCodec =
+            compileMemberCodec(member, memberEndian, wordSize, errors, memberContext)
+          val memberWidth = memberBitWidth(member, wordSize, errors)
+          (memberCodec, memberWidth) match {
+            case (Some(codec), Some(width)) =>
+              Some(CompiledMemberCodec(member.name, width, codec))
+            case _ => None
+          }
+        }
+        val groupName = group.flatMap(_.unionGroup).headOption.getOrElse("union")
+        if (compiledMembers.size == group.size) {
+          Some(UnionLayoutSlot(groupName, compiledMembers))
+        } else {
+          None
+        }
       }
     }
 
-    if (compiledMembers.size != struct.members.size) {
+    if (compiledSlots.size != layoutGroups.size) {
       None
     } else {
-      val memberBits = compiledMembers.map(_.bitWidth).sum
+      val memberBits = compiledSlots.map(_.bitWidth).sum
       val totalBits = struct.declaredSizeBits
         .map(raw =>
           struct match {
@@ -558,12 +704,31 @@ object HttpRouteIrEmitter {
             } else {
               val payload = input.take(totalBits.toLong)
               val remainder = input.drop(totalBits.toLong)
-              compiledMembers
+              compiledSlots
                 .foldLeft(Attempt.successful((payload, List.empty[(String, Json)]))) {
-                  case (accAttempt, compiled) =>
+                  case (accAttempt, slot) =>
                     accAttempt.flatMap { case (remainingBits, fields) =>
-                      compiled.codec.decode(remainingBits).map { decoded =>
-                        (decoded.remainder, fields :+ (compiled.name -> decoded.value))
+                      slot match {
+                        case NormalLayoutSlot(compiled) =>
+                          compiled.codec.decode(remainingBits).map { decoded =>
+                            (decoded.remainder, fields :+ (compiled.name -> decoded.value))
+                          }
+                        case UnionLayoutSlot(_, members) =>
+                          val slotBits = members.map(_.bitWidth).max.toLong
+                          val slotPayload = remainingBits.take(slotBits)
+                          val slotRemainder = remainingBits.drop(slotBits)
+                          members
+                            .foldLeft(Attempt.successful(List.empty[(String, Json)])) {
+                              case (unionAttempt, compiled) =>
+                                unionAttempt.flatMap { unionFields =>
+                                  compiled.codec.decode(slotPayload).map { decoded =>
+                                    unionFields :+ (compiled.name -> decoded.value)
+                                  }
+                                }
+                            }
+                            .map { unionFields =>
+                              (slotRemainder, fields ++ unionFields)
+                            }
                       }
                     }
                 }
@@ -593,11 +758,32 @@ object HttpRouteIrEmitter {
       member.target match {
         case listType: IrType.ListType if member.isArray && !member.isPointer =>
           compileArrayCodec(member, listType, endian, wordSize, errors, context)
+        case _: IrType.ListType if member.isArray && member.isPointer =>
+          compilePointerArrayCodec(member, endian, wordSize, errors, context)
         case _ if member.isPointer =>
           compilePrimitiveCodec(IrPrimitive.LongWord, endian, wordSize)
         case _ =>
           compileJsonCodecForType(memberReadType(member), endian, wordSize, errors, context)
       }
+    }
+  }
+
+  private def compilePointerArrayCodec(
+      member: IrMember,
+      endian: IrEndian,
+      wordSize: Option[Int],
+      errors: ListBuffer[String],
+      context: String
+  ): Option[Codec[Json]] = {
+    val length = member.arrayLength.orElse {
+      errors += s"$context: Pointer arrays must declare @length."
+      None
+    }
+    val elementCodec = compilePrimitiveCodec(IrPrimitive.LongWord, endian, wordSize)
+    val elementWidth = bitsForPrimitive(IrPrimitive.LongWord, wordSize)
+    (length, elementCodec, elementWidth) match {
+      case (Some(count), Some(codec), Some(width)) => Some(arrayCodec(count, width, codec))
+      case _                                       => None
     }
   }
 
