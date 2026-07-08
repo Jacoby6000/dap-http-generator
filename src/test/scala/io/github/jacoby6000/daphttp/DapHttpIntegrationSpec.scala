@@ -193,7 +193,7 @@ class DapHttpIntegrationSpec extends AnyFunSuite {
       .assemble()
       .unwrap()
 
-    val routePlans = DapHttpServerMain.buildRoutePlansFromModel(model).toOption.get
+    val routePlans = DapHttpServerMain.buildRoutePlansFromModel(model).routes
     val dummyDap = new DummyDapServer(
       Map(
         (0x1000L, 2) -> Array(0x34.toByte, 0x12.toByte),
@@ -208,7 +208,7 @@ class DapHttpIntegrationSpec extends AnyFunSuite {
     try {
       val result = (for {
         plansRef <- cats.effect.Resource.eval(
-          Ref.of[IO, Either[List[String], Map[String, RoutePlan]]](Right(routePlans))
+          Ref.of[IO, RoutePlansLoadResult](RoutePlansLoadResult(routePlans, Nil))
         )
         server <- EmberServerBuilder
           .default[IO]

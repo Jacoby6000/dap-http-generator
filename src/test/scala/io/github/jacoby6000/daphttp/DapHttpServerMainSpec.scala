@@ -130,7 +130,7 @@ class DapHttpServerMainSpec extends AnyFunSuite {
       .assemble()
       .unwrap()
 
-    val plans = DapHttpServerMain.buildRoutePlansFromModel(model).toOption.get
+    val plans = DapHttpServerMain.buildRoutePlansFromModel(model).routes
     val route = plans("/Api/GetInfo")
 
     assert(route.reads.size == 1)
@@ -180,8 +180,8 @@ class DapHttpServerMainSpec extends AnyFunSuite {
       .unwrap()
 
     val result = DapHttpServerMain.buildRoutePlansFromModel(model)
-    assert(result.isLeft)
-    assert(result.left.toOption.get.exists(_.contains("must declare @staticAddress")))
+    assert(result.routes.isEmpty)
+    assert(result.errors.exists(_.contains("must declare @staticAddress")))
   }
 
   test("maps numeric width traits to primitive IR widths") {
@@ -218,7 +218,7 @@ class DapHttpServerMainSpec extends AnyFunSuite {
       .assemble()
       .unwrap()
 
-    val plans = DapHttpServerMain.buildRoutePlansFromModel(model).toOption.get
+    val plans = DapHttpServerMain.buildRoutePlansFromModel(model).routes
     val route = plans("/Api/GetInfo")
 
     assert(route.reads.size == 1)
@@ -258,8 +258,9 @@ class DapHttpServerMainSpec extends AnyFunSuite {
       .unwrap()
 
     val result = DapHttpServerMain.buildRoutePlansFromModel(model)
-    assert(result.isRight)
-    assert(result.toOption.get("/Api/GetInfo").reads.isEmpty)
+    assert(result.routes.contains("/Api/GetInfo"))
+    assert(result.routes("/Api/GetInfo").reads.isEmpty)
+    assert(result.errors.isEmpty)
   }
 
   test("maps u64 trait to primitive IR widths") {
@@ -296,7 +297,7 @@ class DapHttpServerMainSpec extends AnyFunSuite {
       .assemble()
       .unwrap()
 
-    val plans = DapHttpServerMain.buildRoutePlansFromModel(model).toOption.get
+    val plans = DapHttpServerMain.buildRoutePlansFromModel(model).routes
     val route = plans("/Api/GetInfo")
 
     assert(route.reads.head.sizeBytes == 8)
@@ -338,7 +339,7 @@ class DapHttpServerMainSpec extends AnyFunSuite {
       .assemble()
       .unwrap()
 
-    val plans = DapHttpServerMain.buildRoutePlansFromModel(model).toOption.get
+    val plans = DapHttpServerMain.buildRoutePlansFromModel(model).routes
     val route = plans("/Api/GetInfo")
     val codec = route.reads.head.decodeCodec.get
     val decoded =
@@ -383,7 +384,7 @@ class DapHttpServerMainSpec extends AnyFunSuite {
       .assemble()
       .unwrap()
 
-    val plans = DapHttpServerMain.buildRoutePlansFromModel(model).toOption.get
+    val plans = DapHttpServerMain.buildRoutePlansFromModel(model).routes
     val route = plans("/Api/GetInfo")
 
     assert(route.reads.head.sizeBytes == 4)

@@ -22,6 +22,7 @@ class SmithyIrEmitterSpec extends AnyFunSuite {
       )
       .toOption
       .get
+      .services
 
     val smithyText = SmithyIrEmitter.emit(originalIr).toOption.get
     assert(smithyText.contains("namespace example.doldecomp"))
@@ -45,6 +46,7 @@ class SmithyIrEmitterSpec extends AnyFunSuite {
       )
       .toOption
       .get
+      .services
 
     val smithyText = SmithyIrEmitter.emit(originalIr).toOption.get
     assert(smithyText.contains("@pointer"))
@@ -67,6 +69,7 @@ class SmithyIrEmitterSpec extends AnyFunSuite {
       )
       .toOption
       .get
+      .services
 
     val outputPath = Files.createTempFile("doldecomp", ".smithy")
     try {

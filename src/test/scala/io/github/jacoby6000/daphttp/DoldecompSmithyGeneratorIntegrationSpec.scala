@@ -17,8 +17,9 @@ class DoldecompSmithyGeneratorIntegrationSpec extends AnyFunSuite {
       )
       .toOption
       .get
+      .services
 
-    val plans = HttpRouteIrEmitter.emitRoutePlansFromIr(irServices).toOption.get
+    val plans = HttpRouteIrEmitter.emitRoutePlansFromIr(irServices).routes
     val route = plans("/MeleeApi/GetGPlayerState")
     val playerState =
       irServices.head.operations.head.output.members.head.target.asInstanceOf[IrType.Struct]
@@ -87,9 +88,10 @@ class DoldecompSmithyGeneratorIntegrationSpec extends AnyFunSuite {
       )
       .toOption
       .get
+      .services
 
     val service = irServices.head
-    val plans = HttpRouteIrEmitter.emitRoutePlansFromIr(irServices).toOption.get
+    val plans = HttpRouteIrEmitter.emitRoutePlansFromIr(irServices).routes
     val playerRoute = plans("/MeleeApi/GetGPlayerState")
     val worldRoute = plans("/MeleeApi/GetGWorldState")
 
@@ -138,8 +140,9 @@ class DoldecompSmithyGeneratorIntegrationSpec extends AnyFunSuite {
       )
       .toOption
       .get
+      .services
 
-    val plans = HttpRouteIrEmitter.emitRoutePlansFromIr(irServices).toOption.get
+    val plans = HttpRouteIrEmitter.emitRoutePlansFromIr(irServices).routes
     val route = plans("/MeleeApi/GetGPlayerState")
 
     assert(route.reads.size == 1)
@@ -160,6 +163,7 @@ class DoldecompSmithyGeneratorIntegrationSpec extends AnyFunSuite {
       )
       .toOption
       .get
+      .services
 
     val operation = irServices.head.operations.head
     val valueMember = operation.output.members.head
@@ -168,11 +172,33 @@ class DoldecompSmithyGeneratorIntegrationSpec extends AnyFunSuite {
     assert(valueMember.isArray)
     assert(valueMember.arrayLength.contains(2))
 
-    val plans = HttpRouteIrEmitter.emitRoutePlansFromIr(irServices).toOption.get
+    val plans = HttpRouteIrEmitter.emitRoutePlansFromIr(irServices).routes
     val route = plans("/MeleeApi/GetGm803DDAC0Scenes")
 
     assert(route.reads.head.address == 0x803ddac0L)
     assert(route.reads.head.sizeBytes == 48)
     assert(route.reads.head.decodeCodec.nonEmpty)
+  }
+
+  test("returns successful routes when some symbol derivations fail") {
+    val fixtureRoot = Paths.get("src/test/resources/doldecomp-fixture-partial")
+    val generation = DoldecompIrGenerator
+      .generateFromPaths(
+        symbolsPath = fixtureRoot.resolve("symbols.txt"),
+        headerRoots = List(fixtureRoot),
+        namespace = "example.doldecomp.partial",
+        serviceName = "MeleeApi",
+        wordSizeBits = 32
+      )
+      .toOption
+      .get
+
+    assert(generation.warnings.exists(_.contains("badSymbol")))
+    assert(generation.services.head.operations.map(_.name) == List("GetGPlayerState"))
+
+    val plans = HttpRouteIrEmitter.emitRoutePlansFromIr(generation.services)
+    assert(plans.routes.contains("/MeleeApi/GetGPlayerState"))
+    assert(!plans.routes.contains("/MeleeApi/GetBadSymbol"))
+    assert(plans.errors.isEmpty)
   }
 }

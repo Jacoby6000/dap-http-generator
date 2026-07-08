@@ -14,30 +14,35 @@ import scala.collection.mutable.ListBuffer
 object HttpRouteIrEmitter {
   def emitRoutePlansFromIr(
       irServices: List[IrService]
-  ): Either[List[String], Map[String, RoutePlan]] = {
+  ): RoutePlansLoadResult = {
     val errors = ListBuffer.empty[String]
+    val routes = ListBuffer.empty[(String, RoutePlan)]
 
     irServices.foreach { service =>
-      if (service.wordSizeBits.isEmpty) {
-        errors += s"${service.name}: Services must declare @wordSize."
+      service.wordSizeBits match {
+        case None =>
+          errors += s"${service.name}: Services must declare @wordSize."
+        case Some(wordSizeBits) =>
+          service.operations.foreach { operation =>
+            val operationErrors = ListBuffer.empty[String]
+            val reads = collectReadsForType(
+              operation.output,
+              None,
+              operation.routePath,
+              service.defaultEndian,
+              Some(wordSizeBits),
+              operationErrors
+            )
+            if (operationErrors.nonEmpty) {
+              errors ++= operationErrors.toList
+            } else {
+              routes += operation.routePath -> RoutePlan(operation.routePath, reads)
+            }
+          }
       }
     }
 
-    val routePlans = irServices.flatMap { service =>
-      service.operations.map { operation =>
-        val reads = collectReadsForType(
-          operation.output,
-          None,
-          operation.routePath,
-          service.defaultEndian,
-          service.wordSizeBits,
-          errors
-        )
-        operation.routePath -> RoutePlan(operation.routePath, reads)
-      }
-    }.toMap
-
-    if (errors.nonEmpty) Left(errors.toList.distinct) else Right(routePlans)
+    RoutePlansLoadResult(routes.toMap, errors.toList.distinct)
   }
 
   private def collectReadsForType(

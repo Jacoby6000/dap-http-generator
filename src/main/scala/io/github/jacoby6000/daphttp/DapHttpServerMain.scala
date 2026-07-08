@@ -45,9 +45,7 @@ object DapHttpServerMain extends IOApp {
         IO.println(error).as(ExitCode.Error)
       case Right(config) =>
         for {
-          plansRef <- Ref.of[IO, Either[List[String], Map[String, RoutePlan]]](
-            loadPlans(config.smithyPaths)
-          )
+          plansRef <- Ref.of[IO, RoutePlansLoadResult](loadPlans(config.smithyPaths))
           _ <- watchSmithySources(config, plansRef)
           dapClient = new SocketDapClient(config.dapHost, config.dapPort)
           app = routes(plansRef, dapClient).orNotFound
@@ -93,7 +91,7 @@ object DapHttpServerMain extends IOApp {
   }
 
   private[daphttp] def routes(
-      plansRef: Ref[IO, Either[List[String], Map[String, RoutePlan]]],
+      plansRef: Ref[IO, RoutePlansLoadResult],
       dapClient: DapClient
   ): HttpRoutes[IO] =
     HttpRoutes.of[IO] {
@@ -101,68 +99,71 @@ object DapHttpServerMain extends IOApp {
         Ok(Json.obj("status" -> Json.fromString("ok")))
 
       case GET -> Root / "routes" =>
-        plansRef.get.flatMap {
-          case Left(errors) =>
-            Ok(Json.obj("errors" -> errors.asJson))
-          case Right(routesMap) =>
-            Ok(Json.obj("routes" -> routesMap.keys.toList.sorted.asJson))
+        plansRef.get.flatMap { result =>
+          Ok(
+            Json.obj(
+              "routes" -> result.routes.keys.toList.sorted.asJson,
+              "errors" -> result.errors.asJson
+            )
+          )
         }
 
       case request @ GET -> _ =>
         val routePath = request.uri.path.renderString
-        plansRef.get.flatMap {
-          case Left(errors) =>
-            InternalServerError(Json.obj("errors" -> errors.asJson))
-          case Right(routesMap) =>
-            routesMap.get(routePath) match {
-              case None =>
-                NotFound(Json.obj("error" -> Json.fromString(s"No route generated for $routePath")))
-              case Some(routePlan) =>
-                routePlan.reads
-                  .foldLeft(IO.pure(List.empty[Json])) { (accIO, readPlan) =>
-                    for {
-                      acc <- accIO
-                      read <- dapClient.readMemory(readPlan.address, readPlan.sizeBytes)
-                      decoded <- read match {
-                        case Right(data) => decodeReadResult(readPlan, data, dapClient)
-                        case Left(_)     => IO.pure(Json.Null)
-                      }
-                    } yield {
-                      val readJson = read match {
-                        case Right(data) =>
-                          Json.obj(
-                            "path" -> Json.fromString(readPlan.path),
-                            "address" -> Json.fromString(f"0x${readPlan.address}%x"),
-                            "bytes" -> Json.fromInt(readPlan.sizeBytes),
-                            "data" -> Json.fromString(data),
-                            "decoded" -> decoded
-                          )
-                        case Left(error) =>
-                          Json.obj(
-                            "path" -> Json.fromString(readPlan.path),
-                            "address" -> Json.fromString(f"0x${readPlan.address}%x"),
-                            "bytes" -> Json.fromInt(readPlan.sizeBytes),
-                            "error" -> Json.fromString(error)
-                          )
-                      }
-                      acc :+ readJson
+        plansRef.get.flatMap { result =>
+          result.routes.get(routePath) match {
+            case None =>
+              NotFound(Json.obj("error" -> Json.fromString(s"No route generated for $routePath")))
+            case Some(routePlan) =>
+              routePlan.reads
+                .foldLeft(IO.pure(List.empty[Json])) { (accIO, readPlan) =>
+                  for {
+                    acc <- accIO
+                    read <- dapClient.readMemory(readPlan.address, readPlan.sizeBytes)
+                    decoded <- read match {
+                      case Right(data) => decodeReadResult(readPlan, data, dapClient)
+                      case Left(_)     => IO.pure(Json.Null)
                     }
+                  } yield {
+                    val readJson = read match {
+                      case Right(data) =>
+                        Json.obj(
+                          "path" -> Json.fromString(readPlan.path),
+                          "address" -> Json.fromString(f"0x${readPlan.address}%x"),
+                          "bytes" -> Json.fromInt(readPlan.sizeBytes),
+                          "data" -> Json.fromString(data),
+                          "decoded" -> decoded
+                        )
+                      case Left(error) =>
+                        Json.obj(
+                          "path" -> Json.fromString(readPlan.path),
+                          "address" -> Json.fromString(f"0x${readPlan.address}%x"),
+                          "bytes" -> Json.fromInt(readPlan.sizeBytes),
+                          "error" -> Json.fromString(error)
+                        )
+                    }
+                    acc :+ readJson
                   }
-                  .flatMap { reads =>
-                    Ok(
-                      Json.obj(
-                        "route" -> Json.fromString(routePlan.path),
-                        "reads" -> reads.asJson
-                      )
+                }
+                .flatMap { reads =>
+                  Ok(
+                    Json.obj(
+                      "route" -> Json.fromString(routePlan.path),
+                      "reads" -> reads.asJson
                     )
-                  }
-            }
+                  )
+                }
+          }
         }
     }
 
-  private def loadPlans(smithyPaths: List[Path]): Either[List[String], Map[String, RoutePlan]] = {
-    loadModel(smithyPaths).flatMap(buildRoutePlansFromModel)
-  }
+  private def loadPlans(smithyPaths: List[Path]): RoutePlansLoadResult =
+    loadModel(smithyPaths) match {
+      case Left(errors) =>
+        RoutePlansLoadResult(Map.empty, errors)
+      case Right(model) =>
+        buildRoutePlansFromModel(model)
+    }
 
   private def loadModel(smithyPaths: List[Path]): Either[List[String], Model] = {
     val smithyFiles = smithyPaths.flatMap(collectSmithyFiles).distinct
@@ -197,12 +198,17 @@ object DapHttpServerMain extends IOApp {
     }
   }
 
-  def buildRoutePlansFromModel(model: Model): Either[List[String], Map[String, RoutePlan]] =
-    SmithyIrGenerator.generateFromModel(model).flatMap(compileServicesWithSizingWarnings)
+  def buildRoutePlansFromModel(model: Model): RoutePlansLoadResult =
+    SmithyIrGenerator.generateFromModel(model) match {
+      case Left(errors) =>
+        RoutePlansLoadResult(Map.empty, errors)
+      case Right(services) =>
+        compileServicesWithSizingWarnings(services)
+    }
 
   private def compileServicesWithSizingWarnings(
       services: List[IrService]
-  ): Either[List[String], Map[String, RoutePlan]] = {
+  ): RoutePlansLoadResult = {
     IrSizingWarnings.writeToStderr(services)
     HttpRouteIrEmitter.emitRoutePlansFromIr(services)
   }
@@ -271,7 +277,7 @@ object DapHttpServerMain extends IOApp {
 
   private def watchSmithySources(
       config: Config,
-      plansRef: Ref[IO, Either[List[String], Map[String, RoutePlan]]]
+      plansRef: Ref[IO, RoutePlansLoadResult]
   ): IO[Unit] = {
     if (!config.watch) {
       IO.unit

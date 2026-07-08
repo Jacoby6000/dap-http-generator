@@ -45,8 +45,7 @@ class HttpRouteIrEmitterCodecSpec extends AnyFunSuite {
           )
         )
       )
-      .toOption
-      .get("/Api/GetValue")
+      .routes("/Api/GetValue")
       .reads
       .head
   }

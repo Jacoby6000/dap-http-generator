@@ -14,3 +14,11 @@ final case class ReadPlan(
     cStringPointer: Boolean
 )
 final case class RoutePlan(path: String, reads: List[ReadPlan])
+final case class RoutePlansLoadResult(
+    routes: Map[String, RoutePlan],
+    errors: List[String]
+)
+final case class IrGenerationResult(
+    warnings: List[String],
+    services: List[IrService]
+)

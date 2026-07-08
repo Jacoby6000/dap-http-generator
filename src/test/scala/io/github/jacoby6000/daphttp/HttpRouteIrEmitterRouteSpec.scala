@@ -70,8 +70,7 @@ class HttpRouteIrEmitterRouteSpec extends AnyFunSuite {
           )
         )
       )
-      .toOption
-      .get
+      .routes
 
     val read = plans("/Api/GetSnapshot").reads.head
     assert(read.path == "/Api/GetSnapshot.registers")
@@ -143,8 +142,7 @@ class HttpRouteIrEmitterRouteSpec extends AnyFunSuite {
           )
         )
       )
-      .toOption
-      .get
+      .routes
 
     val read = plans("/Api/GetFlags").reads.head
     assert(read.sizeBytes == 2)

@@ -32,11 +32,11 @@ object DoldecompIrGenerator {
       namespace: String = "doldecomp.generated",
       serviceName: String = "DolDecompApi",
       wordSizeBits: Int = 32
-  ): Either[List[String], List[IrService]] = {
+  ): Either[List[String], IrGenerationResult] = {
     val symbolsContent = new String(Files.readAllBytes(symbolsPath))
     DoldecompSymbolsParser
       .parse(symbolsContent)
-      .flatMap(generateFromSymbols(_, headerRoots, namespace, serviceName, wordSizeBits))
+      .map(generateFromSymbols(_, headerRoots, namespace, serviceName, wordSizeBits))
   }
 
   def generateFromSymbols(
@@ -45,37 +45,44 @@ object DoldecompIrGenerator {
       namespace: String = "doldecomp.generated",
       serviceName: String = "DolDecompApi",
       wordSizeBits: Int = 32
-  ): Either[List[String], List[IrService]] = {
+  ): IrGenerationResult = {
     val headerStructs = loadStructs(headerRoots)
     val globalDeclarations = loadGlobalDeclarations(headerRoots)
     val dataObjectSymbols =
       symbols.filter(_.symbolType.contains("object")).filter(_.section.contains(".data"))
     val resolvedSymbols = dataObjectSymbols.flatMap(resolveSymbol(_, globalDeclarations))
+    val warnings = mutable.ListBuffer.empty[String]
 
     if (resolvedSymbols.isEmpty) {
-      Left(List("No .data object symbols with a matching C declaration were found."))
+      IrGenerationResult(
+        warnings = List("No .data object symbols with a matching C declaration were found."),
+        services = Nil
+      )
     } else {
-      val errors = mutable.ListBuffer.empty[String]
-      val operations = resolvedSymbols.map { resolved =>
-        val operationName = s"Get${toPascalCase(resolved.symbol.name)}"
-        val outputName = s"${operationName}Output"
-        val rootTypeName = resolved.typeName
-        val validationError =
-          validateResolvedType(resolved.symbol.name, rootTypeName, headerStructs)
-        validationError.foreach(errors += _)
-        OperationModel(
-          symbol = resolved.symbol,
-          operationName = operationName,
-          outputName = outputName,
-          rootTypeName = rootTypeName,
-          isArray = resolved.isArray,
-          arrayLength = resolved.arrayLength
-        )
+      val validResolved = resolvedSymbols.filter { resolved =>
+        validateResolvedType(resolved.symbol.name, resolved.typeName, headerStructs) match {
+          case Some(error) =>
+            warnings += error
+            false
+          case None =>
+            true
+        }
       }
 
-      if (errors.nonEmpty) {
-        Left(errors.toList)
+      if (validResolved.isEmpty) {
+        IrGenerationResult(warnings.toList, Nil)
       } else {
+        val operations = validResolved.map { resolved =>
+          OperationModel(
+            symbol = resolved.symbol,
+            operationName = s"Get${toPascalCase(resolved.symbol.name)}",
+            outputName = s"Get${toPascalCase(resolved.symbol.name)}Output",
+            rootTypeName = resolved.typeName,
+            isArray = resolved.isArray,
+            arrayLength = resolved.arrayLength
+          )
+        }
+
         val reachableStructs = collectReachableStructs(operations, headerStructs)
         val reachableByName = reachableStructs.toMap
         val builtStructs = mutable.Map.empty[String, IrType.MemoryMappedStruct]
@@ -101,17 +108,19 @@ object DoldecompIrGenerator {
           )
         }
 
-        val operationsWithArrayLengths = operations.map { operation =>
+        val operationsWithArrayLengths = operations.flatMap { operation =>
           if (operation.isArray && operation.arrayLength.isEmpty) {
             val elementStruct = buildStruct(operation.rootTypeName)
             val elementSizeBytes = irStructSizeBytes(elementStruct, wordSizeBits)
-            val inferredLength = inferArrayLength(operation.symbol, elementSizeBytes)
-            if (inferredLength.isEmpty) {
-              errors += s"${operation.symbol.name}: Unable to infer array length for '${operation.rootTypeName}'."
+            inferArrayLength(operation.symbol, elementSizeBytes) match {
+              case Some(length) =>
+                Some(operation.copy(arrayLength = Some(length)))
+              case None =>
+                warnings += s"${operation.symbol.name}: Unable to infer array length for '${operation.rootTypeName}'."
+                None
             }
-            operation.copy(arrayLength = inferredLength)
           } else {
-            operation
+            Some(operation)
           }
         }
 
@@ -164,8 +173,9 @@ object DoldecompIrGenerator {
           )
         }
 
-        Right(
-          List(
+        IrGenerationResult(
+          warnings = warnings.toList,
+          services = List(
             IrService(
               name = serviceName,
               wordSizeBits = Some(wordSizeBits),

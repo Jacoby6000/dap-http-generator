@@ -136,7 +136,15 @@ object Cli
     Opts.subcommand(smithySubcommand) orElse Opts.subcommand(cheadersSubcommand) orElse Opts
       .subcommand(cheadersSmithySubcommand)
 
-  private def loadSmithyPlans(paths: List[Path]): Either[List[String], Map[String, RoutePlan]] = {
+  private def loadSmithyPlans(paths: List[Path]): RoutePlansLoadResult =
+    loadModel(paths) match {
+      case Left(errors) =>
+        RoutePlansLoadResult(Map.empty, errors)
+      case Right(model) =>
+        DapHttpServerMain.buildRoutePlansFromModel(model)
+    }
+
+  private def loadModel(paths: List[Path]): Either[List[String], Model] = {
     val smithyFiles = paths.flatMap(collectSmithyFiles).distinct
     val assembler = Model.assembler()
     smithyFiles.foreach(path => assembler.addImport(path.toString))
@@ -144,7 +152,7 @@ object Cli
     if (result.isBroken) {
       Left(result.getValidationEvents.asScala.map(_.toString).toList)
     } else {
-      DapHttpServerMain.buildRoutePlansFromModel(result.unwrap())
+      Right(result.unwrap())
     }
   }
 
@@ -154,10 +162,17 @@ object Cli
       namespace: String,
       service: String,
       wordSize: Int
-  ): Either[List[String], Map[String, RoutePlan]] =
-    loadIrFromCHeaders(symbolsPath, headerPaths, namespace, service, wordSize).flatMap { services =>
-      IrSizingWarnings.writeToStderr(services)
-      HttpRouteIrEmitter.emitRoutePlansFromIr(services)
+  ): RoutePlansLoadResult =
+    loadIrFromCHeaders(symbolsPath, headerPaths, namespace, service, wordSize) match {
+      case Left(errors) =>
+        RoutePlansLoadResult(Map.empty, errors)
+      case Right(generation) =>
+        IrSizingWarnings.writeToStderr(generation.services)
+        val plans = HttpRouteIrEmitter.emitRoutePlansFromIr(generation.services)
+        RoutePlansLoadResult(
+          routes = plans.routes,
+          errors = generation.warnings ++ plans.errors
+        )
     }
 
   private def loadIrFromCHeaders(
@@ -166,7 +181,7 @@ object Cli
       namespace: String,
       service: String,
       wordSize: Int
-  ): Either[List[String], List[IrService]] =
+  ): Either[List[String], IrGenerationResult] =
     DoldecompIrGenerator.generateFromPaths(
       symbolsPath,
       headerPaths,
@@ -183,9 +198,15 @@ object Cli
       wordSize: Int,
       outputPath: Path
   ): Either[List[String], Unit] =
-    loadIrFromCHeaders(symbolsPath, headerPaths, namespace, service, wordSize).flatMap { services =>
-      IrSizingWarnings.writeToStderr(services)
-      SmithyIrEmitter.emitToPath(services, outputPath)
+    loadIrFromCHeaders(symbolsPath, headerPaths, namespace, service, wordSize).flatMap {
+      generation =>
+        if (generation.services.isEmpty) {
+          Left(generation.warnings)
+        } else {
+          IrSizingWarnings.writeToStderr(generation.services)
+          generation.warnings.foreach(System.err.println)
+          SmithyIrEmitter.emitToPath(generation.services, outputPath)
+        }
     }
 
   private def collectSmithyFiles(path: Path): List[Path] = {
@@ -211,12 +232,12 @@ object Cli
 
   private def runServer(
       config: ServerConfig,
-      plans: Either[List[String], Map[String, RoutePlan]],
+      plans: RoutePlansLoadResult,
       watchPaths: List[Path],
       watch: Boolean
   ): IO[ExitCode] =
     for {
-      plansRef <- Ref.of[IO, Either[List[String], Map[String, RoutePlan]]](plans)
+      plansRef <- Ref.of[IO, RoutePlansLoadResult](plans)
       _ <-
         if (watch && watchPaths.nonEmpty) startSmithyWatcher(watchPaths, plansRef)
         else IO.unit
@@ -234,7 +255,7 @@ object Cli
 
   private def startSmithyWatcher(
       paths: List[Path],
-      plansRef: Ref[IO, Either[List[String], Map[String, RoutePlan]]]
+      plansRef: Ref[IO, RoutePlansLoadResult]
   ): IO[Unit] = {
     def newestTimestamp: Long =
       paths
