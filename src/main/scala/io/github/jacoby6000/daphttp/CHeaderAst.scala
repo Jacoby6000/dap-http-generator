@@ -4,6 +4,8 @@ final case class CStruct(name: String, fields: List[CField])
 final case class CField(
     typeName: String,
     name: String,
-    isPointer: Boolean,
+    pointerDepth: Int,
     arrayLength: Option[Int]
-)
+) {
+  def isPointer: Boolean = pointerDepth > 0
+}

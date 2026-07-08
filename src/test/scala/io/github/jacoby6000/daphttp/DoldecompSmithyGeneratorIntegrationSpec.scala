@@ -1,14 +1,13 @@
 package io.github.jacoby6000.daphttp
 
 import org.scalatest.funsuite.AnyFunSuite
-import software.amazon.smithy.model.Model
 
 import java.nio.file.Paths
 
 class DoldecompSmithyGeneratorIntegrationSpec extends AnyFunSuite {
-  test("generates smithy from symbols and headers then compiles route plans") {
+  test("generates IR from symbols and headers then compiles route plans") {
     val fixtureRoot = Paths.get("src/test/resources/doldecomp-fixture")
-    val smithy = DoldecompSmithyGenerator
+    val irServices = DoldecompIrGenerator
       .generateFromPaths(
         symbolsPath = fixtureRoot.resolve("symbols.txt"),
         headerRoots = List(fixtureRoot.resolve("include")),
@@ -19,26 +18,28 @@ class DoldecompSmithyGeneratorIntegrationSpec extends AnyFunSuite {
       .toOption
       .get
 
-    val model = Model
-      .assembler()
-      .addImport("src/main/smithy/dap-http-traits.smithy")
-      .addUnparsedModel("doldecomp-generated.smithy", smithy)
-      .assemble()
-      .unwrap()
-
-    val plans = DapHttpServerMain.buildRoutePlansFromModel(model).toOption.get
+    val plans = IrCompiler.compileRoutePlansFromIr(irServices).toOption.get
     val route = plans("/MeleeApi/GetGPlayerState")
+    val playerState =
+      irServices.head.operations.head.output.members.head.target.asInstanceOf[IrType.Struct]
+    val scoreMember = playerState.members.find(_.name == "score").get
 
     assert(route.reads.size == 1)
     assert(route.reads.head.address == 0x80453100L)
     assert(route.reads.head.sizeBytes == 32)
     assert(route.reads.head.decodeCodec.nonEmpty)
+    assert(!scoreMember.isPointer)
+    assert(scoreMember.target == IrType.Primitive(IrPrimitive.U128))
 
     val payload = Array[Byte](
       0x00,
       0x00,
       0x00,
       0x2a,
+      0x00,
+      0x00,
+      0x00,
+      0x00,
       0x00,
       0x00,
       0x00,
@@ -62,13 +63,10 @@ class DoldecompSmithyGeneratorIntegrationSpec extends AnyFunSuite {
       0x40,
       0x40,
       0x00,
-      0x00,
-      0x00,
-      0x00,
-      0x00,
       0x00
     )
-    val decoded = route.reads.head.decodeCodec.get.decode(scodec.bits.BitVector(payload)).toOption.get.value
+    val decoded =
+      route.reads.head.decodeCodec.get.decode(scodec.bits.BitVector(payload)).toOption.get.value
     val cursor = decoded.hcursor
     assert(cursor.downField("health").as[Long].toOption.contains(42L))
     assert(cursor.downField("score").as[String].toOption.contains("5"))
