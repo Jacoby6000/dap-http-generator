@@ -91,8 +91,50 @@ object Cli
       }
     )
 
+  private val cheadersSmithySubcommand: Command[IO[ExitCode]] =
+    Command(
+      name = "cheaders-smithy",
+      header = "Generate Smithy model files from C headers and a doldecomp symbols file"
+    )(
+      (
+        Opts.option[Path]("symbols", "doldecomp symbols file path", metavar = "path"),
+        Opts.options[Path]("headers", "C header file or directory paths", metavar = "path"),
+        Opts
+          .option[String](
+            "namespace",
+            "Smithy namespace for generated types",
+            metavar = "namespace"
+          )
+          .withDefault("doldecomp.generated"),
+        Opts
+          .option[String]("service", "Service name", metavar = "name")
+          .withDefault("DolDecompApi"),
+        Opts
+          .option[Int]("word-size", "Pointer word size in bits", metavar = "bits")
+          .withDefault(32),
+        Opts.option[Path]("output", "Output Smithy model file path", metavar = "path")
+      ).mapN { (symbolsPath, headerPaths, namespace, service, wordSize, outputPath) =>
+        IO.blocking(
+          emitSmithyFromCHeaders(
+            symbolsPath,
+            headerPaths.toList,
+            namespace,
+            service,
+            wordSize,
+            outputPath
+          )
+        ).map {
+          case Right(_) =>
+            IO.println(s"Wrote Smithy model to $outputPath") *> IO.pure(ExitCode.Success)
+          case Left(errors) =>
+            IO.println(errors.mkString("\n")) *> IO.pure(ExitCode.Error)
+        }.flatten
+      }
+    )
+
   override def main: Opts[IO[ExitCode]] =
-    Opts.subcommand(smithySubcommand) orElse Opts.subcommand(cheadersSubcommand)
+    Opts.subcommand(smithySubcommand) orElse Opts.subcommand(cheadersSubcommand) orElse Opts
+      .subcommand(cheadersSmithySubcommand)
 
   private def loadSmithyPlans(paths: List[Path]): Either[List[String], Map[String, RoutePlan]] = {
     val smithyFiles = paths.flatMap(collectSmithyFiles).distinct
@@ -113,9 +155,38 @@ object Cli
       service: String,
       wordSize: Int
   ): Either[List[String], Map[String, RoutePlan]] =
-    DoldecompIrGenerator
-      .generateFromPaths(symbolsPath, headerPaths, namespace, service, wordSize)
-      .flatMap(IrCompiler.compileRoutePlansFromIr)
+    loadIrFromCHeaders(symbolsPath, headerPaths, namespace, service, wordSize).flatMap { services =>
+      IrSizingWarnings.writeToStderr(services)
+      HttpRouteIrEmitter.emitRoutePlansFromIr(services)
+    }
+
+  private def loadIrFromCHeaders(
+      symbolsPath: Path,
+      headerPaths: List[Path],
+      namespace: String,
+      service: String,
+      wordSize: Int
+  ): Either[List[String], List[IrService]] =
+    DoldecompIrGenerator.generateFromPaths(
+      symbolsPath,
+      headerPaths,
+      namespace,
+      service,
+      wordSize
+    )
+
+  private def emitSmithyFromCHeaders(
+      symbolsPath: Path,
+      headerPaths: List[Path],
+      namespace: String,
+      service: String,
+      wordSize: Int,
+      outputPath: Path
+  ): Either[List[String], Unit] =
+    loadIrFromCHeaders(symbolsPath, headerPaths, namespace, service, wordSize).flatMap { services =>
+      IrSizingWarnings.writeToStderr(services)
+      SmithyIrEmitter.emitToPath(services, outputPath)
+    }
 
   private def collectSmithyFiles(path: Path): List[Path] = {
     if (!Files.exists(path)) {

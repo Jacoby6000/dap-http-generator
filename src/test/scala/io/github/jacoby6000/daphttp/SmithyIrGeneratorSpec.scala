@@ -3,7 +3,7 @@ package io.github.jacoby6000.daphttp
 import org.scalatest.funsuite.AnyFunSuite
 import software.amazon.smithy.model.Model
 
-class IrExtractorSpec extends AnyFunSuite {
+class SmithyIrGeneratorSpec extends AnyFunSuite {
   private val traitsModel =
     """$version: "2"
       |
@@ -110,7 +110,7 @@ class IrExtractorSpec extends AnyFunSuite {
       .assemble()
       .unwrap()
 
-    val services = IrExtractor.buildIrFromModel(model).toOption.get
+    val services = SmithyIrGenerator.generateFromModel(model).toOption.get
     assert(services.size == 1)
     val service = services.head
     assert(service.name == "Api")

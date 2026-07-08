@@ -5,7 +5,7 @@ import org.scalatest.funsuite.AnyFunSuite
 import scodec.bits.BitVector
 import software.amazon.smithy.model.shapes.ShapeId
 
-class IrCompilerCodecSpec extends AnyFunSuite {
+class HttpRouteIrEmitterCodecSpec extends AnyFunSuite {
   private def id(value: String): ShapeId = ShapeId.from(s"example#$value")
 
   private def compileSingleRead(
@@ -33,8 +33,8 @@ class IrCompilerCodecSpec extends AnyFunSuite {
       declaredSizeBits = None
     )
 
-    IrCompiler
-      .compileRoutePlansFromIr(
+    HttpRouteIrEmitter
+      .emitRoutePlansFromIr(
         List(
           IrService(
             name = "Api",

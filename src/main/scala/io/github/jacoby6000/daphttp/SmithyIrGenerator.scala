@@ -17,7 +17,7 @@ import scala.jdk.CollectionConverters._
 import scala.jdk.OptionConverters._
 import scala.util.Try
 
-object IrExtractor {
+object SmithyIrGenerator {
   private val DapStructTrait = ShapeId.from("com.jacoby6000.daphttp#dapStruct")
   private val BitmaskTrait = ShapeId.from("com.jacoby6000.daphttp#bitmask")
   private val SizeTrait = ShapeId.from("com.jacoby6000.daphttp#size")
@@ -101,7 +101,7 @@ object IrExtractor {
   private val BytesShape = ShapeId.from("com.jacoby6000.daphttp#Bytes")
   private val BitsShape = ShapeId.from("com.jacoby6000.daphttp#Bits")
 
-  def buildIrFromModel(model: Model): Either[List[String], List[IrService]] = {
+  def generateFromModel(model: Model): Either[List[String], List[IrService]] = {
     val errors = ListBuffer.empty[String]
     val services = model.shapes(classOf[ServiceShape]).iterator().asScala.toList
 

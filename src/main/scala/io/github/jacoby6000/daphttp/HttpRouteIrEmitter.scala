@@ -11,8 +11,8 @@ import scodec.codecs.bits
 
 import scala.collection.mutable.ListBuffer
 
-object IrCompiler {
-  def compileRoutePlansFromIr(
+object HttpRouteIrEmitter {
+  def emitRoutePlansFromIr(
       irServices: List[IrService]
   ): Either[List[String], Map[String, RoutePlan]] = {
     val errors = ListBuffer.empty[String]
