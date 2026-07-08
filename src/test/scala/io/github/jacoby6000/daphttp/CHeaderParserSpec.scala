@@ -122,6 +122,19 @@ class CHeaderParserSpec extends AnyFunSuite {
     assert(declaration.resolvedArrayLength.contains(2))
   }
 
+  test("infers char array length from string literal initializer") {
+    val source =
+      """
+        |const char strPlLoadCommonData[] = "pLoadCommonData";
+        |""".stripMargin
+
+    val declaration = CHeaderParser.parseGlobalDeclarations(source).head
+
+    assert(declaration.isArray)
+    assert(declaration.initializerLength.contains(16))
+    assert(declaration.resolvedArrayLength.contains(16))
+  }
+
   test("infers struct field array length from accompanying C initializer") {
     val header =
       """

@@ -12,7 +12,8 @@ class HttpRouteIrEmitterCodecSpec extends AnyFunSuite {
       memberTarget: IrType,
       memberPrimitiveOverride: Option[IrPrimitive] = None,
       endian: IrEndian = IrEndian.Big,
-      wordSize: Option[Int] = Some(32)
+      wordSize: Option[Int] = Some(32),
+      readSizeBytes: Option[Int] = None
   ): ReadPlan = {
     val output = IrType.EnclosingStruct(
       id = id("Output"),
@@ -27,7 +28,8 @@ class HttpRouteIrEmitterCodecSpec extends AnyFunSuite {
           isArray = false,
           arrayLength = None,
           endianOverride = None,
-          primitiveOverride = memberPrimitiveOverride
+          primitiveOverride = memberPrimitiveOverride,
+          readSizeBytes = readSizeBytes
         )
       ),
       declaredSizeBits = None
@@ -348,5 +350,34 @@ class HttpRouteIrEmitterCodecSpec extends AnyFunSuite {
       'x'.toByte
     )
     assert(decode(read, bytes) == Json.obj("name" -> Json.fromString("Hello")))
+  }
+
+  test("decodes char globals with symbol read width as null-terminated strings") {
+    val read = compileSingleRead(
+      memberTarget = IrType.Primitive(IrPrimitive.Char),
+      memberPrimitiveOverride = Some(IrPrimitive.Char),
+      readSizeBytes = Some(17)
+    )
+    val bytes = Array[Byte](
+      'p'.toByte,
+      'L'.toByte,
+      'o'.toByte,
+      'a'.toByte,
+      'd'.toByte,
+      'C'.toByte,
+      'o'.toByte,
+      'm'.toByte,
+      'm'.toByte,
+      'o'.toByte,
+      'n'.toByte,
+      'D'.toByte,
+      'a'.toByte,
+      't'.toByte,
+      'a'.toByte,
+      0x00.toByte,
+      0x00.toByte
+    )
+
+    assert(decode(read, bytes) == Json.fromString("pLoadCommonData"))
   }
 }

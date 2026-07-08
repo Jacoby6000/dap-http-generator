@@ -325,6 +325,19 @@ object HttpRouteIrEmitter {
   private def isCharStringArray(member: IrMember, listType: IrType.ListType): Boolean =
     member.isArray && !member.isPointer && listType.element == IrType.Primitive(IrPrimitive.Char)
 
+  private def isCharType(member: IrMember): Boolean =
+    memberReadType(member) == IrType.Primitive(IrPrimitive.Char) ||
+      member.primitiveOverride.contains(IrPrimitive.Char)
+
+  private def inlineCharByteCount(member: IrMember): Option[Int] =
+    if (!isCharType(member) || member.isPointer) {
+      None
+    } else {
+      member.readSizeBytes.orElse {
+        if (member.isArray) member.arrayLength else None
+      }
+    }
+
   private def nullTerminatedAsciiString(bytes: Array[Byte]): String = {
     val end = bytes.indexWhere(_ == 0)
     val slice = if (end >= 0) bytes.take(end) else bytes
@@ -576,13 +589,15 @@ object HttpRouteIrEmitter {
       errors: ListBuffer[String],
       context: String
   ): Option[Codec[Json]] = {
-    member.target match {
-      case listType: IrType.ListType if member.isArray && !member.isPointer =>
-        compileArrayCodec(member, listType, endian, wordSize, errors, context)
-      case _ if member.isPointer =>
-        compilePrimitiveCodec(IrPrimitive.LongWord, endian, wordSize)
-      case _ =>
-        compileJsonCodecForType(memberReadType(member), endian, wordSize, errors, context)
+    inlineCharByteCount(member).filter(_ > 1).map(inlineCharArrayStringCodec).orElse {
+      member.target match {
+        case listType: IrType.ListType if member.isArray && !member.isPointer =>
+          compileArrayCodec(member, listType, endian, wordSize, errors, context)
+        case _ if member.isPointer =>
+          compilePrimitiveCodec(IrPrimitive.LongWord, endian, wordSize)
+        case _ =>
+          compileJsonCodecForType(memberReadType(member), endian, wordSize, errors, context)
+      }
     }
   }
 

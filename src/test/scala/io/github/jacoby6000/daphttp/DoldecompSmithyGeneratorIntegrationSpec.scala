@@ -1,5 +1,6 @@
 package io.github.jacoby6000.daphttp
 
+import io.circe.Json
 import org.scalatest.funsuite.AnyFunSuite
 
 import java.nio.file.Paths
@@ -255,5 +256,33 @@ class DoldecompSmithyGeneratorIntegrationSpec extends AnyFunSuite {
     val plans = HttpRouteIrEmitter.emitRoutePlansFromIr(generation.services)
     assert(plans.routes.contains("/StringsApi/GetGStringFields"))
     assert(plans.routes("/StringsApi/GetGStringFields").reads.head.decodeCodec.nonEmpty)
+  }
+
+  test("decodes char globals as full null-terminated strings") {
+    val fixtureRoot = Paths.get("src/test/resources/doldecomp-fixture-char-string")
+    val generation = DoldecompIrGenerator
+      .generateFromPaths(
+        symbolsPath = fixtureRoot.resolve("symbols.txt"),
+        headerRoots = List(fixtureRoot),
+        namespace = "example.doldecomp.charstring",
+        serviceName = "DolDecompApi",
+        wordSizeBits = 32
+      )
+      .toOption
+      .get
+
+    assert(generation.warnings.isEmpty)
+    val route =
+      HttpRouteIrEmitter
+        .emitRoutePlansFromIr(generation.services)
+        .routes(
+          "/DolDecompApi/GetStrPlLoadCommonData"
+        )
+    val payload = "pLoadCommonData\u0000\u0000".getBytes("US-ASCII")
+    val decoded =
+      route.reads.head.decodeCodec.get.decode(scodec.bits.BitVector(payload)).toOption.get.value
+
+    assert(route.reads.head.sizeBytes == 17)
+    assert(decoded == Json.fromString("pLoadCommonData"))
   }
 }

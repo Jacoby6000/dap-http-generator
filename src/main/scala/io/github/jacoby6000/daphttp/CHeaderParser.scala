@@ -9,6 +9,7 @@ import org.eclipse.cdt.core.dom.ast.IASTFunctionDeclarator
 import org.eclipse.cdt.core.dom.ast.IASTInitializer
 import org.eclipse.cdt.core.dom.ast.IASTInitializerClause
 import org.eclipse.cdt.core.dom.ast.IASTInitializerList
+import org.eclipse.cdt.core.dom.ast.IASTLiteralExpression
 import org.eclipse.cdt.core.dom.ast.IASTSimpleDeclaration
 import org.eclipse.cdt.core.dom.ast.IASTTranslationUnit
 import org.eclipse.cdt.core.dom.ast.gnu.c.GCCLanguage
@@ -200,9 +201,19 @@ object CHeaderParser {
     clause match {
       case initializerList: IASTInitializerList =>
         Some(initializerList.getClauses.length)
+      case literal: IASTLiteralExpression
+          if literal.getKind == IASTLiteralExpression.lk_string_literal =>
+        Option(literal.getValue).map(value => stringLiteralByteLength(value.mkString))
       case _ =>
         Some(1)
     }
+
+  private def stringLiteralByteLength(raw: String): Int = {
+    val unquoted =
+      if (raw.length >= 2 && raw.head == '"' && raw.last == '"') raw.substring(1, raw.length - 1)
+      else raw
+    unquoted.length + 1
+  }
 
   private def extractGlobalDeclaratorWithInitializer(
       declaration: IASTDeclaration,
