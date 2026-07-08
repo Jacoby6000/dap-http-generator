@@ -7,6 +7,16 @@ import java.nio.file.Files
 import java.nio.file.Paths
 import scala.jdk.CollectionConverters._
 
+private final case class NormalizedMember(
+    name: String,
+    target: String,
+    staticAddress: Option[Long],
+    isPointer: Boolean,
+    isArray: Boolean,
+    arrayLength: Option[Int],
+    primitiveOverride: Option[IrPrimitive]
+)
+
 class IrSmithyEmitterSpec extends AnyFunSuite {
   private val traitsPath = Paths.get("src/main/smithy/dap-http-traits.smithy")
 
@@ -75,15 +85,18 @@ class IrSmithyEmitterSpec extends AnyFunSuite {
       assert(written.contains("service MeleeApi"))
       assembleAndExtract(written).toOption.get
     } finally {
-      Files.deleteIfExists(outputPath)
+      val _ = Files.deleteIfExists(outputPath)
     }
   }
 
   private def assembleAndExtract(modelText: String): Either[List[String], List[IrService]] = {
-    val assembler = Model.assembler().addImport(traitsPath.toString).addUnparsedModel(
-      "generated.smithy",
-      modelText
-    )
+    val assembler = Model
+      .assembler()
+      .addImport(traitsPath.toString)
+      .addUnparsedModel(
+        "generated.smithy",
+        modelText
+      )
     val result = assembler.assemble()
     if (result.isBroken) {
       Left(result.getValidationEvents.iterator().asScala.map(_.toString).toList)
@@ -101,13 +114,15 @@ class IrSmithyEmitterSpec extends AnyFunSuite {
     assert(actual.map(_.defaultEndian) == expected.map(_.defaultEndian))
     assert(actual.flatMap(_.operations.map(_.name)) == expected.flatMap(_.operations.map(_.name)))
     assert(
-      actual.flatMap(_.operations.map(_.routePath)) == expected.flatMap(_.operations.map(_.routePath))
+      actual.flatMap(_.operations.map(_.routePath)) == expected.flatMap(
+        _.operations.map(_.routePath)
+      )
     )
 
     val expectedOutputs = expected.flatMap(_.operations.map(_.output))
     val actualOutputs = actual.flatMap(_.operations.map(_.output))
     assert(actualOutputs.map(structKind) == expectedOutputs.map(structKind))
-    assert(
+    val _ = assert(
       actualOutputs.map(_.members.map(normalizeMember)) ==
         expectedOutputs.map(_.members.map(normalizeMember))
     )
@@ -119,16 +134,6 @@ class IrSmithyEmitterSpec extends AnyFunSuite {
       case _: IrType.MemoryMappedStruct => "memoryMapped"
       case _: IrType.EnclosingStruct    => "enclosing"
     }
-
-  private final case class NormalizedMember(
-      name: String,
-      target: String,
-      staticAddress: Option[Long],
-      isPointer: Boolean,
-      isArray: Boolean,
-      arrayLength: Option[Int],
-      primitiveOverride: Option[IrPrimitive]
-  )
 
   private def normalizeMember(member: IrMember): NormalizedMember =
     NormalizedMember(

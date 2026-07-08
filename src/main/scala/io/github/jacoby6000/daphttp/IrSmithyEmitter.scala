@@ -26,7 +26,9 @@ object IrSmithyEmitter {
         Left(errors.toList.distinct)
       } else {
         services.foreach(collectServiceTraits(collector.usedTraits))
-        Right(renderModel(namespace, services, shapes, collector.usedTraits, collector.usedShapeImports))
+        Right(
+          renderModel(namespace, services, shapes, collector.usedTraits, collector.usedShapeImports)
+        )
       }
     }
   }
@@ -44,10 +46,14 @@ object IrSmithyEmitter {
       if (parent != null) {
         Files.createDirectories(parent)
       }
-      Files.writeString(outputPath, content)
+      val _ = Files.writeString(outputPath, content)
+      ()
     }
 
-  private final class ShapeCollector(services: List[IrService], errors: mutable.ListBuffer[String]) {
+  private final class ShapeCollector(
+      services: List[IrService],
+      errors: mutable.ListBuffer[String]
+  ) {
     private val shapes = mutable.LinkedHashMap.empty[ShapeId, IrType]
     private val visiting = mutable.Set.empty[ShapeId]
     val usedTraits = mutable.Set.empty[String]
@@ -91,7 +97,7 @@ object IrSmithyEmitter {
           ()
       }
 
-    private def visitMemberTarget(member: IrMember): Unit =
+    private def visitMemberTarget(member: IrMember): Unit = {
       if (member.isPointer) {
         usedTraits += "pointer"
       }
@@ -102,8 +108,17 @@ object IrSmithyEmitter {
       member.paddingRepeats.foreach(_ => usedTraits += "padding")
       member.arrayLength.foreach(_ => usedTraits += "length")
       member.endianOverride.foreach(_ => usedTraits += "endian")
-      member.primitiveOverride.foreach(primitiveTraitFor(_).foreach(usedTraits += _))
+      primitiveTraitForMember(member).foreach(usedTraits += _)
       visitType(member.target)
+    }
+
+    private def primitiveTraitForMember(member: IrMember): Option[String] =
+      member.primitiveOverride
+        .orElse(member.target match {
+          case IrType.Primitive(kind) => Some(kind)
+          case _                      => None
+        })
+        .flatMap(primitiveTraitFor)
 
     private def visitNamedShape(id: ShapeId, irType: IrType): Unit = {
       if (!shapes.contains(id)) {
@@ -281,14 +296,14 @@ object IrSmithyEmitter {
 
   private def renderTypeReference(irType: IrType): String =
     irType match {
-      case struct: IrType.Struct     => struct.id.getName
-      case union: IrType.Union         => union.id.getName
+      case struct: IrType.Struct                            => struct.id.getName
+      case union: IrType.Union                              => union.id.getName
       case listType: IrType.ListType if listType.bytesAlias => BytesShapeName
       case listType: IrType.ListType if listType.bitsAlias  => BitsShapeName
-      case listType: IrType.ListType   => listType.id.getName
-      case mapType: IrType.MapType     => mapType.id.getName
-      case IrType.Ref(id)              => id.getName
-      case IrType.Primitive(kind)      => smithyBaseType(kind)
+      case listType: IrType.ListType                        => listType.id.getName
+      case mapType: IrType.MapType                          => mapType.id.getName
+      case IrType.Ref(id)                                   => id.getName
+      case IrType.Primitive(kind)                           => smithyBaseType(kind)
     }
 
   private def effectivePrimitive(member: IrMember): Option[IrPrimitive] =
@@ -301,35 +316,36 @@ object IrSmithyEmitter {
 
   private def primitiveTraitFor(kind: IrPrimitive): Option[String] =
     kind match {
-      case IrPrimitive.U8   => Some("u8")
-      case IrPrimitive.S8   => Some("s8")
-      case IrPrimitive.U16  => Some("u16")
-      case IrPrimitive.S16  => Some("s16")
-      case IrPrimitive.U32  => Some("u32")
-      case IrPrimitive.S32  => Some("s32")
-      case IrPrimitive.U64  => Some("u64")
-      case IrPrimitive.S64  => Some("s64")
-      case IrPrimitive.U128 => Some("u128")
-      case IrPrimitive.S128 => Some("s128")
-      case IrPrimitive.F8   => Some("f8")
-      case IrPrimitive.F16  => Some("f16")
-      case IrPrimitive.F32  => Some("f32")
-      case IrPrimitive.F64  => Some("f64")
-      case IrPrimitive.Char => Some("char")
+      case IrPrimitive.U8                          => Some("u8")
+      case IrPrimitive.S8                          => Some("s8")
+      case IrPrimitive.U16                         => Some("u16")
+      case IrPrimitive.S16                         => Some("s16")
+      case IrPrimitive.U32                         => Some("u32")
+      case IrPrimitive.S32                         => Some("s32")
+      case IrPrimitive.U64                         => Some("u64")
+      case IrPrimitive.S64                         => Some("s64")
+      case IrPrimitive.U128                        => Some("u128")
+      case IrPrimitive.S128                        => Some("s128")
+      case IrPrimitive.F8                          => Some("f8")
+      case IrPrimitive.F16                         => Some("f16")
+      case IrPrimitive.F32                         => Some("f32")
+      case IrPrimitive.F64                         => Some("f64")
+      case IrPrimitive.Char                        => Some("char")
       case IrPrimitive.Bool | IrPrimitive.LongWord =>
         None
     }
 
   private def smithyBaseType(kind: IrPrimitive): String =
     kind match {
-      case IrPrimitive.Bool     => "Boolean"
-      case IrPrimitive.Char     => "Byte"
-      case IrPrimitive.U8 | IrPrimitive.S8 => "Byte"
+      case IrPrimitive.Bool                                                      => "Boolean"
+      case IrPrimitive.Char                                                      => "Byte"
+      case IrPrimitive.U8 | IrPrimitive.S8                                       => "Byte"
       case IrPrimitive.U16 | IrPrimitive.S16 | IrPrimitive.U32 | IrPrimitive.S32 => "Integer"
-      case IrPrimitive.U64 | IrPrimitive.S64 | IrPrimitive.U128 | IrPrimitive.S128 | IrPrimitive.LongWord =>
+      case IrPrimitive.U64 | IrPrimitive.S64 | IrPrimitive.U128 | IrPrimitive.S128 |
+          IrPrimitive.LongWord =>
         "Long"
       case IrPrimitive.F8 | IrPrimitive.F16 | IrPrimitive.F32 => "Float"
-      case IrPrimitive.F64 => "Double"
+      case IrPrimitive.F64                                    => "Double"
     }
 
   private def formatAddress(address: Long): String =
