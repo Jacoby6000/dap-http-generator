@@ -156,6 +156,7 @@ object DoldecompIrGenerator {
           typeForName(normalizedType, reachableStructs, buildStruct)
       }
     }
+    val explicitPrimitive = primitiveForType(normalizedType)
 
     IrMember(
       id = memberId,
@@ -167,9 +168,22 @@ object DoldecompIrGenerator {
       isArray = arrayLength.nonEmpty,
       arrayLength = arrayLength,
       endianOverride = None,
-      primitiveOverride = None
+      primitiveOverride =
+        if (isPointer) None
+        else explicitPrimitive.filter(isExplicitSizedPrimitive)
     )
   }
+
+  private def isExplicitSizedPrimitive(kind: IrPrimitive): Boolean =
+    kind match {
+      case IrPrimitive.U8 | IrPrimitive.S8 | IrPrimitive.U16 | IrPrimitive.S16 | IrPrimitive.U32 |
+          IrPrimitive.S32 | IrPrimitive.U64 | IrPrimitive.S64 | IrPrimitive.U128 |
+          IrPrimitive.S128 | IrPrimitive.F8 | IrPrimitive.F16 | IrPrimitive.F32 | IrPrimitive.F64 |
+          IrPrimitive.Char | IrPrimitive.Bool =>
+        true
+      case IrPrimitive.LongWord =>
+        false
+    }
 
   private def typeForName(
       normalizedType: String,

@@ -42,6 +42,84 @@ class IrSizingWarningsSpec extends AnyFunSuite {
     assert(warnings.head.contains("Long member lacks an explicit width trait"))
   }
 
+  test("warns on plain Float members without width traits") {
+    val services = List(
+      serviceWithOutput(
+        IrType.EnclosingStruct(
+          id = id("GetInfoOutput"),
+          members = List(
+            member("value", IrType.Primitive(IrPrimitive.F32), staticAddress = Some(0x1000L))
+          ),
+          declaredSizeBits = None
+        )
+      )
+    )
+
+    val warnings = IrSizingWarnings.collect(services)
+    assert(warnings.nonEmpty)
+    assert(warnings.head.contains("Float member lacks an explicit width trait"))
+  }
+
+  test("warns on plain Double members without width traits") {
+    val services = List(
+      serviceWithOutput(
+        IrType.EnclosingStruct(
+          id = id("GetInfoOutput"),
+          members = List(
+            member("value", IrType.Primitive(IrPrimitive.F64), staticAddress = Some(0x1000L))
+          ),
+          declaredSizeBits = None
+        )
+      )
+    )
+
+    val warnings = IrSizingWarnings.collect(services)
+    assert(warnings.nonEmpty)
+    assert(warnings.head.contains("Double member lacks an explicit width trait"))
+  }
+
+  test("does not warn when Float members declare width traits") {
+    val services = List(
+      serviceWithOutput(
+        IrType.EnclosingStruct(
+          id = id("GetInfoOutput"),
+          members = List(
+            member(
+              "value",
+              IrType.Primitive(IrPrimitive.F32),
+              staticAddress = Some(0x1000L),
+              primitiveOverride = Some(IrPrimitive.F16)
+            )
+          ),
+          declaredSizeBits = None
+        )
+      )
+    )
+
+    assert(IrSizingWarnings.collect(services).isEmpty)
+  }
+
+  test("does not warn on explicitly sized C-style float targets") {
+    val services = List(
+      serviceWithOutput(
+        IrType.EnclosingStruct(
+          id = id("GetInfoOutput"),
+          members = List(
+            member(
+              "position",
+              IrType.Primitive(IrPrimitive.F32),
+              staticAddress = Some(0x1000L),
+              primitiveOverride = Some(IrPrimitive.F32)
+            )
+          ),
+          declaredSizeBits = None
+        )
+      )
+    )
+
+    assert(IrSizingWarnings.collect(services).isEmpty)
+  }
+
   test("does not warn when Integer members declare width traits") {
     val services = List(
       serviceWithOutput(

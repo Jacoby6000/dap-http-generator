@@ -56,17 +56,31 @@ object IrSizingWarnings {
     if (member.isPointer) {
       None
     } else {
-      effectivePrimitive(member).flatMap {
-        case IrPrimitive.S32 if member.primitiveOverride.isEmpty =>
-          Some(
-            s"${member.id}: Integer member lacks an explicit width trait (for example @u32 or @s32)."
-          )
-        case IrPrimitive.LongWord if member.primitiveOverride.isEmpty =>
-          Some(
-            s"${member.id}: Long member lacks an explicit width trait (for example @u64 or @u128); width follows service @wordSize."
-          )
-        case _ =>
+      effectivePrimitive(member).flatMap { kind =>
+        if (member.primitiveOverride.nonEmpty) {
           None
+        } else {
+          kind match {
+            case IrPrimitive.S32 =>
+              Some(
+                s"${member.id}: Integer member lacks an explicit width trait (for example @u32 or @s32)."
+              )
+            case IrPrimitive.LongWord =>
+              Some(
+                s"${member.id}: Long member lacks an explicit width trait (for example @u64 or @u128); width follows service @wordSize."
+              )
+            case IrPrimitive.F32 =>
+              Some(
+                s"${member.id}: Float member lacks an explicit width trait (for example @f32, @f16, or @f8)."
+              )
+            case IrPrimitive.F64 =>
+              Some(
+                s"${member.id}: Double member lacks an explicit width trait (for example @f64)."
+              )
+            case _ =>
+              None
+          }
+        }
       }
     }
 
