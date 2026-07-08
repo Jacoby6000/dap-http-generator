@@ -126,10 +126,15 @@ From C headers (direct to server):
 ```bash
 sbt "run cheaders \
   --symbols /absolute/path/to/symbols.txt \
-  --headers /absolute/path/to/include \
+  --headers /absolute/path/to/src \
   --word-size 32 \
   --bind-port 8080"
 ```
+
+`cheaders` matches `.data` object symbols to global variable declarations in `.h` and `.c`
+files under `--headers` (for example `GameScene gm_803DDAC0_Scenes[]` in source paired with
+`gm_803DDAC0_Scenes = .data:0x803DDAC0;` in `symbols.txt`). The optional `ctype:` symbol
+attribute still overrides inferred types when present.
 
 Generate Smithy from C headers, then serve it:
 

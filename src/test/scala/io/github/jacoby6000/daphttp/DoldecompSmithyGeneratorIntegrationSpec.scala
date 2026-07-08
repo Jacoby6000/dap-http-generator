@@ -125,4 +125,54 @@ class DoldecompSmithyGeneratorIntegrationSpec extends AnyFunSuite {
     assert(scratchMember.isPointer)
     assert(scratchMember.target == IrType.Primitive(IrPrimitive.LongWord))
   }
+
+  test("generates IR from C declarations without ctype metadata") {
+    val fixtureRoot = Paths.get("src/test/resources/doldecomp-fixture-declarations")
+    val irServices = DoldecompIrGenerator
+      .generateFromPaths(
+        symbolsPath = fixtureRoot.resolve("symbols.txt"),
+        headerRoots = List(fixtureRoot),
+        namespace = "example.doldecomp.declarations",
+        serviceName = "MeleeApi",
+        wordSizeBits = 32
+      )
+      .toOption
+      .get
+
+    val plans = HttpRouteIrEmitter.emitRoutePlansFromIr(irServices).toOption.get
+    val route = plans("/MeleeApi/GetGPlayerState")
+
+    assert(route.reads.size == 1)
+    assert(route.reads.head.address == 0x80453100L)
+    assert(route.reads.head.sizeBytes == 32)
+    assert(route.reads.head.decodeCodec.nonEmpty)
+  }
+
+  test("generates IR for melee-style data arrays declared in C source") {
+    val fixtureRoot = Paths.get("src/test/resources/doldecomp-fixture-melee-style")
+    val irServices = DoldecompIrGenerator
+      .generateFromPaths(
+        symbolsPath = fixtureRoot.resolve("symbols.txt"),
+        headerRoots = List(fixtureRoot),
+        namespace = "example.doldecomp.melee",
+        serviceName = "MeleeApi",
+        wordSizeBits = 32
+      )
+      .toOption
+      .get
+
+    val operation = irServices.head.operations.head
+    val valueMember = operation.output.members.head
+
+    assert(operation.name == "GetGm803DDAC0Scenes")
+    assert(valueMember.isArray)
+    assert(valueMember.arrayLength.contains(2))
+
+    val plans = HttpRouteIrEmitter.emitRoutePlansFromIr(irServices).toOption.get
+    val route = plans("/MeleeApi/GetGm803DDAC0Scenes")
+
+    assert(route.reads.head.address == 0x803ddac0L)
+    assert(route.reads.head.sizeBytes == 48)
+    assert(route.reads.head.decodeCodec.nonEmpty)
+  }
 }

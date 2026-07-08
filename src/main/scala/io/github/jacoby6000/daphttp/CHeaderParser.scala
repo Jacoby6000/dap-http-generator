@@ -4,7 +4,9 @@ import org.eclipse.cdt.core.dom.ast.IASTArrayDeclarator
 import org.eclipse.cdt.core.dom.ast.IASTCompositeTypeSpecifier
 import org.eclipse.cdt.core.dom.ast.IASTDeclaration
 import org.eclipse.cdt.core.dom.ast.IASTDeclarator
+import org.eclipse.cdt.core.dom.ast.IASTFunctionDeclarator
 import org.eclipse.cdt.core.dom.ast.IASTSimpleDeclaration
+import org.eclipse.cdt.core.dom.ast.IASTTranslationUnit
 import org.eclipse.cdt.core.dom.ast.gnu.c.GCCLanguage
 import org.eclipse.cdt.core.model.ILanguage
 import org.eclipse.cdt.core.parser.DefaultLogService
@@ -15,24 +17,92 @@ import org.eclipse.cdt.core.parser.ScannerInfo
 import scala.jdk.CollectionConverters._
 import scala.util.control.NonFatal
 
-object CHeaderParser {
-  def parse(headerSource: String): List[(String, IASTCompositeTypeSpecifier)] = {
-    val source = stripComments(headerSource)
-    try {
-      val translationUnit = GCCLanguage.getDefault.getASTTranslationUnit(
-        FileContent.create("header.h", source.toCharArray),
-        new ScannerInfo(Map.empty[String, String].asJava, Array.empty[String]),
-        IncludeFileContentProvider.getEmptyFilesProvider,
-        null,
-        ILanguage.OPTION_SKIP_FUNCTION_BODIES,
-        new DefaultLogService()
-      )
+final case class GlobalVariableDeclaration(
+    name: String,
+    typeName: String,
+    isArray: Boolean,
+    arrayLength: Option[Int]
+)
 
-      translationUnit.getDeclarations.toList.flatMap(extractStruct)
+object CHeaderParser {
+  def parse(headerSource: String): List[(String, IASTCompositeTypeSpecifier)] =
+    parseTranslationUnit(headerSource, "header.h")
+      .map(_.getDeclarations.toList.flatMap(extractStruct))
+      .getOrElse(Nil)
+
+  def parseGlobalDeclarations(source: String): List[GlobalVariableDeclaration] =
+    parseTranslationUnit(source, "source.c")
+      .map(_.getDeclarations.toList.flatMap(extractGlobalDeclaration))
+      .getOrElse(Nil)
+
+  private def parseTranslationUnit(
+      source: String,
+      fileName: String
+  ): Option[IASTTranslationUnit] = {
+    val stripped = stripComments(source)
+    try {
+      Some(
+        GCCLanguage.getDefault.getASTTranslationUnit(
+          FileContent.create(fileName, stripped.toCharArray),
+          new ScannerInfo(Map.empty[String, String].asJava, Array.empty[String]),
+          IncludeFileContentProvider.getEmptyFilesProvider,
+          null,
+          ILanguage.OPTION_SKIP_FUNCTION_BODIES,
+          new DefaultLogService()
+        )
+      )
     } catch {
-      case NonFatal(_) => Nil
+      case NonFatal(_) => None
     }
   }
+
+  private def extractGlobalDeclaration(
+      declaration: IASTDeclaration
+  ): List[GlobalVariableDeclaration] = {
+    declaration match {
+      case simple: IASTSimpleDeclaration =>
+        simple.getDeclSpecifier match {
+          case composite: IASTCompositeTypeSpecifier if composite.getMembers.nonEmpty =>
+            Nil
+          case composite: IASTCompositeTypeSpecifier =>
+            val typeName =
+              normalizeTypeName(Option(composite.getName).map(_.toString).getOrElse(""))
+            if (typeName.isEmpty) Nil else extractGlobalDeclarators(typeName, simple)
+          case _ =>
+            val typeName = normalizeTypeName(simple.getDeclSpecifier.getRawSignature)
+            if (typeName.isEmpty) Nil else extractGlobalDeclarators(typeName, simple)
+        }
+      case _ =>
+        Nil
+    }
+  }
+
+  private def extractGlobalDeclarators(
+      typeName: String,
+      simple: IASTSimpleDeclaration
+  ): List[GlobalVariableDeclaration] =
+    simple.getDeclarators.toList.flatMap { declarator =>
+      val name = extractDeclaratorName(declarator)
+      if (name.isEmpty || isFunctionDeclarator(declarator) || pointerDepth(declarator) > 0) {
+        Nil
+      } else {
+        val isArray = isArrayDeclarator(declarator)
+        List(
+          GlobalVariableDeclaration(
+            name = name,
+            typeName = typeName,
+            isArray = isArray,
+            arrayLength = if (isArray) arrayLength(declarator) else None
+          )
+        )
+      }
+    }
+
+  private def isFunctionDeclarator(declarator: IASTDeclarator): Boolean =
+    declaratorChain(declarator).exists(_.isInstanceOf[IASTFunctionDeclarator])
+
+  private def isArrayDeclarator(declarator: IASTDeclarator): Boolean =
+    declaratorChain(declarator).exists(_.isInstanceOf[IASTArrayDeclarator])
 
   private def extractStruct(
       declaration: IASTDeclaration

@@ -107,31 +107,26 @@ object HttpRouteIrEmitter {
                   errors
                 )
               case _ =>
-                memberAddress
-                  .flatMap(address =>
-                    memberSizeBytes(member, wordSize, errors).map(sizeBytes =>
-                      ReadPlan(
-                        path = memberPath,
-                        address = address,
-                        sizeBytes = sizeBytes,
-                        decodeType = Some(memberReadType(member)),
-                        endian = member.endianOverride.getOrElse(endian),
-                        wordSizeBits = wordSize,
-                        decodeCodec = compileJsonCodec(
-                          Some(memberReadType(member)),
-                          member.endianOverride.getOrElse(endian),
-                          wordSize,
-                          errors,
-                          memberPath
-                        ),
-                        cStringPointer =
-                          member.isPointer && memberReadType(member) == IrType.Primitive(
-                            IrPrimitive.Char
-                          )
-                      )
+                memberAddress.flatMap { address =>
+                  val memberEndian = member.endianOverride.getOrElse(endian)
+                  val decodeCodec =
+                    compileMemberCodec(member, memberEndian, wordSize, errors, memberPath)
+                  memberSizeBytes(member, wordSize, errors).map { sizeBytes =>
+                    ReadPlan(
+                      path = memberPath,
+                      address = address,
+                      sizeBytes = sizeBytes,
+                      decodeType = Some(memberReadType(member)),
+                      endian = memberEndian,
+                      wordSizeBits = wordSize,
+                      decodeCodec = decodeCodec,
+                      cStringPointer =
+                        member.isPointer && memberReadType(member) == IrType.Primitive(
+                          IrPrimitive.Char
+                        )
                     )
-                  )
-                  .toList
+                  }
+                }.toList
             }
           }
         }
@@ -180,9 +175,10 @@ object HttpRouteIrEmitter {
       member: IrMember,
       wordSize: Option[Int],
       errors: ListBuffer[String]
-  ): Option[Int] = {
-    memberBitWidth(member, wordSize, errors).map(bits => math.ceil(bits.toDouble / 8d).toInt)
-  }
+  ): Option[Int] =
+    member.readSizeBytes.orElse {
+      memberBitWidth(member, wordSize, errors).map(bits => math.ceil(bits.toDouble / 8d).toInt)
+    }
 
   private def memberBitWidth(
       member: IrMember,

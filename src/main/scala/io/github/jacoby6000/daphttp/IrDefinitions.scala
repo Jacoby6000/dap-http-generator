@@ -25,7 +25,8 @@ final case class IrMember(
     isArray: Boolean,
     arrayLength: Option[Int],
     endianOverride: Option[IrEndian],
-    primitiveOverride: Option[IrPrimitive]
+    primitiveOverride: Option[IrPrimitive],
+    readSizeBytes: Option[Int] = None
 )
 
 sealed trait IrPrimitive
