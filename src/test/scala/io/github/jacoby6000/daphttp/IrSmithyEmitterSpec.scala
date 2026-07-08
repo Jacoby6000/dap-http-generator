@@ -91,7 +91,7 @@ class IrSmithyEmitterSpec extends AnyFunSuite {
     if (result.isBroken) {
       Left(result.getValidationEvents.iterator().asScala.map(_.toString).toList)
     } else {
-      IrExtractor.buildIrFromModel(result.unwrap())
+      SmithyIrGenerator.generateFromModel(result.unwrap())
     }
   }
 }

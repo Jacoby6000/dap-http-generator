@@ -201,8 +201,8 @@ class IrSmithyRoundTripSpec extends AnyFunSuite {
   }
 
   private def extractIr(exampleSmithy: String): List[IrService] =
-    IrExtractor
-      .buildIrFromModel(assembleModel(exampleSmithy))
+    SmithyIrGenerator
+      .generateFromModel(assembleModel(exampleSmithy))
       .fold(
         errors => fail(errors.mkString("\n")),
         identity

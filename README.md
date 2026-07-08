@@ -58,13 +58,13 @@ All input pipelines converge on a shared IR, then compile to HTTP route plans:
 
 ```mermaid
 flowchart LR
-  Smithy["Smithy models"] --> IrExtractor --> IR
+  Smithy["Smithy models"] --> SmithyIrGenerator --> IR
   CHeaders["C headers + symbols"] --> DoldecompIrGenerator --> IR
   IR --> IrCompiler --> Routes["HTTP routes"]
   IR --> IrSmithyEmitter --> SmithyOut[".smithy files"]
 ```
 
-- **`IrExtractor`** — Smithy model → IR
+- **`SmithyIrGenerator`** — Smithy model → IR
 - **`DoldecompIrGenerator`** — C headers + doldecomp symbols → IR
 - **`IrSmithyEmitter`** — IR → Smithy model (via smithy-model builders + `SmithyIdlModelSerializer`)
 - **`IrCompiler`** — IR → route plans (memory reads + JSON codecs)

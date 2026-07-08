@@ -198,7 +198,7 @@ object DapHttpServerMain extends IOApp {
   }
 
   def buildRoutePlansFromModel(model: Model): Either[List[String], Map[String, RoutePlan]] =
-    IrExtractor.buildIrFromModel(model).flatMap(compileServicesWithSizingWarnings)
+    SmithyIrGenerator.generateFromModel(model).flatMap(compileServicesWithSizingWarnings)
 
   private def compileServicesWithSizingWarnings(
       services: List[IrService]
