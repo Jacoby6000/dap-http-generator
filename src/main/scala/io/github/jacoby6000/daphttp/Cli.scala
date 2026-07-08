@@ -155,8 +155,10 @@ object Cli
       service: String,
       wordSize: Int
   ): Either[List[String], Map[String, RoutePlan]] =
-    loadIrFromCHeaders(symbolsPath, headerPaths, namespace, service, wordSize)
-      .flatMap(IrCompiler.compileRoutePlansFromIr)
+    loadIrFromCHeaders(symbolsPath, headerPaths, namespace, service, wordSize).flatMap { services =>
+      IrSizingWarnings.writeToStderr(services)
+      IrCompiler.compileRoutePlansFromIr(services)
+    }
 
   private def loadIrFromCHeaders(
       symbolsPath: Path,
@@ -181,8 +183,10 @@ object Cli
       wordSize: Int,
       outputPath: Path
   ): Either[List[String], Unit] =
-    loadIrFromCHeaders(symbolsPath, headerPaths, namespace, service, wordSize)
-      .flatMap(IrSmithyEmitter.emitToPath(_, outputPath))
+    loadIrFromCHeaders(symbolsPath, headerPaths, namespace, service, wordSize).flatMap { services =>
+      IrSizingWarnings.writeToStderr(services)
+      IrSmithyEmitter.emitToPath(services, outputPath)
+    }
 
   private def collectSmithyFiles(path: Path): List[Path] = {
     if (!Files.exists(path)) {
