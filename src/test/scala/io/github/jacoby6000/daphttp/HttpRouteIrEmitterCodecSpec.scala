@@ -311,4 +311,42 @@ class HttpRouteIrEmitterCodecSpec extends AnyFunSuite {
         Json.obj("lo" -> Json.fromLong(0x1234L), "hi" -> Json.fromLong(0xabcdL))
     )
   }
+
+  test("decodes char arrays as null-terminated strings") {
+    val member = IrMember(
+      id = id("Name_name"),
+      name = "name",
+      target = IrType.ListType(
+        id = id("NameArray"),
+        element = IrType.Primitive(IrPrimitive.Char),
+        bytesAlias = false,
+        bitsAlias = false
+      ),
+      staticAddress = None,
+      paddingRepeats = None,
+      isPointer = false,
+      isArray = true,
+      arrayLength = Some(8),
+      endianOverride = None,
+      primitiveOverride = Some(IrPrimitive.Char)
+    )
+    val struct = IrType.MemoryMappedStruct(
+      id = id("Name"),
+      members = List(member),
+      declaredSizeBits = Some(8)
+    )
+
+    val read = compileSingleRead(struct)
+    val bytes = Array[Byte](
+      'H'.toByte,
+      'e'.toByte,
+      'l'.toByte,
+      'l'.toByte,
+      'o'.toByte,
+      0,
+      'x'.toByte,
+      'x'.toByte
+    )
+    assert(decode(read, bytes) == Json.obj("name" -> Json.fromString("Hello")))
+  }
 }

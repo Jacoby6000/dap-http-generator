@@ -251,20 +251,78 @@ object DapHttpServerMain extends IOApp {
       readPlan: ReadPlan,
       base64Data: String,
       dapClient: DapClient
-  ): IO[Json] = {
+  ): IO[Json] =
     if (readPlan.cStringPointer) {
       decodeCStringPointer(readPlan, base64Data, dapClient)
     } else {
-      IO.pure {
-        readPlan.decodeCodec match {
-          case None        => Json.Null
-          case Some(codec) =>
-            Try(Base64.getDecoder.decode(base64Data)).toOption
-              .flatMap(bytes => codec.decode(BitVector(bytes)).toOption.map(_.value))
-              .getOrElse(Json.Null)
+      val decoded = readPlan.decodeCodec match {
+        case None        => Json.Null
+        case Some(codec) =>
+          Try(Base64.getDecoder.decode(base64Data)).toOption
+            .flatMap(bytes => codec.decode(BitVector(bytes)).toOption.map(_.value))
+            .getOrElse(Json.Null)
+      }
+      readPlan.decodeType match {
+        case Some(struct: IrType.Struct) =>
+          resolveStructCStringPointers(struct, decoded, dapClient)
+        case _ =>
+          IO.pure(decoded)
+      }
+    }
+
+  private def resolveStructCStringPointers(
+      struct: IrType.Struct,
+      decoded: Json,
+      dapClient: DapClient
+  ): IO[Json] =
+    struct.members.foldLeft(IO.pure(decoded)) { (accIO, member) =>
+      accIO.flatMap { json =>
+        if (member.isPointer && member.primitiveOverride.contains(IrPrimitive.Char)) {
+          json.hcursor.downField(member.name).as[Long].toOption match {
+            case Some(address) =>
+              readNullTerminatedCString(dapClient, address).map { value =>
+                json.mapObject(_.add(member.name, Json.fromString(value)))
+              }
+            case None =>
+              IO.pure(json)
+          }
+        } else {
+          member.target match {
+            case nested: IrType.Struct =>
+              json.hcursor.downField(member.name).focus match {
+                case Some(nestedJson) =>
+                  resolveStructCStringPointers(nested, nestedJson, dapClient).map { resolved =>
+                    json.mapObject(_.add(member.name, resolved))
+                  }
+                case None =>
+                  IO.pure(json)
+              }
+            case _ =>
+              IO.pure(json)
+          }
         }
       }
     }
+
+  private def readNullTerminatedCString(dapClient: DapClient, address: Long): IO[String] = {
+    def readChars(currentAddress: Long, acc: Vector[Byte]): IO[Vector[Byte]] =
+      dapClient.readMemory(currentAddress, 1).flatMap {
+        case Right(data) =>
+          Try(Base64.getDecoder.decode(data)).toOption match {
+            case Some(bytes) if bytes.nonEmpty && bytes.head != 0 =>
+              readChars(currentAddress + 1, acc :+ bytes.head)
+            case Some(_) =>
+              IO.pure(acc)
+            case None =>
+              IO.pure(acc)
+          }
+        case Left(_) =>
+          IO.pure(acc)
+      }
+
+    readChars(address, Vector.empty).map(bytes =>
+      new String(bytes.toArray, StandardCharsets.US_ASCII)
+    )
   }
 
   private def pointerValue(bytes: Array[Byte], endian: IrEndian): Long = {
@@ -288,24 +346,7 @@ object DapHttpServerMain extends IOApp {
     pointer match {
       case None          => IO.pure(Json.Null)
       case Some(address) =>
-        def readChars(currentAddress: Long, acc: Vector[Byte]): IO[Vector[Byte]] =
-          dapClient.readMemory(currentAddress, 1).flatMap {
-            case Right(data) =>
-              Try(Base64.getDecoder.decode(data)).toOption match {
-                case Some(bytes) if bytes.nonEmpty && bytes.head != 0 =>
-                  readChars(currentAddress + 1, acc :+ bytes.head)
-                case Some(_) =>
-                  IO.pure(acc)
-                case None =>
-                  IO.pure(acc)
-              }
-            case Left(_) =>
-              IO.pure(acc)
-          }
-
-        readChars(address, Vector.empty).map(bytes =>
-          Json.fromString(new String(bytes.toArray, StandardCharsets.US_ASCII))
-        )
+        readNullTerminatedCString(dapClient, address).map(Json.fromString)
     }
   }
 

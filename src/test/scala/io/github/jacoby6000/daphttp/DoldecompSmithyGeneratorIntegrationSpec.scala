@@ -225,4 +225,35 @@ class DoldecompSmithyGeneratorIntegrationSpec extends AnyFunSuite {
     assert(plans.routes.contains("/MeleeApi/GetIntVar"))
     assert(plans.routes("/MeleeApi/GetIntVar").reads.head.sizeBytes == 4)
   }
+
+  test("maps char arrays and char pointers to string semantics in IR") {
+    val fixtureRoot = Paths.get("src/test/resources/doldecomp-fixture-strings")
+    val generation = DoldecompIrGenerator
+      .generateFromPaths(
+        symbolsPath = fixtureRoot.resolve("symbols.txt"),
+        headerRoots = List(fixtureRoot),
+        namespace = "example.doldecomp.strings",
+        serviceName = "StringsApi",
+        wordSizeBits = 32
+      )
+      .toOption
+      .get
+
+    assert(generation.warnings.isEmpty)
+    val struct =
+      generation.services.head.operations.head.output.members.head.target
+        .asInstanceOf[IrType.MemoryMappedStruct]
+    val nameMember = struct.members.find(_.name == "name").get
+    val labelMember = struct.members.find(_.name == "label").get
+
+    assert(nameMember.isArray)
+    assert(nameMember.arrayLength.contains(8))
+    assert(nameMember.primitiveOverride.contains(IrPrimitive.Char))
+    assert(labelMember.isPointer)
+    assert(labelMember.primitiveOverride.contains(IrPrimitive.Char))
+
+    val plans = HttpRouteIrEmitter.emitRoutePlansFromIr(generation.services)
+    assert(plans.routes.contains("/StringsApi/GetGStringFields"))
+    assert(plans.routes("/StringsApi/GetGStringFields").reads.head.decodeCodec.nonEmpty)
+  }
 }

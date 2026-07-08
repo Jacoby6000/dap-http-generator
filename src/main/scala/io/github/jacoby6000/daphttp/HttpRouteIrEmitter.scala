@@ -9,6 +9,7 @@ import scodec.SizeBound
 import scodec.bits.BitVector
 import scodec.codecs.bits
 
+import java.nio.charset.StandardCharsets
 import scala.collection.mutable.ListBuffer
 
 object HttpRouteIrEmitter {
@@ -321,6 +322,47 @@ object HttpRouteIrEmitter {
     Json.fromString(c.toString)
   }
 
+  private def isCharStringArray(member: IrMember, listType: IrType.ListType): Boolean =
+    member.isArray && !member.isPointer && listType.element == IrType.Primitive(IrPrimitive.Char)
+
+  private def nullTerminatedAsciiString(bytes: Array[Byte]): String = {
+    val end = bytes.indexWhere(_ == 0)
+    val slice = if (end >= 0) bytes.take(end) else bytes
+    new String(slice, StandardCharsets.US_ASCII)
+  }
+
+  private def bytesFromBitVector(input: BitVector, byteCount: Int): Array[Byte] =
+    (0 until byteCount).map { index =>
+      bitVectorToUnsigned(input.slice(index * 8L, (index + 1) * 8L)).toByte
+    }.toArray
+
+  private def inlineCharArrayStringCodec(count: Int): Codec[Json] =
+    new Codec[Json] {
+      private val totalBits = count.toLong * 8L
+
+      override def sizeBound: SizeBound = SizeBound.exact(totalBits)
+
+      override def encode(value: Json): Attempt[BitVector] =
+        Attempt.failure(Err("Encoding is not supported for read-only DAP proxy codecs."))
+
+      override def decode(input: BitVector): Attempt[DecodeResult[Json]] =
+        if (input.size < totalBits) {
+          Attempt.failure(
+            Err(
+              s"Insufficient bits for char array decode. Needed $totalBits bits, got ${input.size} bits."
+            )
+          )
+        } else {
+          val bytes = bytesFromBitVector(input, count)
+          Attempt.successful(
+            DecodeResult(
+              Json.fromString(nullTerminatedAsciiString(bytes)),
+              input.drop(totalBits)
+            )
+          )
+        }
+    }
+
   private def primitiveJson(kind: IrPrimitive, bitWidth: Int, raw: BigInt): Json = {
     kind match {
       case IrPrimitive.Bool                          => Json.fromBoolean(raw != 0L)
@@ -537,6 +579,8 @@ object HttpRouteIrEmitter {
     member.target match {
       case listType: IrType.ListType if member.isArray && !member.isPointer =>
         compileArrayCodec(member, listType, endian, wordSize, errors, context)
+      case _ if member.isPointer =>
+        compilePrimitiveCodec(IrPrimitive.LongWord, endian, wordSize)
       case _ =>
         compileJsonCodecForType(memberReadType(member), endian, wordSize, errors, context)
     }
@@ -554,14 +598,19 @@ object HttpRouteIrEmitter {
       errors += s"$context: Non-pointer arrays must declare @length."
       None
     }
-    val elementCodec = compileJsonCodecForType(listType.element, endian, wordSize, errors, context)
-    val elementWidth = listElementBitWidth(listType.element, wordSize).orElse {
-      errors += s"$context: Unable to determine array element width."
-      None
-    }
-    (length, elementCodec, elementWidth) match {
-      case (Some(count), Some(codec), Some(width)) => Some(arrayCodec(count, width, codec))
-      case _                                       => None
+    if (isCharStringArray(member, listType)) {
+      length.map(inlineCharArrayStringCodec)
+    } else {
+      val elementCodec =
+        compileJsonCodecForType(listType.element, endian, wordSize, errors, context)
+      val elementWidth = listElementBitWidth(listType.element, wordSize).orElse {
+        errors += s"$context: Unable to determine array element width."
+        None
+      }
+      (length, elementCodec, elementWidth) match {
+        case (Some(count), Some(codec), Some(width)) => Some(arrayCodec(count, width, codec))
+        case _                                       => None
+      }
     }
   }
 

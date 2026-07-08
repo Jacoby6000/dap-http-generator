@@ -279,6 +279,7 @@ object DoldecompIrGenerator {
       }
     }
     val explicitPrimitive = primitiveForType(normalizedType)
+    val charType = isCharType(normalizedType)
 
     IrMember(
       id = memberId,
@@ -291,10 +292,18 @@ object DoldecompIrGenerator {
       arrayLength = arrayLength,
       endianOverride = None,
       primitiveOverride =
-        if (isPointer) None
-        else explicitPrimitive.filter(isExplicitSizedPrimitive)
+        if (isPointer && charType) {
+          Some(IrPrimitive.Char)
+        } else if (isPointer) {
+          None
+        } else {
+          explicitPrimitive.filter(isExplicitSizedPrimitive)
+        }
     )
   }
+
+  private def isCharType(normalizedType: String): Boolean =
+    normalizedType == "char"
 
   private def isExplicitSizedPrimitive(kind: IrPrimitive): Boolean =
     kind match {
