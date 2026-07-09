@@ -360,6 +360,83 @@ class DoldecompSmithyGeneratorIntegrationSpec extends AnyFunSuite {
 
     val plans = HttpRouteIrEmitter.emitRoutePlansFromIr(generation.services)
     assert(plans.routes("/DolDecompApi/GetDbPokemonNames").pointerChain.exists(_.followCString))
+    assert(!plans.routes("/DolDecompApi/GetDbPokemonNames").reads.head.cStringPointer)
+  }
+
+  test("serves char pointer array sub-routes as full C strings over HTTP") {
+    import cats.effect.IO
+    import cats.effect.Ref
+    import cats.effect.unsafe.implicits.global
+    import org.http4s.Method
+    import org.http4s.Request
+    import org.http4s.Status
+    import org.http4s.implicits._
+    import java.util.Base64
+
+    val fixtureRoot = Paths.get("src/test/resources/doldecomp-fixture-char-pointer-array")
+    val generation = DoldecompIrGenerator
+      .generateFromPaths(
+        symbolsPath = fixtureRoot.resolve("symbols.txt"),
+        headerRoots = List(fixtureRoot),
+        namespace = "example.doldecomp.charptr",
+        serviceName = "DolDecompApi",
+        wordSizeBits = 32
+      )
+      .toOption
+      .get
+    val plans = HttpRouteIrEmitter.emitRoutePlansFromIr(generation.services)
+    val baseAddress = 0x803eaa50L
+    val stringAddresses = Map(
+      0x80000000L -> "Random",
+      0x80000010L -> "Tosakinto",
+      0x80000020L -> "Chicorita",
+      0x80000030L -> "Kabigon",
+      0x80000040L -> "Kamex"
+    )
+    val memory = scala.collection.mutable.Map.empty[Long, Byte]
+
+    def storePointer(address: Long, pointer: Long): Unit = {
+      val bytes = Array[Byte](
+        ((pointer >> 24) & 0xff).toByte,
+        ((pointer >> 16) & 0xff).toByte,
+        ((pointer >> 8) & 0xff).toByte,
+        (pointer & 0xff).toByte
+      )
+      bytes.zipWithIndex.foreach { case (byte, index) =>
+        memory(address + index) = byte
+      }
+    }
+
+    stringAddresses.foreach { case (address, value) =>
+      value.getBytes("US-ASCII").zipWithIndex.foreach { case (byte, index) =>
+        memory(address + index) = byte
+      }
+      memory(address + value.length) = 0
+    }
+    stringAddresses.keys.toArray.sorted.zipWithIndex.foreach { case (pointer, index) =>
+      storePointer(baseAddress + index * 4L, pointer)
+    }
+
+    def readBytes(address: Long, sizeBytes: Int): Array[Byte] =
+      (0 until sizeBytes).map(offset => memory.getOrElse(address + offset, 0.toByte)).toArray
+
+    val dapClient = new DapHttpServerMain.DapClient {
+      override def readMemory(address: Long, sizeBytes: Int): IO[Either[String, String]] =
+        IO.pure(Right(Base64.getEncoder.encodeToString(readBytes(address, sizeBytes))))
+
+      override def continueExecution(): IO[Either[String, Json]] =
+        IO.pure(Right(Json.obj()))
+    }
+
+    val plansRef = Ref.unsafe[IO, RoutePlansLoadResult](plans)
+    val app = DapHttpServerMain.routes(plansRef, dapClient).orNotFound
+    val response =
+      app.run(Request[IO](Method.GET, uri"/DolDecompApi/GetDbPokemonNames/2")).unsafeRunSync()
+    val body = response.body.compile.toVector.unsafeRunSync().map(_.toChar).mkString
+    val decoded = io.circe.parser.parse(body).toOption.get.hcursor.downField("decoded").as[String]
+
+    assert(response.status == Status.Ok)
+    assert(decoded.contains("Chicorita"))
   }
 
   test("groups C bitfields into bitmask structs and bool members") {

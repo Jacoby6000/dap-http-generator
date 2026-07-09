@@ -529,8 +529,10 @@ object DoldecompIrGenerator {
     )
   }
 
-  private def isCharType(normalizedType: String): Boolean =
-    normalizedType == "char"
+  private def isCharType(normalizedType: String): Boolean = {
+    val base = normalizedType.replaceAll("\\s+", " ").stripSuffix(" const").trim
+    base == "char" || base == "unsigned char" || base == "signed char"
+  }
 
   private def isExplicitSizedPrimitive(kind: IrPrimitive): Boolean =
     kind match {

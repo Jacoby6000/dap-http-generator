@@ -114,7 +114,8 @@ object HttpRouteIrEmitter {
             wordSizeBits = wordSizeBits,
             pointeeSizeBytes = sizeBytes,
             pointeeDecodeCodec = Some(codec),
-            followCString = chain.followCString
+            followCString =
+              chain.followCString || chain.pointeeType == IrType.Primitive(IrPrimitive.Char)
           )
         }
     }
@@ -215,9 +216,8 @@ object HttpRouteIrEmitter {
                       wordSizeBits = wordSize,
                       decodeCodec = decodeCodec,
                       cStringPointer =
-                        member.isPointer && memberReadType(member) == IrType.Primitive(
-                          IrPrimitive.Char
-                        )
+                        member.isPointer && !member.isArray && memberReadType(member) == IrType
+                          .Primitive(IrPrimitive.Char)
                     )
                   }
                 }.toList

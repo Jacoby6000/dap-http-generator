@@ -85,7 +85,17 @@ class DapHttpIntegrationSpec extends AnyFunSuite {
                 val count =
                   cursor.flatMap(_.downField("arguments").downField("count").as[Int].toOption)
                 val address = memoryReference.flatMap(parseAddress)
-                val data = address.flatMap(addr => count.flatMap(c => payloads.get((addr, c))))
+                val data = address.flatMap { addr =>
+                  count.flatMap { requestedCount =>
+                    payloads.get((addr, requestedCount)).orElse {
+                      val assembled =
+                        (0 until requestedCount)
+                          .takeWhile(offset => payloads.contains((addr + offset, 1)))
+                          .flatMap(offset => payloads.get((addr + offset, 1)).map(_.head))
+                      Option.when(assembled.nonEmpty)(assembled.toArray)
+                    }
+                  }
+                }
                 data match {
                   case Some(bytes) =>
                     writeResponse(

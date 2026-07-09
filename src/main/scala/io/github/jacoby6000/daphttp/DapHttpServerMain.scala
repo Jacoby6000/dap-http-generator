@@ -245,7 +245,7 @@ object DapHttpServerMain extends IOApp {
           case Left(error) =>
             BadRequest(Json.obj("error" -> Json.fromString(error)))
           case Right(structAddress) =>
-            if (chain.followCString) {
+            if (shouldFollowCString(chain)) {
               readNullTerminatedCString(dapClient, structAddress).flatMap { value =>
                 Ok(
                   Json.obj(
@@ -462,23 +462,41 @@ object DapHttpServerMain extends IOApp {
       }
     }
 
-  private def readNullTerminatedCString(dapClient: DapClient, address: Long): IO[String] = {
-    def readChars(currentAddress: Long, acc: Vector[Byte]): IO[Vector[Byte]] =
-      dapClient.readMemory(currentAddress, 1).flatMap {
-        case Right(data) =>
-          Try(Base64.getDecoder.decode(data)).toOption match {
-            case Some(bytes) if bytes.nonEmpty && bytes.head != 0 =>
-              readChars(currentAddress + 1, acc :+ bytes.head)
-            case Some(_) =>
-              IO.pure(acc)
-            case None =>
-              IO.pure(acc)
-          }
-        case Left(_) =>
-          IO.pure(acc)
+  private def shouldFollowCString(chain: PointerChainPlan): Boolean =
+    chain.followCString || chain.pointeeType == IrType.Primitive(IrPrimitive.Char)
+
+  private def readNullTerminatedCString(
+      dapClient: DapClient,
+      address: Long,
+      chunkSize: Int = 256,
+      maxBytes: Int = 4096
+  ): IO[String] = {
+    def readChunk(currentAddress: Long, acc: Vector[Byte]): IO[Vector[Byte]] =
+      if (acc.size >= maxBytes) {
+        IO.pure(acc)
+      } else {
+        val requestSize = math.min(chunkSize, maxBytes - acc.size)
+        dapClient.readMemory(currentAddress, requestSize).flatMap {
+          case Left(_) =>
+            IO.pure(acc)
+          case Right(data) =>
+            Try(Base64.getDecoder.decode(data)).toOption match {
+              case None =>
+                IO.pure(acc)
+              case Some(bytes) if bytes.isEmpty =>
+                IO.pure(acc)
+              case Some(bytes) =>
+                val nullIndex = bytes.indexWhere(_ == 0)
+                if (nullIndex >= 0) {
+                  IO.pure(acc ++ bytes.take(nullIndex))
+                } else {
+                  readChunk(currentAddress + bytes.length, acc ++ bytes)
+                }
+            }
+        }
       }
 
-    readChars(address, Vector.empty).map(bytes =>
+    readChunk(address, Vector.empty).map(bytes =>
       new String(bytes.toArray, StandardCharsets.US_ASCII)
     )
   }
@@ -491,9 +509,10 @@ object DapHttpServerMain extends IOApp {
       base64Data: String,
       dapClient: DapClient
   ): IO[Json] = {
-    val pointer = Try(Base64.getDecoder.decode(base64Data)).toOption.map(bytes =>
-      pointerValue(bytes, readPlan.endian)
-    )
+    val wordBytes = readPlan.wordSizeBits.map(_ / 8).getOrElse(4)
+    val pointer = Try(Base64.getDecoder.decode(base64Data)).toOption.map { bytes =>
+      pointerValue(bytes.take(wordBytes), readPlan.endian)
+    }
     pointer match {
       case None          => IO.pure(Json.Null)
       case Some(address) =>
