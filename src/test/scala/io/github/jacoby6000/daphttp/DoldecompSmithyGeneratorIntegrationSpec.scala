@@ -392,4 +392,45 @@ class DoldecompSmithyGeneratorIntegrationSpec extends AnyFunSuite {
     assert(plans.errors.isEmpty)
     assert(plans.routes("/DolDecompApi/GetStartEventRules").reads.head.decodeCodec.nonEmpty)
   }
+
+  test("honors doldecomp member offset comments in struct layout") {
+    val fixtureRoot = Paths.get("src/test/resources/doldecomp-fixture-offsets")
+    val generation = DoldecompIrGenerator
+      .generateFromPaths(
+        symbolsPath = fixtureRoot.resolve("symbols.txt"),
+        headerRoots = List(fixtureRoot),
+        namespace = "example.doldecomp.offsets",
+        serviceName = "DolDecompApi",
+        wordSizeBits = 32
+      )
+      .toOption
+      .get
+
+    assert(generation.warnings.isEmpty)
+    val struct =
+      generation.services.head.operations.head.output.members.head.target
+        .asInstanceOf[IrType.MemoryMappedStruct]
+    val aMember = struct.members.find(_.name == "a").get
+    val bMember = struct.members.find(_.name == "b").get
+
+    assert(aMember.offsetBytes.contains(0x00))
+    assert(bMember.offsetBytes.contains(0x08))
+
+    val outputMember = generation.services.head.operations.head.output.members.head
+    assert(outputMember.readSizeBytes.contains(0x0c))
+
+    val plans = HttpRouteIrEmitter.emitRoutePlansFromIr(generation.services)
+    val route = plans.routes("/DolDecompApi/GetPaddedStruct")
+    assert(route.reads.head.sizeBytes == 0x0c)
+
+    val payload = Array.fill[Byte](12)(0)
+    payload(0) = 0x2a
+    payload(10) = 0x12
+    payload(11) = 0x34
+    val decoded =
+      route.reads.head.decodeCodec.get.decode(scodec.bits.BitVector(payload)).toOption.get.value
+
+    assert(decoded.hcursor.downField("a").as[Long].toOption.contains(0x2aL))
+    assert(decoded.hcursor.downField("b").as[Long].toOption.contains(0x1234L))
+  }
 }

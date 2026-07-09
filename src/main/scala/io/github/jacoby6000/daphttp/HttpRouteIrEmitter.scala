@@ -255,12 +255,21 @@ object HttpRouteIrEmitter {
         }
       }
       .orElse {
-        val bits = structure.members.flatMap(member => memberBitWidth(member, wordSize, errors))
-        if (bits.isEmpty) {
-          errors += s"${structure.id}: Unable to infer read width; add @size."
-          None
+        if (structure.members.exists(_.offsetBytes.isDefined)) {
+          structure.members.flatMap { member =>
+            for {
+              offset <- member.offsetBytes
+              sizeBytes <- memberSizeBytes(member, wordSize, errors)
+            } yield offset + sizeBytes
+          }.maxOption
         } else {
-          Some(math.ceil(bits.sum.toDouble / 8d).toInt)
+          val bits = structure.members.flatMap(member => memberBitWidth(member, wordSize, errors))
+          if (bits.isEmpty) {
+            errors += s"${structure.id}: Unable to infer read width; add @size."
+            None
+          } else {
+            Some(math.ceil(bits.sum.toDouble / 8d).toInt)
+          }
         }
       }
   }
@@ -630,6 +639,10 @@ object HttpRouteIrEmitter {
     groups.toList
   }
 
+  private final case class PaddingLayoutSlot(paddingBits: Int) extends LayoutSlot {
+    override def bitWidth: Int = paddingBits
+  }
+
   private def compileStructCodec(
       struct: IrType.Struct,
       endian: IrEndian,
@@ -638,8 +651,19 @@ object HttpRouteIrEmitter {
       context: String
   ): Option[Codec[Json]] = {
     val layoutGroups = groupMembersForLayout(struct.members)
+    var currentOffsetBits = 0
     val compiledSlots = layoutGroups.flatMap { group =>
-      if (group.size == 1 && group.head.unionGroup.isEmpty) {
+      val groupOffsetBits = group.flatMap(_.offsetBytes).headOption.map(_ * 8)
+      val paddingSlots = groupOffsetBits.toList.flatMap { offsetBits =>
+        if (offsetBits > currentOffsetBits) {
+          val padding = offsetBits - currentOffsetBits
+          currentOffsetBits = offsetBits
+          Some(PaddingLayoutSlot(padding))
+        } else {
+          None
+        }
+      }
+      val memberSlot = if (group.size == 1 && group.head.unionGroup.isEmpty) {
         val member = group.head
         val memberContext = s"$context.${member.name}"
         val memberEndian = member.endianOverride.getOrElse(endian)
@@ -648,6 +672,7 @@ object HttpRouteIrEmitter {
         val memberWidth = memberBitWidth(member, wordSize, errors)
         (memberCodec, memberWidth) match {
           case (Some(codec), Some(width)) =>
+            currentOffsetBits += width
             Some(NormalLayoutSlot(CompiledMemberCodec(member.name, width, codec)))
           case _ => None
         }
@@ -666,17 +691,31 @@ object HttpRouteIrEmitter {
         }
         val groupName = group.flatMap(_.unionGroup).headOption.getOrElse("union")
         if (compiledMembers.size == group.size) {
+          val width = compiledMembers.map(_.bitWidth).max
+          currentOffsetBits += width
           Some(UnionLayoutSlot(groupName, compiledMembers))
         } else {
           None
         }
       }
+      paddingSlots ++ memberSlot.toList
     }
 
-    if (compiledSlots.size != layoutGroups.size) {
+    if (compiledSlots.isEmpty) {
       None
     } else {
       val memberBits = compiledSlots.map(_.bitWidth).sum
+      val offsetAwareEndBits =
+        if (struct.members.exists(_.offsetBytes.isDefined)) {
+          struct.members.flatMap { member =>
+            for {
+              offset <- member.offsetBytes
+              width <- memberBitWidth(member, wordSize, errors)
+            } yield (offset * 8) + width
+          }.maxOption
+        } else {
+          None
+        }
       val totalBits = struct.declaredSizeBits
         .map(raw =>
           struct match {
@@ -684,6 +723,7 @@ object HttpRouteIrEmitter {
             case _                 => raw * 8
           }
         )
+        .orElse(offsetAwareEndBits)
         .getOrElse(memberBits)
 
       if (totalBits < memberBits) {
@@ -712,6 +752,8 @@ object HttpRouteIrEmitter {
                   case (accAttempt, slot) =>
                     accAttempt.flatMap { case (remainingBits, fields) =>
                       slot match {
+                        case PaddingLayoutSlot(paddingBits) =>
+                          Attempt.successful((remainingBits.drop(paddingBits.toLong), fields))
                         case NormalLayoutSlot(compiled) =>
                           compiled.codec.decode(remainingBits).map { decoded =>
                             (decoded.remainder, fields :+ (compiled.name -> decoded.value))

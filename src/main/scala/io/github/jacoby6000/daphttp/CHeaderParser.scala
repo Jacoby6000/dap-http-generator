@@ -38,7 +38,8 @@ final case class StructFieldDecl(
     typeName: String,
     declarator: IASTDeclarator,
     unionGroup: Option[String],
-    bitFieldWidth: Option[Int] = None
+    bitFieldWidth: Option[Int] = None,
+    offsetBytes: Option[Int] = None
 )
 
 object CHeaderParser {

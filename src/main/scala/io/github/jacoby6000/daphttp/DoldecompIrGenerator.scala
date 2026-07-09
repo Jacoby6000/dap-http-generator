@@ -54,6 +54,7 @@ object DoldecompIrGenerator {
       Integer.valueOf(headerRoots.size)
     )
     val headerStructs = loadStructs(headerRoots)
+    val structMemberOffsets = loadStructMemberOffsets(headerRoots)
     val globalDeclarations = loadGlobalDeclarations(headerRoots)
     val fieldInitializerLengths = loadFieldInitializerLengths(headerRoots, headerStructs)
     val dataObjectSymbols =
@@ -114,7 +115,11 @@ object DoldecompIrGenerator {
                   members = buildStructMembers(
                     namespace = namespace,
                     structName = name,
-                    fields = CHeaderParser.extractFields(composite),
+                    fields = enrichFieldOffsets(
+                      name,
+                      CHeaderParser.extractFields(composite),
+                      structMemberOffsets
+                    ),
                     reachableStructs = reachableByName,
                     buildStruct = buildStruct,
                     fieldInitializerLengths = fieldInitializerLengths
@@ -304,6 +309,7 @@ object DoldecompIrGenerator {
             fieldTypeName = field.typeName,
             fieldDeclarator = field.declarator,
             unionGroup = field.unionGroup,
+            offsetBytes = field.offsetBytes,
             reachableStructs = reachableStructs,
             buildStruct = buildStruct,
             fieldInitializerLengths = fieldInitializerLengths
@@ -325,7 +331,8 @@ object DoldecompIrGenerator {
             arrayLength = None,
             endianOverride = None,
             primitiveOverride = None,
-            layoutBitWidth = Some(storageBits)
+            layoutBitWidth = Some(storageBits),
+            offsetBytes = field.offsetBytes
           )
         )
       case BitmaskFieldGroup(name, bitfields, storageBits) =>
@@ -335,9 +342,20 @@ object DoldecompIrGenerator {
             structName = structName,
             memberName = name,
             bitfields = bitfields,
-            storageBits = storageBits
+            storageBits = storageBits,
+            offsetBytes = bitfields.flatMap(_.offsetBytes).headOption
           )
         )
+    }
+
+  private def enrichFieldOffsets(
+      structName: String,
+      fields: List[StructFieldDecl],
+      offsets: Map[(String, String), Int]
+  ): List[StructFieldDecl] =
+    fields.map { field =>
+      val fieldName = CHeaderParser.fieldName(field.declarator)
+      field.copy(offsetBytes = offsets.get((structName, fieldName)).orElse(field.offsetBytes))
     }
 
   private def groupBitfieldFields(fields: List[StructFieldDecl]): List[StructFieldGroup] = {
@@ -409,7 +427,8 @@ object DoldecompIrGenerator {
       structName: String,
       memberName: String,
       bitfields: List[StructFieldDecl],
-      storageBits: Int
+      storageBits: Int,
+      offsetBytes: Option[Int]
   ): IrMember = {
     val bitmaskId = ShapeId.from(s"$namespace#$structName${toPascalCase(memberName)}Bits")
     IrMember(
@@ -442,7 +461,8 @@ object DoldecompIrGenerator {
       isArray = false,
       arrayLength = None,
       endianOverride = None,
-      primitiveOverride = None
+      primitiveOverride = None,
+      offsetBytes = offsetBytes
     )
   }
 
@@ -452,6 +472,7 @@ object DoldecompIrGenerator {
       fieldTypeName: String,
       fieldDeclarator: IASTDeclarator,
       unionGroup: Option[String],
+      offsetBytes: Option[Int],
       reachableStructs: Map[String, IASTCompositeTypeSpecifier],
       buildStruct: String => IrType.MemoryMappedStruct,
       fieldInitializerLengths: Map[(String, String), Int]
@@ -503,7 +524,8 @@ object DoldecompIrGenerator {
         } else {
           explicitPrimitive.filter(isExplicitSizedPrimitive)
         },
-      unionGroup = unionGroup
+      unionGroup = unionGroup,
+      offsetBytes = offsetBytes
     )
   }
 
@@ -610,9 +632,26 @@ object DoldecompIrGenerator {
 
   private def irStructSizeBytes(struct: IrType.MemoryMappedStruct, wordSizeBits: Int): Int = {
     val wordSize = Some(wordSizeBits)
-    val memberBits = struct.members.flatMap(irMemberBitWidth(_, wordSize))
-    if (memberBits.isEmpty) 0 else math.ceil(memberBits.sum.toDouble / 8d).toInt
+    if (struct.members.exists(_.offsetBytes.isDefined)) {
+      struct.members
+        .flatMap { member =>
+          for {
+            offset <- member.offsetBytes.orElse(Some(0))
+            sizeBytes <- irMemberSizeBytes(member, wordSize)
+          } yield offset + sizeBytes
+        }
+        .maxOption
+        .getOrElse(0)
+    } else {
+      val memberBits = struct.members.flatMap(irMemberBitWidth(_, wordSize))
+      if (memberBits.isEmpty) 0 else math.ceil(memberBits.sum.toDouble / 8d).toInt
+    }
   }
+
+  private def irMemberSizeBytes(member: IrMember, wordSize: Option[Int]): Option[Int] =
+    member.readSizeBytes.orElse {
+      irMemberBitWidth(member, wordSize).map(bits => math.ceil(bits.toDouble / 8d).toInt)
+    }
 
   private def irMemberBitWidth(member: IrMember, wordSize: Option[Int]): Option[Int] = {
     member.layoutBitWidth.orElse {
@@ -671,6 +710,14 @@ object DoldecompIrGenerator {
         case _ => None
       }
     }
+
+  private def loadStructMemberOffsets(headerRoots: List[Path]): Map[(String, String), Int] = {
+    val sourceFiles = headerRoots.flatMap(collectSourceFiles).distinct
+    sourceFiles.flatMap { path =>
+      val source = new String(Files.readAllBytes(path))
+      CHeaderOffsetParser.parse(source).toList
+    }.toMap
+  }
 
   private def loadGlobalDeclarations(
       headerRoots: List[Path]

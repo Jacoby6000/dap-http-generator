@@ -39,7 +39,8 @@ final case class IrMember(
     primitiveOverride: Option[IrPrimitive],
     readSizeBytes: Option[Int] = None,
     unionGroup: Option[String] = None,
-    layoutBitWidth: Option[Int] = None
+    layoutBitWidth: Option[Int] = None,
+    offsetBytes: Option[Int] = None
 )
 
 sealed trait IrPrimitive
