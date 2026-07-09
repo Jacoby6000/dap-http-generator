@@ -339,4 +339,57 @@ class DoldecompSmithyGeneratorIntegrationSpec extends AnyFunSuite {
     val mappingRoute = plans.routes("/MeleeApi/GetEventMatchSelectionIndexToEventMatchIdMapping")
     assert(mappingRoute.reads.head.sizeBytes == 0x33)
   }
+
+  test("marks char pointer array chains to follow C strings") {
+    val fixtureRoot = Paths.get("src/test/resources/doldecomp-fixture-char-pointer-array")
+    val generation = DoldecompIrGenerator
+      .generateFromPaths(
+        symbolsPath = fixtureRoot.resolve("symbols.txt"),
+        headerRoots = List(fixtureRoot),
+        namespace = "example.doldecomp.charptr",
+        serviceName = "DolDecompApi",
+        wordSizeBits = 32
+      )
+      .toOption
+      .get
+
+    assert(generation.warnings.isEmpty)
+    val operation = generation.services.head.operations.find(_.name == "GetDbPokemonNames").get
+    assert(operation.pointerChain.exists(_.followCString))
+    assert(operation.output.members.head.primitiveOverride.contains(IrPrimitive.Char))
+
+    val plans = HttpRouteIrEmitter.emitRoutePlansFromIr(generation.services)
+    assert(plans.routes("/DolDecompApi/GetDbPokemonNames").pointerChain.exists(_.followCString))
+  }
+
+  test("groups C bitfields into bitmask structs and bool members") {
+    val fixtureRoot = Paths.get("src/test/resources/doldecomp-fixture-bitfields")
+    val generation = DoldecompIrGenerator
+      .generateFromPaths(
+        symbolsPath = fixtureRoot.resolve("symbols.txt"),
+        headerRoots = List(fixtureRoot),
+        namespace = "example.doldecomp.bitfields",
+        serviceName = "DolDecompApi",
+        wordSizeBits = 32
+      )
+      .toOption
+      .get
+
+    assert(generation.warnings.isEmpty)
+    val struct =
+      generation.services.head.operations.head.output.members.head.target
+        .asInstanceOf[IrType.MemoryMappedStruct]
+    val x0 = struct.members.find(_.name == "x0").get
+    val isTeams = struct.members.find(_.name == "isTeams").get
+
+    assert(x0.target.isInstanceOf[IrType.Bitmask])
+    assert(x0.target.asInstanceOf[IrType.Bitmask].members.size == 8)
+    assert(x0.target.asInstanceOf[IrType.Bitmask].declaredSizeBits.contains(8))
+    assert(isTeams.target == IrType.Primitive(IrPrimitive.Bool))
+    assert(isTeams.layoutBitWidth.contains(8))
+
+    val plans = HttpRouteIrEmitter.emitRoutePlansFromIr(generation.services)
+    assert(plans.errors.isEmpty)
+    assert(plans.routes("/DolDecompApi/GetStartEventRules").reads.head.decodeCodec.nonEmpty)
+  }
 }

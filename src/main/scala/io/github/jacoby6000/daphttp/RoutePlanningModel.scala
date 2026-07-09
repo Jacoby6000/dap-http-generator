@@ -21,7 +21,8 @@ final case class PointerChainPlan(
     endian: IrEndian,
     wordSizeBits: Int,
     pointeeSizeBytes: Int,
-    pointeeDecodeCodec: Option[Codec[Json]]
+    pointeeDecodeCodec: Option[Codec[Json]],
+    followCString: Boolean = false
 )
 final case class RoutePlan(
     path: String,

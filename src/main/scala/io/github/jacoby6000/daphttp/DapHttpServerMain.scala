@@ -245,42 +245,55 @@ object DapHttpServerMain extends IOApp {
           case Left(error) =>
             BadRequest(Json.obj("error" -> Json.fromString(error)))
           case Right(structAddress) =>
-            dapClient.readMemory(structAddress, chain.pointeeSizeBytes).flatMap {
-              case Left(error) =>
+            if (chain.followCString) {
+              readNullTerminatedCString(dapClient, structAddress).flatMap { value =>
                 Ok(
                   Json.obj(
                     "route" -> Json.fromString(routePlan.path),
                     "segments" -> chainSegments.asJson,
                     "address" -> Json.fromString(f"0x$structAddress%x"),
-                    "error" -> Json.fromString(error)
+                    "decoded" -> Json.fromString(value)
                   )
                 )
-              case Right(data) =>
-                val decoded = chain.pointeeDecodeCodec match {
-                  case None        => Json.Null
-                  case Some(codec) =>
-                    Try(Base64.getDecoder.decode(data)).toOption
-                      .flatMap(bytes => codec.decode(BitVector(bytes)).toOption.map(_.value))
-                      .getOrElse(Json.Null)
-                }
-                val resolvedDecoded = chain.pointeeType match {
-                  case struct: IrType.Struct =>
-                    resolveStructCStringPointers(struct, decoded, dapClient)
-                  case _ =>
-                    IO.pure(decoded)
-                }
-                resolvedDecoded.flatMap { finalDecoded =>
+              }
+            } else {
+              dapClient.readMemory(structAddress, chain.pointeeSizeBytes).flatMap {
+                case Left(error) =>
                   Ok(
                     Json.obj(
                       "route" -> Json.fromString(routePlan.path),
                       "segments" -> chainSegments.asJson,
                       "address" -> Json.fromString(f"0x$structAddress%x"),
-                      "bytes" -> Json.fromInt(chain.pointeeSizeBytes),
-                      "data" -> Json.fromString(data),
-                      "decoded" -> finalDecoded
+                      "error" -> Json.fromString(error)
                     )
                   )
-                }
+                case Right(data) =>
+                  val decoded = chain.pointeeDecodeCodec match {
+                    case None        => Json.Null
+                    case Some(codec) =>
+                      Try(Base64.getDecoder.decode(data)).toOption
+                        .flatMap(bytes => codec.decode(BitVector(bytes)).toOption.map(_.value))
+                        .getOrElse(Json.Null)
+                  }
+                  val resolvedDecoded = chain.pointeeType match {
+                    case struct: IrType.Struct =>
+                      resolveStructCStringPointers(struct, decoded, dapClient)
+                    case _ =>
+                      IO.pure(decoded)
+                  }
+                  resolvedDecoded.flatMap { finalDecoded =>
+                    Ok(
+                      Json.obj(
+                        "route" -> Json.fromString(routePlan.path),
+                        "segments" -> chainSegments.asJson,
+                        "address" -> Json.fromString(f"0x$structAddress%x"),
+                        "bytes" -> Json.fromInt(chain.pointeeSizeBytes),
+                        "data" -> Json.fromString(data),
+                        "decoded" -> finalDecoded
+                      )
+                    )
+                  }
+              }
             }
         }
     }

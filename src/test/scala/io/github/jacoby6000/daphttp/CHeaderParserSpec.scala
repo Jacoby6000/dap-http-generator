@@ -220,4 +220,20 @@ class CHeaderParserSpec extends AnyFunSuite {
     assert(unionFields.size == 2)
     assert(unionFields.map(_.unionGroup).distinct.size == 1)
   }
+
+  test("extracts bitfield widths from struct members") {
+    val source =
+      """
+        |typedef struct StartEventRules {
+        |    u8 x0_0 : 1;
+        |    u8 x0_1 : 1;
+        |    s8 x3;
+        |} StartEventRules;
+        |""".stripMargin
+
+    val fields = CHeaderParser.extractFields(CHeaderParser.parse(source).head._2)
+
+    assert(fields.take(2).map(_.bitFieldWidth) == List(Some(1), Some(1)))
+    assert(fields(2).bitFieldWidth.isEmpty)
+  }
 }

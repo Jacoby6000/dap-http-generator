@@ -5,6 +5,7 @@ import org.eclipse.cdt.core.dom.ast.IASTCompositeTypeSpecifier
 import org.eclipse.cdt.core.dom.ast.IASTDeclaration
 import org.eclipse.cdt.core.dom.ast.IASTDeclarator
 import org.eclipse.cdt.core.dom.ast.IASTEqualsInitializer
+import org.eclipse.cdt.core.dom.ast.IASTFieldDeclarator
 import org.eclipse.cdt.core.dom.ast.IASTFunctionDeclarator
 import org.eclipse.cdt.core.dom.ast.IASTInitializer
 import org.eclipse.cdt.core.dom.ast.IASTInitializerClause
@@ -36,7 +37,8 @@ final case class GlobalVariableDeclaration(
 final case class StructFieldDecl(
     typeName: String,
     declarator: IASTDeclarator,
-    unionGroup: Option[String]
+    unionGroup: Option[String],
+    bitFieldWidth: Option[Int] = None
 )
 
 object CHeaderParser {
@@ -180,7 +182,7 @@ object CHeaderParser {
                 val baseType = normalizeTypeName(unionMember.getDeclSpecifier.getRawSignature)
                 unionMember.getDeclarators.toList.flatMap { declarator =>
                   Option.when(extractDeclaratorName(declarator).nonEmpty) {
-                    StructFieldDecl(baseType, declarator, unionGroup)
+                    StructFieldDecl(baseType, declarator, unionGroup, bitFieldWidth(declarator))
                   }
                 }
               case _ => Nil
@@ -189,13 +191,20 @@ object CHeaderParser {
             val baseType = normalizeTypeName(member.getDeclSpecifier.getRawSignature)
             member.getDeclarators.toList.flatMap { declarator =>
               Option.when(extractDeclaratorName(declarator).nonEmpty) {
-                StructFieldDecl(baseType, declarator, unionGroup = None)
+                StructFieldDecl(baseType, declarator, unionGroup = None, bitFieldWidth(declarator))
               }
             }
         }
       case _ => Nil
     }
   }
+
+  def bitFieldWidth(declarator: IASTDeclarator): Option[Int] =
+    declaratorChain(declarator).collectFirst { case field: IASTFieldDeclarator =>
+      Option(field.getBitFieldSize)
+        .map(_.getRawSignature.trim)
+        .flatMap(_.toIntOption)
+    }.flatten
 
   def pointerDepth(declarator: IASTDeclarator): Int = {
     declaratorChain(declarator).map(_.getPointerOperators.length).sum

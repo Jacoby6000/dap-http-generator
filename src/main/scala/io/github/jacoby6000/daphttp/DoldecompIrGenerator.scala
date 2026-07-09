@@ -111,18 +111,14 @@ object DoldecompIrGenerator {
               case Some(composite) =>
                 IrType.MemoryMappedStruct(
                   id = ShapeId.from(s"$namespace#$name"),
-                  members = CHeaderParser.extractFields(composite).map { field =>
-                    toIrMember(
-                      namespace = namespace,
-                      structName = name,
-                      fieldTypeName = field.typeName,
-                      fieldDeclarator = field.declarator,
-                      unionGroup = field.unionGroup,
-                      reachableStructs = reachableByName,
-                      buildStruct = buildStruct,
-                      fieldInitializerLengths = fieldInitializerLengths
-                    )
-                  },
+                  members = buildStructMembers(
+                    namespace = namespace,
+                    structName = name,
+                    fields = CHeaderParser.extractFields(composite),
+                    reachableStructs = reachableByName,
+                    buildStruct = buildStruct,
+                    fieldInitializerLengths = fieldInitializerLengths
+                  ),
                   declaredSizeBits = None
                 )
             }
@@ -208,6 +204,12 @@ object DoldecompIrGenerator {
               endianOverride = None,
               primitiveOverride =
                 if (
+                  operation.pointerDepth > 0 && isCharType(
+                    CHeaderParser.normalizeTypeName(operation.rootTypeName).replaceAll("\\s+", "")
+                  )
+                ) {
+                  Some(IrPrimitive.Char)
+                } else if (
                   operation.pointerDepth > 0 || operation.isArray || isStructType(
                     operation.rootTypeName
                   )
@@ -230,11 +232,14 @@ object DoldecompIrGenerator {
                 ),
                 pointerChain =
                   if (operation.pointerDepth > 0) {
+                    val normalizedRootType =
+                      CHeaderParser.normalizeTypeName(operation.rootTypeName).replaceAll("\\s+", "")
                     Some(
                       IrPointerChain(
                         pointeeType = rootElementIrType(operation.rootTypeName, pointerDepth = 0),
                         pointerDepth = operation.pointerDepth,
-                        outerArrayLength = if (operation.isArray) operation.arrayLength else None
+                        outerArrayLength = if (operation.isArray) operation.arrayLength else None,
+                        followCString = isCharType(normalizedRootType)
                       )
                     )
                   } else {
@@ -272,6 +277,173 @@ object DoldecompIrGenerator {
         result
       }
     }
+  }
+
+  private sealed trait StructFieldGroup
+  private final case class RegularFieldGroup(field: StructFieldDecl) extends StructFieldGroup
+  private final case class BitmaskFieldGroup(
+      name: String,
+      fields: List[StructFieldDecl],
+      storageBits: Int
+  ) extends StructFieldGroup
+
+  private def buildStructMembers(
+      namespace: String,
+      structName: String,
+      fields: List[StructFieldDecl],
+      reachableStructs: Map[String, IASTCompositeTypeSpecifier],
+      buildStruct: String => IrType.MemoryMappedStruct,
+      fieldInitializerLengths: Map[(String, String), Int]
+  ): List[IrMember] =
+    groupBitfieldFields(fields).flatMap {
+      case RegularFieldGroup(field) =>
+        List(
+          toIrMember(
+            namespace = namespace,
+            structName = structName,
+            fieldTypeName = field.typeName,
+            fieldDeclarator = field.declarator,
+            unionGroup = field.unionGroup,
+            reachableStructs = reachableStructs,
+            buildStruct = buildStruct,
+            fieldInitializerLengths = fieldInitializerLengths
+          )
+        )
+      case BitmaskFieldGroup(name, bitfields, storageBits) if bitfields.size == 1 =>
+        val field = bitfields.head
+        List(
+          IrMember(
+            id = ShapeId.from(
+              s"$namespace#$structName$$${toCamelCase(CHeaderParser.fieldName(field.declarator))}"
+            ),
+            name = toCamelCase(CHeaderParser.fieldName(field.declarator)),
+            target = IrType.Primitive(IrPrimitive.Bool),
+            staticAddress = None,
+            paddingRepeats = None,
+            isPointer = false,
+            isArray = false,
+            arrayLength = None,
+            endianOverride = None,
+            primitiveOverride = None,
+            layoutBitWidth = Some(storageBits)
+          )
+        )
+      case BitmaskFieldGroup(name, bitfields, storageBits) =>
+        List(
+          toBitmaskMember(
+            namespace = namespace,
+            structName = structName,
+            memberName = name,
+            bitfields = bitfields,
+            storageBits = storageBits
+          )
+        )
+    }
+
+  private def groupBitfieldFields(fields: List[StructFieldDecl]): List[StructFieldGroup] = {
+    val groups = mutable.ListBuffer.empty[StructFieldGroup]
+    val pending = mutable.ListBuffer.empty[StructFieldDecl]
+    var pendingType: Option[String] = None
+    var pendingUsedBits = 0
+    var pendingTypeBits = 0
+
+    def flushPending(): Unit =
+      if (pending.nonEmpty) {
+        val bitfields = pending.toList
+        groups += BitmaskFieldGroup(
+          name = bitmaskGroupName(bitfields),
+          fields = bitfields,
+          storageBits = pendingTypeBits
+        )
+        pending.clear()
+        pendingType = None
+        pendingUsedBits = 0
+        pendingTypeBits = 0
+      }
+
+    fields.foreach { field =>
+      field.bitFieldWidth match {
+        case None =>
+          flushPending()
+          groups += RegularFieldGroup(field)
+        case Some(width) =>
+          val normalizedType =
+            CHeaderParser.normalizeTypeName(field.typeName).replaceAll("\\s+", "")
+          val typeBits = primitiveStorageBits(normalizedType).getOrElse(8)
+          val sameType = pendingType.forall(_ == normalizedType)
+          if (pending.nonEmpty && sameType && pendingUsedBits + width <= typeBits) {
+            pending += field
+            pendingUsedBits += width
+          } else {
+            flushPending()
+            pendingType = Some(normalizedType)
+            pendingTypeBits = typeBits
+            pending += field
+            pendingUsedBits = width
+          }
+      }
+    }
+    flushPending()
+    groups.toList
+  }
+
+  private def bitmaskGroupName(fields: List[StructFieldDecl]): String = {
+    val names = fields.map(field => CHeaderParser.fieldName(field.declarator))
+    val commonPrefix = names
+      .reduceLeftOption { (left, right) =>
+        left.zip(right).takeWhile(Function.tupled(_ == _)).map(_._1).mkString
+      }
+      .getOrElse("")
+    val trimmed =
+      if (commonPrefix.nonEmpty && commonPrefix.last == '_') commonPrefix.dropRight(1)
+      else if (commonPrefix.nonEmpty) commonPrefix
+      else names.headOption.getOrElse("bits")
+    toCamelCase(trimmed)
+  }
+
+  private def primitiveStorageBits(normalizedType: String): Option[Int] =
+    primitiveForType(normalizedType).flatMap(bitsForPrimitive(_, Some(32)))
+
+  private def toBitmaskMember(
+      namespace: String,
+      structName: String,
+      memberName: String,
+      bitfields: List[StructFieldDecl],
+      storageBits: Int
+  ): IrMember = {
+    val bitmaskId = ShapeId.from(s"$namespace#$structName${toPascalCase(memberName)}Bits")
+    IrMember(
+      id = ShapeId.from(s"$namespace#$structName$$$memberName"),
+      name = memberName,
+      target = IrType.Bitmask(
+        id = bitmaskId,
+        members = bitfields.map { field =>
+          val fieldName = CHeaderParser.fieldName(field.declarator)
+          IrMember(
+            id = ShapeId.from(
+              s"$namespace#${structName}${toPascalCase(memberName)}${toPascalCase(fieldName)}"
+            ),
+            name = toCamelCase(fieldName),
+            target = IrType.Primitive(IrPrimitive.Bool),
+            staticAddress = None,
+            paddingRepeats = None,
+            isPointer = false,
+            isArray = false,
+            arrayLength = None,
+            endianOverride = None,
+            primitiveOverride = None
+          )
+        },
+        declaredSizeBits = Some(storageBits)
+      ),
+      staticAddress = None,
+      paddingRepeats = None,
+      isPointer = false,
+      isArray = false,
+      arrayLength = None,
+      endianOverride = None,
+      primitiveOverride = None
+    )
   }
 
   private def toIrMember(
@@ -443,16 +615,22 @@ object DoldecompIrGenerator {
   }
 
   private def irMemberBitWidth(member: IrMember, wordSize: Option[Int]): Option[Int] = {
-    if (member.isPointer) {
-      wordSize
-    } else {
-      member.primitiveOverride.flatMap(bitsForPrimitive(_, wordSize)).orElse {
-        member.target match {
-          case IrType.Primitive(kind)            => bitsForPrimitive(kind, wordSize)
-          case listType: IrType.ListType         => irListBitWidth(member, listType, wordSize)
-          case nested: IrType.MemoryMappedStruct =>
-            Some(irStructSizeBytes(nested, wordSize.getOrElse(32)) * 8)
-          case _ => None
+    member.layoutBitWidth.orElse {
+      if (member.isPointer) {
+        wordSize
+      } else {
+        member.primitiveOverride.flatMap(bitsForPrimitive(_, wordSize)).orElse {
+          member.target match {
+            case IrType.Primitive(kind)            => bitsForPrimitive(kind, wordSize)
+            case listType: IrType.ListType         => irListBitWidth(member, listType, wordSize)
+            case nested: IrType.MemoryMappedStruct =>
+              Some(irStructSizeBytes(nested, wordSize.getOrElse(32)) * 8)
+            case bitmask: IrType.Bitmask =>
+              bitmask.declaredSizeBits.orElse {
+                Some(bitmask.members.map(_ => 1).sum)
+              }
+            case _ => None
+          }
         }
       }
     }

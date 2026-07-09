@@ -23,7 +23,8 @@ final case class IrOperation(
 final case class IrPointerChain(
     pointeeType: IrType,
     pointerDepth: Int,
-    outerArrayLength: Option[Int]
+    outerArrayLength: Option[Int],
+    followCString: Boolean = false
 )
 final case class IrMember(
     id: ShapeId,
@@ -37,7 +38,8 @@ final case class IrMember(
     endianOverride: Option[IrEndian],
     primitiveOverride: Option[IrPrimitive],
     readSizeBytes: Option[Int] = None,
-    unionGroup: Option[String] = None
+    unionGroup: Option[String] = None,
+    layoutBitWidth: Option[Int] = None
 )
 
 sealed trait IrPrimitive

@@ -113,7 +113,8 @@ object HttpRouteIrEmitter {
             endian = defaultEndian,
             wordSizeBits = wordSizeBits,
             pointeeSizeBytes = sizeBytes,
-            pointeeDecodeCodec = Some(codec)
+            pointeeDecodeCodec = Some(codec),
+            followCString = chain.followCString
           )
         }
     }
@@ -278,23 +279,25 @@ object HttpRouteIrEmitter {
       wordSize: Option[Int],
       errors: ListBuffer[String]
   ): Option[Int] = {
-    if (member.isPointer) {
-      return wordSize.orElse {
-        errors += s"${member.id}: Pointer members require service @wordSize."
-        None
-      }
-    }
-
-    member.primitiveOverride.flatMap(bitsForPrimitive(_, wordSize)).orElse {
-      member.target match {
-        case IrType.Primitive(kind) =>
-          bitsForPrimitive(kind, wordSize)
-        case listType: IrType.ListType =>
-          listBitWidth(member, listType, wordSize, errors)
-        case nestedStruct: IrType.Struct =>
-          structureSizeBytes(nestedStruct, wordSize, errors).map(_ * 8)
-        case _ =>
+    member.layoutBitWidth.orElse {
+      if (member.isPointer) {
+        wordSize.orElse {
+          errors += s"${member.id}: Pointer members require service @wordSize."
           None
+        }
+      } else {
+        member.primitiveOverride.flatMap(bitsForPrimitive(_, wordSize)).orElse {
+          member.target match {
+            case IrType.Primitive(kind) =>
+              bitsForPrimitive(kind, wordSize)
+            case listType: IrType.ListType =>
+              listBitWidth(member, listType, wordSize, errors)
+            case nestedStruct: IrType.Struct =>
+              structureSizeBytes(nestedStruct, wordSize, errors).map(_ * 8)
+            case _ =>
+              None
+          }
+        }
       }
     }
   }
@@ -754,19 +757,30 @@ object HttpRouteIrEmitter {
       errors: ListBuffer[String],
       context: String
   ): Option[Codec[Json]] = {
-    inlineCharByteCount(member).filter(_ > 1).map(inlineCharArrayStringCodec).orElse {
-      member.target match {
-        case listType: IrType.ListType if member.isArray && !member.isPointer =>
-          compileArrayCodec(member, listType, endian, wordSize, errors, context)
-        case _: IrType.ListType if member.isArray && member.isPointer =>
-          compilePointerArrayCodec(member, endian, wordSize, errors, context)
-        case _ if member.isPointer =>
-          compilePrimitiveCodec(IrPrimitive.LongWord, endian, wordSize)
-        case _ =>
-          compileJsonCodecForType(memberReadType(member), endian, wordSize, errors, context)
+    member.layoutBitWidth
+      .filter(_ => memberReadType(member) == IrType.Primitive(IrPrimitive.Bool))
+      .map(boolFromStorageCodec)
+      .orElse {
+        inlineCharByteCount(member).filter(_ > 1).map(inlineCharArrayStringCodec).orElse {
+          member.target match {
+            case listType: IrType.ListType if member.isArray && !member.isPointer =>
+              compileArrayCodec(member, listType, endian, wordSize, errors, context)
+            case _: IrType.ListType if member.isArray && member.isPointer =>
+              compilePointerArrayCodec(member, endian, wordSize, errors, context)
+            case _ if member.isPointer =>
+              compilePrimitiveCodec(IrPrimitive.LongWord, endian, wordSize)
+            case _ =>
+              compileJsonCodecForType(memberReadType(member), endian, wordSize, errors, context)
+          }
+        }
       }
-    }
   }
+
+  private def boolFromStorageCodec(storageBits: Int): Codec[Json] =
+    bits(storageBits.toLong).xmap[Json](
+      value => Json.fromBoolean(bitVectorToUnsigned(value.take(1L)) != 0L),
+      _ => BitVector.low(storageBits.toLong)
+    )
 
   private def compilePointerArrayCodec(
       member: IrMember,
