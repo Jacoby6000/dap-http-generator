@@ -14,6 +14,7 @@ object DoldecompIrGenerator {
       symbol: DoldecompSymbol,
       operationName: String,
       outputName: String,
+      routePath: String,
       rootTypeName: String,
       isArray: Boolean,
       arrayLength: Option[Int],
@@ -33,12 +34,15 @@ object DoldecompIrGenerator {
       headerRoots: List[Path],
       namespace: String = "doldecomp.generated",
       serviceName: String = "DolDecompApi",
-      wordSizeBits: Int = 32
+      wordSizeBits: Int = 32,
+      extraDataSections: Set[String] = Set.empty
   ): Either[List[String], IrGenerationResult] = {
     val symbolsContent = new String(Files.readAllBytes(symbolsPath))
     DoldecompSymbolsParser
       .parse(symbolsContent)
-      .map(generateFromSymbols(_, headerRoots, namespace, serviceName, wordSizeBits))
+      .map(
+        generateFromSymbols(_, headerRoots, namespace, serviceName, wordSizeBits, extraDataSections)
+      )
   }
 
   def generateFromSymbols(
@@ -46,33 +50,43 @@ object DoldecompIrGenerator {
       headerRoots: List[Path],
       namespace: String = "doldecomp.generated",
       serviceName: String = "DolDecompApi",
-      wordSizeBits: Int = 32
+      wordSizeBits: Int = 32,
+      extraDataSections: Set[String] = Set.empty
   ): IrGenerationResult = {
     DapHttpLoggers.irSourceDoldecomp.info(
       "Generating IR from {} symbol(s) across {} header root(s)",
       Integer.valueOf(symbols.size),
       Integer.valueOf(headerRoots.size)
     )
-    val headerStructs = loadStructs(headerRoots)
+    val allMacros = loadAllMacros(headerRoots)
+    val headerStructs = loadStructs(headerRoots, allMacros)
     val structMemberOffsets = loadStructMemberOffsets(headerRoots)
-    val globalDeclarations = loadGlobalDeclarations(headerRoots)
-    val fieldInitializerLengths = loadFieldInitializerLengths(headerRoots, headerStructs)
-    val dataObjectSymbols =
-      symbols.filter(_.symbolType.contains("object")).filter(_.section.contains(".data"))
+    val globalDeclarations = loadGlobalDeclarations(headerRoots, allMacros)
+    val fieldInitializerLengths = loadFieldInitializerLengths(headerRoots, headerStructs, allMacros)
+    val typedefs = loadTypedefs(headerRoots, allMacros)
+    val sectionResult = SectionFilter.filterDataSymbols(symbols, extraDataSections)
+    sectionResult.warnings.foreach(w => DapHttpLoggers.irSourceDoldecomp.warn("{}", w))
+    val dataObjectSymbols = sectionResult.dataSymbols
     val resolvedSymbols = dataObjectSymbols.flatMap(resolveSymbol(_, globalDeclarations))
     val warnings = mutable.ListBuffer.empty[String]
+    warnings ++= sectionResult.warnings
 
     if (resolvedSymbols.isEmpty) {
       DapHttpLoggers.irSourceDoldecomp.warn(
-        "No .data object symbols with a matching C declaration were found"
+        "No data object symbols with a matching C declaration were found"
       )
       IrGenerationResult(
-        warnings = List("No .data object symbols with a matching C declaration were found."),
+        warnings = List("No data object symbols with a matching C declaration were found."),
         services = Nil
       )
     } else {
       val validResolved = resolvedSymbols.filter { resolved =>
-        validateResolvedType(resolved.symbol.name, resolved.typeName, headerStructs) match {
+        validateResolvedType(
+          resolved.symbol.name,
+          resolved.typeName,
+          headerStructs,
+          typedefs
+        ) match {
           case Some(error) =>
             warnings += error
             DapHttpLoggers.irSourceDoldecomp.debug("Skipping symbol: {}", error)
@@ -85,11 +99,53 @@ object DoldecompIrGenerator {
       if (validResolved.isEmpty) {
         IrGenerationResult(warnings.toList, Nil)
       } else {
+        val usedOutputNames = mutable.Set.empty[String]
+        val usedOperationNames = mutable.Set.empty[String]
+        val usedRoutePaths = mutable.Set.empty[String]
         val operations = validResolved.map { resolved =>
+          val pascalName = toPascalCase(resolved.symbol.name)
+          val baseRoutePath = s"/$serviceName/${resolved.symbol.name}"
+          val routePath =
+            if (usedRoutePaths.contains(baseRoutePath)) {
+              var suffix = 2
+              while (usedRoutePaths.contains(s"/$serviceName/${resolved.symbol.name}_$suffix"))
+                suffix += 1
+              val result = s"/$serviceName/${resolved.symbol.name}_$suffix"
+              usedRoutePaths += result
+              result
+            } else {
+              usedRoutePaths += baseRoutePath
+              baseRoutePath
+            }
+          val baseOutputName = s"${pascalName}Output"
+          val outputName =
+            if (usedOutputNames.contains(baseOutputName)) {
+              var suffix = 2
+              while (usedOutputNames.contains(s"$baseOutputName$suffix")) suffix += 1
+              val result = s"$baseOutputName$suffix"
+              usedOutputNames += result
+              result
+            } else {
+              usedOutputNames += baseOutputName
+              baseOutputName
+            }
+          val baseOperationName = s"Get$pascalName"
+          val operationName =
+            if (usedOperationNames.contains(baseOperationName)) {
+              var suffix = 2
+              while (usedOperationNames.contains(s"$baseOperationName$suffix")) suffix += 1
+              val result = s"$baseOperationName$suffix"
+              usedOperationNames += result
+              result
+            } else {
+              usedOperationNames += baseOperationName
+              baseOperationName
+            }
           OperationModel(
             symbol = resolved.symbol,
-            operationName = s"Get${toPascalCase(resolved.symbol.name)}",
-            outputName = s"Get${toPascalCase(resolved.symbol.name)}Output",
+            operationName = operationName,
+            outputName = outputName,
+            routePath = routePath,
             rootTypeName = resolved.typeName,
             isArray = resolved.isArray,
             arrayLength = resolved.arrayLength,
@@ -97,9 +153,10 @@ object DoldecompIrGenerator {
           )
         }
 
-        val reachableStructs = collectReachableStructs(operations, headerStructs)
+        val reachableStructs = collectReachableStructs(operations, headerStructs, typedefs)
         val reachableByName = reachableStructs.toMap
         val builtStructs = mutable.Map.empty[String, IrType.MemoryMappedStruct]
+        val buildingStructs = mutable.Set.empty[String]
 
         def buildStruct(name: String): IrType.MemoryMappedStruct = {
           builtStructs.getOrElseUpdate(
@@ -110,35 +167,59 @@ object DoldecompIrGenerator {
                   s"Missing struct definition for '$name' while building IR."
                 )
               case Some(composite) =>
-                IrType.MemoryMappedStruct(
-                  id = ShapeId.from(s"$namespace#$name"),
-                  members = buildStructMembers(
-                    namespace = namespace,
-                    structName = name,
-                    fields = enrichFieldOffsets(
-                      name,
-                      CHeaderParser.extractFields(composite),
-                      structMemberOffsets
+                buildingStructs += name
+                try {
+                  IrType.MemoryMappedStruct(
+                    id = ShapeId.from(s"$namespace#$name"),
+                    members = buildStructMembers(
+                      namespace = namespace,
+                      structName = name,
+                      wordSizeBits = wordSizeBits,
+                      fields = enrichFieldOffsets(
+                        name,
+                        CHeaderParser.extractFields(composite),
+                        structMemberOffsets
+                      ),
+                      reachableStructs = reachableByName,
+                      buildStruct = buildStruct,
+                      pointeeTypeFor = pointeeTypeFor,
+                      fieldInitializerLengths = fieldInitializerLengths,
+                      macros = typedefs
                     ),
-                    reachableStructs = reachableByName,
-                    buildStruct = buildStruct,
-                    fieldInitializerLengths = fieldInitializerLengths
-                  ),
-                  declaredSizeBits = None
-                )
+                    declaredSizeBits = None
+                  )
+                } finally {
+                  buildingStructs -= name
+                }
             }
           )
         }
 
-        def isStructType(typeName: String): Boolean = reachableByName.contains(typeName)
+        def pointeeTypeFor(name: String, structs: Map[String, IASTCompositeTypeSpecifier]): IrType =
+          if (structs.contains(name) && buildingStructs.contains(name))
+            IrType.Ref(ShapeId.from(s"$namespace#$name"))
+          else
+            typeForName(name, structs, buildStruct)
+
+        def isStructType(typeName: String): Boolean =
+          reachableByName.contains(typeName) || reachableByName.contains(
+            resolveTypedef(typeName, typedefs)
+          )
 
         def rootElementIrType(typeName: String, pointerDepth: Int): IrType =
           if (pointerDepth > 0) {
             IrType.Primitive(IrPrimitive.LongWord)
-          } else if (isStructType(typeName)) {
-            buildStruct(typeName)
           } else {
-            IrType.Primitive(primitiveForType(typeName).getOrElse(IrPrimitive.LongWord))
+            if (reachableByName.contains(typeName)) {
+              buildStruct(typeName)
+            } else {
+              val resolved = resolveTypedef(typeName, typedefs)
+              if (reachableByName.contains(resolved)) {
+                buildStruct(resolved)
+              } else {
+                IrType.Primitive(primitiveForType(resolved).getOrElse(IrPrimitive.LongWord))
+              }
+            }
           }
 
         def rootOutputIrType(operation: OperationModel): IrType =
@@ -156,12 +237,15 @@ object DoldecompIrGenerator {
         def elementSizeBytesForRootType(typeName: String, pointerDepth: Int): Option[Int] =
           if (pointerDepth > 0) {
             Some(wordSizeBits / 8)
-          } else if (isStructType(typeName)) {
-            Some(irStructSizeBytes(buildStruct(typeName), wordSizeBits))
           } else {
-            primitiveForType(typeName).flatMap { kind =>
-              bitsForPrimitive(kind, Some(wordSizeBits))
-                .map(bits => math.ceil(bits.toDouble / 8d).toInt)
+            val resolved = resolveTypedef(typeName, typedefs)
+            if (isStructType(resolved)) {
+              Some(irStructSizeBytes(buildStruct(resolved), wordSizeBits))
+            } else {
+              primitiveForType(resolved).flatMap { kind =>
+                bitsForPrimitive(kind, Some(wordSizeBits))
+                  .map(bits => math.ceil(bits.toDouble / 8d).toInt)
+              }
             }
           }
 
@@ -186,10 +270,11 @@ object DoldecompIrGenerator {
         }
 
         operationsWithArrayLengths.foreach { operation =>
-          if (operation.pointerDepth == 0 && isStructType(operation.rootTypeName)) {
-            buildStruct(operation.rootTypeName)
-          } else if (operation.pointerDepth > 0 && isStructType(operation.rootTypeName)) {
-            buildStruct(operation.rootTypeName)
+          val resolvedRoot = resolveTypedef(operation.rootTypeName, typedefs)
+          if (operation.pointerDepth == 0 && isStructType(resolvedRoot)) {
+            buildStruct(resolvedRoot)
+          } else if (operation.pointerDepth > 0 && isStructType(resolvedRoot)) {
+            buildStruct(resolvedRoot)
           }
         }
 
@@ -221,7 +306,10 @@ object DoldecompIrGenerator {
                 ) {
                   None
                 } else {
-                  primitiveForType(operation.rootTypeName).filter(isExplicitSizedPrimitive)
+                  val resolvedRoot = resolveTypedef(operation.rootTypeName, typedefs)
+                  primitiveForType(resolvedRoot)
+                    .filter(isExplicitSizedPrimitive)
+                    .orElse(wordSizePrimitive(wordSizeBits))
                 },
               readSizeBytes = operation.symbol.sizeBytes
             )
@@ -229,7 +317,7 @@ object DoldecompIrGenerator {
             Some(
               IrOperation(
                 name = operation.operationName,
-                routePath = s"/$serviceName/${operation.operationName}",
+                routePath = operation.routePath,
                 output = IrType.EnclosingStruct(
                   id = outputShapeId,
                   members = List(outputMember),
@@ -295,10 +383,13 @@ object DoldecompIrGenerator {
   private def buildStructMembers(
       namespace: String,
       structName: String,
+      wordSizeBits: Int,
       fields: List[StructFieldDecl],
       reachableStructs: Map[String, IASTCompositeTypeSpecifier],
       buildStruct: String => IrType.MemoryMappedStruct,
-      fieldInitializerLengths: Map[(String, String), Int]
+      pointeeTypeFor: (String, Map[String, IASTCompositeTypeSpecifier]) => IrType,
+      fieldInitializerLengths: Map[(String, String), Int],
+      macros: Map[String, String]
   ): List[IrMember] =
     groupBitfieldFields(fields).flatMap {
       case RegularFieldGroup(field) =>
@@ -310,9 +401,12 @@ object DoldecompIrGenerator {
             fieldDeclarator = field.declarator,
             unionGroup = field.unionGroup,
             offsetBytes = field.offsetBytes,
+            wordSizeBits = wordSizeBits,
             reachableStructs = reachableStructs,
             buildStruct = buildStruct,
-            fieldInitializerLengths = fieldInitializerLengths
+            pointeeTypeFor = pointeeTypeFor,
+            fieldInitializerLengths = fieldInitializerLengths,
+            macros = macros
           )
         )
       case BitmaskFieldGroup(name, bitfields, storageBits) if bitfields.size == 1 =>
@@ -473,9 +567,12 @@ object DoldecompIrGenerator {
       fieldDeclarator: IASTDeclarator,
       unionGroup: Option[String],
       offsetBytes: Option[Int],
+      wordSizeBits: Int,
       reachableStructs: Map[String, IASTCompositeTypeSpecifier],
       buildStruct: String => IrType.MemoryMappedStruct,
-      fieldInitializerLengths: Map[(String, String), Int]
+      pointeeTypeFor: (String, Map[String, IASTCompositeTypeSpecifier]) => IrType,
+      fieldInitializerLengths: Map[(String, String), Int],
+      macros: Map[String, String]
   ): IrMember = {
     val normalizedType = CHeaderParser.normalizeTypeName(fieldTypeName).replaceAll("\\s+", "")
     val fieldName = CHeaderParser.fieldName(fieldDeclarator)
@@ -484,10 +581,28 @@ object DoldecompIrGenerator {
     val isPointer = CHeaderParser.pointerDepth(fieldDeclarator) > 0
     val arrayLength =
       CHeaderParser
-        .arrayLength(fieldDeclarator)
+        .arrayLength(fieldDeclarator, macros)
         .orElse(fieldInitializerLengths.get((structName, fieldName)))
 
-    val resolvedTarget = if (isPointer) {
+    val funcPointerSig =
+      if (isPointer) CHeaderParser.extractFunctionPointerSignature(fieldDeclarator, fieldTypeName)
+      else None
+
+    lazy val pointeeType = pointeeTypeFor(normalizedType, reachableStructs)
+    val resolvedTarget = if (funcPointerSig.isDefined && arrayLength.isEmpty) {
+      IrType.FunctionPointer(
+        name = toPascalCase(fieldName),
+        params = funcPointerSig.get.params.map(p => FunctionPointerParam(p.typeName, p.name)),
+        returnType = funcPointerSig.get.returnType
+      )
+    } else if (isPointer && arrayLength.isDefined && arrayLength.exists(_ > 0)) {
+      IrType.ListType(
+        id = ShapeId.from(s"$namespace#${structName}${toPascalCase(fieldName)}Array"),
+        element = pointeeType,
+        bytesAlias = false,
+        bitsAlias = false
+      )
+    } else if (isPointer) {
       IrType.Primitive(IrPrimitive.LongWord)
     } else {
       arrayLength match {
@@ -517,12 +632,18 @@ object DoldecompIrGenerator {
       arrayLength = arrayLength,
       endianOverride = None,
       primitiveOverride =
-        if (isPointer && charType) {
+        if (isPointer && charType && funcPointerSig.isEmpty) {
           Some(IrPrimitive.Char)
+        } else if (isPointer && funcPointerSig.isEmpty) {
+          None
         } else if (isPointer) {
           None
         } else {
-          explicitPrimitive.filter(isExplicitSizedPrimitive)
+          explicitPrimitive.filter(isExplicitSizedPrimitive).orElse {
+            if (resolvedTarget == IrType.Primitive(IrPrimitive.LongWord))
+              wordSizePrimitive(wordSizeBits)
+            else None
+          }
         },
       unionGroup = unionGroup,
       offsetBytes = offsetBytes
@@ -545,6 +666,16 @@ object DoldecompIrGenerator {
         false
     }
 
+  private def wordSizePrimitive(wordSizeBits: Int): Option[IrPrimitive] =
+    wordSizeBits match {
+      case 8   => Some(IrPrimitive.U8)
+      case 16  => Some(IrPrimitive.U16)
+      case 32  => Some(IrPrimitive.U32)
+      case 64  => Some(IrPrimitive.U64)
+      case 128 => Some(IrPrimitive.U128)
+      case _   => None
+    }
+
   private def typeForName(
       normalizedType: String,
       reachableStructs: Map[String, IASTCompositeTypeSpecifier],
@@ -560,25 +691,50 @@ object DoldecompIrGenerator {
   private def primitiveForType(typeName: String): Option[IrPrimitive] = {
     val normalized = CHeaderParser.normalizeTypeName(typeName).replaceAll("\\s+", "")
     normalized match {
-      case "u8"    => Some(IrPrimitive.U8)
-      case "s8"    => Some(IrPrimitive.S8)
-      case "u16"   => Some(IrPrimitive.U16)
-      case "s16"   => Some(IrPrimitive.S16)
-      case "u32"   => Some(IrPrimitive.U32)
-      case "s32"   => Some(IrPrimitive.S32)
-      case "u64"   => Some(IrPrimitive.U64)
-      case "s64"   => Some(IrPrimitive.S64)
-      case "u128"  => Some(IrPrimitive.U128)
-      case "s128"  => Some(IrPrimitive.S128)
-      case "f32"   => Some(IrPrimitive.F32)
-      case "f64"   => Some(IrPrimitive.F64)
-      case "char"  => Some(IrPrimitive.Char)
-      case "bool"  => Some(IrPrimitive.Bool)
-      case "byte"  => Some(IrPrimitive.S8)
-      case "short" => Some(IrPrimitive.S16)
-      case "int"   => Some(IrPrimitive.S32)
-      case "long"  => Some(IrPrimitive.LongWord)
-      case _       => None
+      case "u8"                          => Some(IrPrimitive.U8)
+      case "s8"                          => Some(IrPrimitive.S8)
+      case "u16"                         => Some(IrPrimitive.U16)
+      case "s16"                         => Some(IrPrimitive.S16)
+      case "u32"                         => Some(IrPrimitive.U32)
+      case "s32"                         => Some(IrPrimitive.S32)
+      case "u64"                         => Some(IrPrimitive.U64)
+      case "s64"                         => Some(IrPrimitive.S64)
+      case "u128"                        => Some(IrPrimitive.U128)
+      case "s128"                        => Some(IrPrimitive.S128)
+      case "f32"                         => Some(IrPrimitive.F32)
+      case "f64"                         => Some(IrPrimitive.F64)
+      case "char"                        => Some(IrPrimitive.Char)
+      case "bool"                        => Some(IrPrimitive.Bool)
+      case "byte"                        => Some(IrPrimitive.S8)
+      case "short"                       => Some(IrPrimitive.S16)
+      case "int"                         => Some(IrPrimitive.S32)
+      case "long"                        => Some(IrPrimitive.LongWord)
+      case "float"                       => Some(IrPrimitive.F32)
+      case "double"                      => Some(IrPrimitive.F64)
+      case "unsignedchar"                => Some(IrPrimitive.U8)
+      case "signedchar"                  => Some(IrPrimitive.S8)
+      case "unsignedshort"               => Some(IrPrimitive.U16)
+      case "signedshort"                 => Some(IrPrimitive.S16)
+      case "unsignedint"                 => Some(IrPrimitive.U32)
+      case "signedint"                   => Some(IrPrimitive.S32)
+      case "unsigned"                    => Some(IrPrimitive.U32)
+      case "signed"                      => Some(IrPrimitive.S32)
+      case "unsignedlong"                => Some(IrPrimitive.LongWord)
+      case "signedlong"                  => Some(IrPrimitive.LongWord)
+      case "longlong"                    => Some(IrPrimitive.S64)
+      case "unsignedlonglong"            => Some(IrPrimitive.U64)
+      case "signedlonglong"              => Some(IrPrimitive.S64)
+      case "unsignedshortint"            => Some(IrPrimitive.U16)
+      case "signedshortint"              => Some(IrPrimitive.S16)
+      case "unsignedlongint"             => Some(IrPrimitive.LongWord)
+      case "signedlongint"               => Some(IrPrimitive.LongWord)
+      case "longlongint"                 => Some(IrPrimitive.S64)
+      case "unsignedlonglongint"         => Some(IrPrimitive.U64)
+      case "signedlonglongint"           => Some(IrPrimitive.S64)
+      case "void"                        => Some(IrPrimitive.LongWord)
+      case _ if normalized.endsWith("*") =>
+        Some(IrPrimitive.LongWord)
+      case _ => None
     }
   }
 
@@ -611,13 +767,49 @@ object DoldecompIrGenerator {
   private def validateResolvedType(
       symbolName: String,
       typeName: String,
-      headerStructs: Map[String, IASTCompositeTypeSpecifier]
-  ): Option[String] =
-    if (headerStructs.contains(typeName) || primitiveForType(typeName).isDefined) {
+      headerStructs: Map[String, IASTCompositeTypeSpecifier],
+      typedefs: Map[String, String]
+  ): Option[String] = {
+    val normalized = CHeaderParser.normalizeTypeName(typeName).replaceAll("\\s+", "")
+    if (headerStructs.contains(normalized) || primitiveForType(normalized).isDefined) {
       None
     } else {
-      Some(s"$symbolName: Missing struct or primitive definition for resolved type '$typeName'.")
+      val resolved = resolveTypedef(typeName, typedefs)
+      if (headerStructs.contains(resolved) || primitiveForType(resolved).isDefined) {
+        None
+      } else {
+        Some(s"$symbolName: Missing struct or primitive definition for resolved type '$typeName'.")
+      }
     }
+  }
+
+  private def resolveTypedef(typeName: String, typedefs: Map[String, String]): String = {
+    val normalized = CHeaderParser.normalizeTypeName(typeName).replaceAll("\\s+", "")
+    val base = normalized.replaceAll("\\*", "").trim
+    val pointerCount = normalized.count(_ == '*')
+    val resolvedBase = resolveTypedefChain(base, typedefs, Set.empty)
+    val pointerSuffix = (0 until pointerCount).map(_ => "*").mkString
+    s"$resolvedBase$pointerSuffix".replaceAll("\\s+", "")
+  }
+
+  private def resolveTypedefChain(
+      name: String,
+      typedefs: Map[String, String],
+      visited: Set[String]
+  ): String = {
+    if (visited.contains(name)) name
+    else {
+      typedefs.get(name) match {
+        case Some(resolved) =>
+          val cleanResolved = CHeaderParser.normalizeTypeName(resolved).replaceAll("\\s+", "")
+          val cleanBase = cleanResolved.replaceAll("\\*", "").trim
+          if (cleanBase != name) resolveTypedefChain(cleanBase, typedefs, visited + name)
+          else cleanResolved
+        case None =>
+          name
+      }
+    }
+  }
 
   private def inferArrayLength(symbol: DoldecompSymbol, elementSizeBytes: Int): Option[Int] =
     symbol.sizeBytes.flatMap { totalSize =>
@@ -722,13 +914,14 @@ object DoldecompIrGenerator {
   }
 
   private def loadGlobalDeclarations(
-      headerRoots: List[Path]
+      headerRoots: List[Path],
+      macros: Map[String, String]
   ): Map[String, GlobalVariableDeclaration] = {
     val sourceFiles = headerRoots.flatMap(collectSourceFiles).distinct
     sourceFiles
       .flatMap { path =>
         val source = new String(Files.readAllBytes(path))
-        CHeaderParser.parseGlobalDeclarations(source)
+        CHeaderParser.parseGlobalDeclarations(source, macros)
       }
       .groupBy(_.name)
       .view
@@ -752,13 +945,14 @@ object DoldecompIrGenerator {
 
   private def loadFieldInitializerLengths(
       headerRoots: List[Path],
-      headerStructs: Map[String, IASTCompositeTypeSpecifier]
+      headerStructs: Map[String, IASTCompositeTypeSpecifier],
+      macros: Map[String, String]
   ): Map[(String, String), Int] = {
     val sourceFiles = headerRoots.flatMap(collectSourceFiles).distinct
     sourceFiles
       .flatMap { path =>
         val source = new String(Files.readAllBytes(path))
-        CHeaderParser.parseStructFieldInitializerLengths(source, headerStructs).toList
+        CHeaderParser.parseStructFieldInitializerLengths(source, headerStructs, macros).toList
       }
       .groupBy(_._1)
       .view
@@ -766,11 +960,33 @@ object DoldecompIrGenerator {
       .toMap
   }
 
-  private def loadStructs(headerRoots: List[Path]): Map[String, IASTCompositeTypeSpecifier] = {
+  private def loadAllMacros(headerRoots: List[Path]): Map[String, String] = {
     val sourceFiles = headerRoots.flatMap(collectSourceFiles).distinct
     sourceFiles.flatMap { path =>
       val source = new String(Files.readAllBytes(path))
-      CHeaderParser.parse(source)
+      CHeaderParser.extractDefineMacros(source).toList
+    }.toMap
+  }
+
+  private def loadStructs(
+      headerRoots: List[Path],
+      macros: Map[String, String]
+  ): Map[String, IASTCompositeTypeSpecifier] = {
+    val sourceFiles = headerRoots.flatMap(collectSourceFiles).distinct
+    sourceFiles.flatMap { path =>
+      val source = new String(Files.readAllBytes(path))
+      CHeaderParser.parse(source, macros)
+    }.toMap
+  }
+
+  private def loadTypedefs(
+      headerRoots: List[Path],
+      macros: Map[String, String]
+  ): Map[String, String] = {
+    val sourceFiles = headerRoots.flatMap(collectSourceFiles).distinct
+    sourceFiles.flatMap { path =>
+      val source = new String(Files.readAllBytes(path))
+      CHeaderParser.parseTypedefs(source, macros).toList
     }.toMap
   }
 
@@ -802,18 +1018,32 @@ object DoldecompIrGenerator {
 
   private def collectReachableStructs(
       operations: List[OperationModel],
-      headerStructs: Map[String, IASTCompositeTypeSpecifier]
+      headerStructs: Map[String, IASTCompositeTypeSpecifier],
+      typedefs: Map[String, String]
   ): List[(String, IASTCompositeTypeSpecifier)] = {
     val visited = mutable.LinkedHashSet.empty[String]
 
+    def resolve(name: String): String = {
+      val normalized = CHeaderParser.normalizeTypeName(name).replaceAll("\\s+", "")
+      if (headerStructs.contains(normalized)) normalized
+      else {
+        val resolved = resolveTypedef(name, typedefs)
+        if (headerStructs.contains(resolved)) resolved else normalized
+      }
+    }
+
     def visit(structName: String): Unit = {
-      if (!visited.contains(structName)) {
-        visited += structName
-        headerStructs.get(structName).foreach { struct =>
+      val resolved = resolve(structName)
+      if (!visited.contains(resolved)) {
+        visited += resolved
+        headerStructs.get(resolved).foreach { struct =>
           CHeaderParser.extractFields(struct).foreach { field =>
             val normalized = CHeaderParser.normalizeTypeName(field.typeName).replaceAll("\\s+", "")
+            val fieldResolved = resolveTypedef(field.typeName, typedefs)
             if (headerStructs.contains(normalized)) {
               visit(normalized)
+            } else if (headerStructs.contains(fieldResolved)) {
+              visit(fieldResolved)
             }
           }
         }
@@ -821,9 +1051,7 @@ object DoldecompIrGenerator {
     }
 
     operations.foreach { operation =>
-      if (headerStructs.contains(operation.rootTypeName)) {
-        visit(operation.rootTypeName)
-      }
+      visit(operation.rootTypeName)
     }
     visited.toList.flatMap(name => headerStructs.get(name).map(name -> _))
   }
@@ -838,6 +1066,7 @@ object DoldecompIrGenerator {
 
   private def toCamelCase(value: String): String = {
     val pascal = toPascalCase(value)
-    if (pascal.isEmpty) "value" else s"${pascal.head.toLower}${pascal.drop(1)}"
+    val camel = if (pascal.isEmpty) "value" else s"${pascal.head.toLower}${pascal.drop(1)}"
+    if (camel.head.isDigit) s"_$camel" else camel
   }
 }

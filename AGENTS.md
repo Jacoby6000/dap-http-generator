@@ -12,9 +12,9 @@ The entrypoint is `io.github.jacoby6000.daphttp.Cli` (a Decline CLI) with three 
 
 - `smithy` — load API definitions from Smithy model files (`--smithy <path>` repeatable, `--watch`).
 - `cheaders` — load from C headers + a doldecomp symbols file (`--symbols`, `--headers` repeatable,
-  `--namespace`, `--service`, `--word-size`) and run the HTTP server.
+  `--namespace`, `--service`, `--word-size`, `--data-sections`) and run the HTTP server.
 - `cheaders-smithy` — generate a Smithy model from C headers + symbols (`--symbols`, `--headers`,
-  `--namespace`, `--service`, `--word-size`, `--output`).
+  `--namespace`, `--service`, `--word-size`, `--data-sections`, `--output`).
 
 `smithy` and `cheaders` share `--dap-host/--dap-port` (default `127.0.0.1:4711`) and
 `--bind-host/--bind-port` (default `0.0.0.0:8080`). Run with `sbt "run <subcommand> ..."`.

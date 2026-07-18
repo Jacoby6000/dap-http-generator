@@ -36,6 +36,16 @@ object Cli
       bindPort: Int
   )
 
+  private val dataSectionsOpt: Opts[Set[String]] =
+    Opts
+      .option[String](
+        "data-sections",
+        "Comma-separated list of additional section names to scan for data symbols (e.g. .mydata,.custom)",
+        metavar = "sections"
+      )
+      .map(_.split(',').map(_.trim).filter(_.nonEmpty).toSet)
+      .withDefault(Set.empty)
+
   private val serverConfigOpts: Opts[ServerConfig] = (
     Opts
       .option[String]("dap-host", "DAP debug adapter host", metavar = "host")
@@ -111,11 +121,20 @@ object Cli
         Opts
           .option[Int]("word-size", "Pointer word size in bits", metavar = "bits")
           .withDefault(32),
+        dataSectionsOpt,
         serverConfigOpts
-      ).mapN { (symbolsPath, headerPaths, namespace, service, wordSize, serverConfig) =>
-        IO.blocking(
-          loadCHeaderPlans(symbolsPath, headerPaths.toList, namespace, service, wordSize)
-        ).flatMap(runServer(serverConfig, _, Nil, watch = false))
+      ).mapN {
+        (symbolsPath, headerPaths, namespace, service, wordSize, dataSections, serverConfig) =>
+          IO.blocking(
+            loadCHeaderPlans(
+              symbolsPath,
+              headerPaths.toList,
+              namespace,
+              service,
+              wordSize,
+              dataSections
+            )
+          ).flatMap(runServer(serverConfig, _, Nil, watch = false))
       }
     )
 
@@ -140,8 +159,9 @@ object Cli
         Opts
           .option[Int]("word-size", "Pointer word size in bits", metavar = "bits")
           .withDefault(32),
+        dataSectionsOpt,
         Opts.option[Path]("output", "Output Smithy model file path", metavar = "path")
-      ).mapN { (symbolsPath, headerPaths, namespace, service, wordSize, outputPath) =>
+      ).mapN { (symbolsPath, headerPaths, namespace, service, wordSize, dataSections, outputPath) =>
         IO.blocking(
           emitSmithyFromCHeaders(
             symbolsPath,
@@ -149,6 +169,7 @@ object Cli
             namespace,
             service,
             wordSize,
+            dataSections,
             outputPath
           )
         ).map {
@@ -174,7 +195,11 @@ object Cli
 
   private def loadModel(paths: List[Path]): Either[List[String], Model] = {
     val smithyFiles = paths.flatMap(collectSmithyFiles).distinct
+    val traitsPath = SmithyIrEmitter.dapHttpTraitsPath
     val assembler = Model.assembler()
+    if (Files.exists(traitsPath)) {
+      assembler.addImport(traitsPath.toString)
+    }
     smithyFiles.foreach(path => assembler.addImport(path.toString))
     val result = assembler.assemble()
     if (result.isBroken) {
@@ -189,9 +214,17 @@ object Cli
       headerPaths: List[Path],
       namespace: String,
       service: String,
-      wordSize: Int
+      wordSize: Int,
+      extraDataSections: Set[String]
   ): RoutePlansLoadResult =
-    loadIrFromCHeaders(symbolsPath, headerPaths, namespace, service, wordSize) match {
+    loadIrFromCHeaders(
+      symbolsPath,
+      headerPaths,
+      namespace,
+      service,
+      wordSize,
+      extraDataSections
+    ) match {
       case Left(errors) =>
         errors.foreach(error => DapHttpLoggers.irSourceDoldecomp.warn("{}", error))
         RoutePlansLoadResult(Map.empty, errors)
@@ -210,14 +243,16 @@ object Cli
       headerPaths: List[Path],
       namespace: String,
       service: String,
-      wordSize: Int
+      wordSize: Int,
+      extraDataSections: Set[String]
   ): Either[List[String], IrGenerationResult] =
     DoldecompIrGenerator.generateFromPaths(
       symbolsPath,
       headerPaths,
       namespace,
       service,
-      wordSize
+      wordSize,
+      extraDataSections
     )
 
   private def emitSmithyFromCHeaders(
@@ -226,10 +261,11 @@ object Cli
       namespace: String,
       service: String,
       wordSize: Int,
+      extraDataSections: Set[String],
       outputPath: Path
   ): Either[List[String], Unit] =
-    loadIrFromCHeaders(symbolsPath, headerPaths, namespace, service, wordSize).flatMap {
-      generation =>
+    loadIrFromCHeaders(symbolsPath, headerPaths, namespace, service, wordSize, extraDataSections)
+      .flatMap { generation =>
         if (generation.services.isEmpty) {
           Left(generation.warnings)
         } else {
@@ -237,7 +273,7 @@ object Cli
           generation.warnings.foreach(System.err.println)
           SmithyIrEmitter.emitToPath(generation.services, outputPath)
         }
-    }
+      }
 
   private def collectSmithyFiles(path: Path): List[Path] = {
     if (!Files.exists(path)) {

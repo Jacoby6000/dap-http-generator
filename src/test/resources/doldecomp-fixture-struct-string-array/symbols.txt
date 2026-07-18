@@ -1,0 +1,1 @@
+gStringTable = .data:0x80400000; // type:object size:0x14 ctype:StringTable

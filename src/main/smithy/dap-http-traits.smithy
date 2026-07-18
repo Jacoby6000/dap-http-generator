@@ -83,6 +83,25 @@ structure f64 {}
 @trait(selector: ":is(member)")
 structure char {}
 
+@trait(selector: ":is(operation)")
+integer pointerDepth
+
+@trait(selector: ":is(operation)")
+integer outerArrayLength
+
+@trait(selector: ":is(operation)")
+boolean followCString
+
+@trait(selector: ":is(operation)")
+string pointeeShape
+
+@trait(selector: ":is(member)")
+structure functionPointer {
+    name: String
+    output: String
+    params: String
+}
+
 list Bytes {
     member: Byte
 }

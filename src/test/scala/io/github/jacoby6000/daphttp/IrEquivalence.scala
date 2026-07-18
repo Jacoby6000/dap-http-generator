@@ -50,6 +50,11 @@ object IrEquivalence extends Assertions {
   final case class NormalizedMap(name: String, key: NormalizedValue, value: NormalizedValue)
       extends NormalizedValue
   final case class NormalizedRef(name: String) extends NormalizedValue
+  final case class NormalizedFunctionPointer(
+      name: String,
+      params: List[(String, String)],
+      returnType: String
+  ) extends NormalizedValue
 
   def normalize(services: List[IrService]): NormalizedModel =
     NormalizedModel(services.map(normalizeService).sortBy(_.name))
@@ -94,35 +99,44 @@ object IrEquivalence extends Assertions {
     )
 
   private def normalizeValue(member: IrMember): NormalizedValue =
-    if (member.isPointer) {
-      NormalizedScalar(member.primitiveOverride.getOrElse(IrPrimitive.LongWord))
-    } else {
-      member.target match {
-        case IrType.Primitive(kind) =>
-          NormalizedScalar(member.primitiveOverride.getOrElse(kind))
-        case struct: IrType.Struct =>
-          NormalizedStructType(normalizeStruct(struct))
-        case union: IrType.Union =>
-          NormalizedUnion(
-            name = union.id.getName,
-            members = union.members.map(normalizeMember)
-          )
-        case listType: IrType.ListType =>
-          NormalizedList(
-            name = listType.id.getName,
-            element = normalizeTypeValue(listType.element),
-            bytesAlias = listType.bytesAlias,
-            bitsAlias = listType.bitsAlias
-          )
-        case mapType: IrType.MapType =>
-          NormalizedMap(
-            name = mapType.id.getName,
-            key = normalizeTypeValue(mapType.key),
-            value = normalizeTypeValue(mapType.value)
-          )
-        case IrType.Ref(id) =>
-          NormalizedRef(id.getName)
-      }
+    member.target match {
+      case fp: IrType.FunctionPointer =>
+        NormalizedFunctionPointer(
+          name = fp.name,
+          params = fp.params.map(p => (p.typeName, p.name)),
+          returnType = fp.returnType
+        )
+      case _ if member.isPointer =>
+        NormalizedScalar(member.primitiveOverride.getOrElse(IrPrimitive.LongWord))
+      case _ =>
+        member.target match {
+          case IrType.Primitive(kind) =>
+            NormalizedScalar(member.primitiveOverride.getOrElse(kind))
+          case struct: IrType.Struct =>
+            NormalizedStructType(normalizeStruct(struct))
+          case union: IrType.Union =>
+            NormalizedUnion(
+              name = union.id.getName,
+              members = union.members.map(normalizeMember)
+            )
+          case listType: IrType.ListType =>
+            NormalizedList(
+              name = listType.id.getName,
+              element = normalizeTypeValue(listType.element),
+              bytesAlias = listType.bytesAlias,
+              bitsAlias = listType.bitsAlias
+            )
+          case mapType: IrType.MapType =>
+            NormalizedMap(
+              name = mapType.id.getName,
+              key = normalizeTypeValue(mapType.key),
+              value = normalizeTypeValue(mapType.value)
+            )
+          case IrType.Ref(id) =>
+            NormalizedRef(id.getName)
+          case _: IrType.FunctionPointer =>
+            throw new IllegalStateException("FunctionPointer should have been handled earlier")
+        }
     }
 
   private def normalizeTypeValue(irType: IrType): NormalizedValue =
@@ -151,6 +165,12 @@ object IrEquivalence extends Assertions {
         NormalizedRef(id.getName)
       case IrType.Primitive(kind) =>
         NormalizedScalar(kind)
+      case fp: IrType.FunctionPointer =>
+        NormalizedFunctionPointer(
+          name = fp.name,
+          params = fp.params.map(p => (p.typeName, p.name)),
+          returnType = fp.returnType
+        )
     }
 
   private def structKind(struct: IrType.Struct): String =

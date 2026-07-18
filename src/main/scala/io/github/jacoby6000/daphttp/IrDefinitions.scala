@@ -92,4 +92,11 @@ object IrType {
   final case class MapType(id: ShapeId, key: IrType, value: IrType) extends IrType
   final case class Primitive(kind: IrPrimitive) extends IrType
   final case class Ref(id: ShapeId) extends IrType
+  final case class FunctionPointer(
+      name: String,
+      params: List[FunctionPointerParam],
+      returnType: String
+  ) extends IrType
 }
+
+final case class FunctionPointerParam(typeName: String, name: String)

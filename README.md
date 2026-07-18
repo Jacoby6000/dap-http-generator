@@ -26,6 +26,15 @@ Server subcommands (`smithy`, `cheaders`) share these flags:
 
 `smithy` also supports `--watch` to reload models when files change.
 
+`cheaders` and `cheaders-smithy` also support:
+
+- `--word-size` (default `32`) — pointer word size in bits (use `64` for 64-bit targets)
+- `--data-sections` (optional) — comma-separated list of additional section names to scan
+  for data symbols (e.g. `--data-sections .mydata,.custom`). The known data sections
+  (`.data`, `.sdata`, `.sdata2`, `.sbss`, `.bss`, `.rodata`) are always included automatically.
+  Unknown sections that don't match known data or code patterns are logged as warnings and
+  skipped; use this flag to include them.
+
 ### Custom C/DAP traits
 
 Traits are defined in `src/main/smithy/dap-http-traits.smithy`:
@@ -144,7 +153,8 @@ sbt "run cheaders \
   --bind-port 8080"
 ```
 
-`cheaders` matches `.data` object symbols to global variable declarations in `.h` and `.c`
+`cheaders` matches object symbols in data sections (`.data`, `.sdata`, `.sdata2`, `.sbss`,
+`.bss`, `.rodata`) to global variable declarations in `.h` and `.c`
 files under `--headers` (for example `GameScene gm_803DDAC0_Scenes[]` in source paired with
 `gm_803DDAC0_Scenes = .data:0x803DDAC0;` in `symbols.txt`). Unsized array lengths are inferred
 from the number of entries in a matching C initializer when present (for example two `{ ... }`

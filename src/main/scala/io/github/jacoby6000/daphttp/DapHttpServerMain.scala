@@ -11,11 +11,11 @@ import io.circe.syntax._
 import org.http4s.HttpRoutes
 import org.http4s.Method.GET
 import org.http4s.Method.POST
+import org.http4s.Response
 import org.http4s.circe.CirceEntityCodec._
 import org.http4s.dsl.io._
 import org.http4s.ember.server.EmberServerBuilder
 import org.http4s.implicits._
-import org.http4s.Response
 import scodec.bits.BitVector
 import software.amazon.smithy.model.Model
 
@@ -128,12 +128,19 @@ object DapHttpServerMain extends IOApp {
       case GET -> Root / "routes" =>
         plansRef.get.flatMap { result =>
           val pointerRoutes = result.routes.toList.flatMap { case (basePath, plan) =>
-            plan.pointerChain.toList.map { chain =>
+            val chainRoutes = plan.pointerChain.toList.map { chain =>
               val suffix = (0 until PointerChainResolver.requiredSegmentCount(chain))
                 .map(_ => "{index}")
                 .mkString("/")
               s"$basePath/$suffix"
             }
+            val memberRoutes = plan.memberSubRoutes.flatMap { sub =>
+              if (sub.isArray)
+                s"$basePath/${sub.memberName}/{index}" :: Nil
+              else
+                s"$basePath/${sub.memberName}" :: Nil
+            }
+            chainRoutes ++ memberRoutes
           }
           Ok(
             Json.obj(
@@ -155,13 +162,18 @@ object DapHttpServerMain extends IOApp {
         val routePath = request.uri.path.renderString
         plansRef.get.flatMap { result =>
           matchRoute(routePath, result.routes) match {
+            case Some((routePlan, chainSegments)) if chainSegments.nonEmpty =>
+              servePointerChainRoute(routePlan, chainSegments, dapClient)
+            case Some((routePlan, _)) =>
+              serveRoutePlan(routePlan, dapClient)
             case None =>
-              NotFound(Json.obj("error" -> Json.fromString(s"No route generated for $routePath")))
-            case Some((routePlan, chainSegments)) =>
-              if (chainSegments.nonEmpty) {
-                servePointerChainRoute(routePlan, chainSegments, dapClient)
-              } else {
-                serveRoutePlan(routePlan, dapClient)
+              matchMemberSubRoute(routePath, result.routes) match {
+                case Some((_, subRoute, index)) =>
+                  serveMemberSubRoute(routePath, subRoute, index, dapClient)
+                case None =>
+                  NotFound(
+                    Json.obj("error" -> Json.fromString(s"No route generated for $routePath"))
+                  )
               }
           }
         }
@@ -189,6 +201,32 @@ object DapHttpServerMain extends IOApp {
           }
       }.flatten
     }
+
+  private def matchMemberSubRoute(
+      path: String,
+      routes: Map[String, RoutePlan]
+  ): Option[(RoutePlan, MemberSubRoute, Option[Int])] =
+    routes.collectFirst(Function.unlift { case (basePath, plan: RoutePlan) =>
+      if (!path.startsWith(s"$basePath/") || path.length <= basePath.length + 1) None
+      else {
+        val suffix = path.stripPrefix(s"$basePath/")
+        val parts = suffix.split("/")
+        parts.headOption.flatMap { memberName =>
+          plan.memberSubRoutes.find(_.memberName == memberName).flatMap { sub =>
+            parts.toList.drop(1) match {
+              case Nil if !sub.isArray =>
+                Some((plan, sub, None))
+              case Nil if sub.isArray =>
+                None
+              case indexStr :: Nil if sub.isArray && indexStr.forall(_.isDigit) =>
+                Some((plan, sub, Some(indexStr.toInt)))
+              case _ =>
+                None
+            }
+          }
+        }
+      }
+    })
 
   private def serveRoutePlan(routePlan: RoutePlan, dapClient: DapClient): IO[Response[IO]] =
     routePlan.reads
@@ -277,7 +315,12 @@ object DapHttpServerMain extends IOApp {
                   }
                   val resolvedDecoded = chain.pointeeType match {
                     case struct: IrType.Struct =>
-                      resolveStructCStringPointers(struct, decoded, dapClient)
+                      resolveStructCStringPointers(
+                        struct,
+                        decoded,
+                        dapClient,
+                        Some(chain.wordSizeBits)
+                      )
                     case _ =>
                       IO.pure(decoded)
                   }
@@ -297,6 +340,195 @@ object DapHttpServerMain extends IOApp {
             }
         }
     }
+
+  private def serveMemberSubRoute(
+      routePath: String,
+      sub: MemberSubRoute,
+      index: Option[Int],
+      dapClient: DapClient
+  ): IO[Response[IO]] =
+    sub match {
+      case v: MemberSubRoute.ValueSubRoute =>
+        serveValueSubRoute(routePath, v, index, dapClient)
+      case p: MemberSubRoute.PointerSubRoute =>
+        servePointerSubRoute(routePath, p, index, dapClient)
+    }
+
+  private def serveValueSubRoute(
+      routePath: String,
+      sub: MemberSubRoute.ValueSubRoute,
+      index: Option[Int],
+      dapClient: DapClient
+  ): IO[Response[IO]] = {
+    val elementSize = sub.elementSizeBytes.getOrElse(0)
+    val readAddress = sub.baseAddress + sub.memberOffsetBytes.toLong +
+      index.map(_.toLong * elementSize).getOrElse(0L)
+    sub.elementSizeBytes match {
+      case None =>
+        Ok(
+          Json.obj(
+            "route" -> Json.fromString(routePath),
+            "member" -> Json.fromString(sub.memberName),
+            "index" -> index.map(Json.fromInt).getOrElse(Json.Null),
+            "address" -> Json.fromString(f"0x$readAddress%x"),
+            "error" -> Json.fromString("Unable to determine member size.")
+          )
+        )
+      case Some(sizeBytes) =>
+        dapClient.readMemory(readAddress, sizeBytes).flatMap {
+          case Left(error) =>
+            Ok(
+              Json.obj(
+                "route" -> Json.fromString(routePath),
+                "member" -> Json.fromString(sub.memberName),
+                "index" -> index.map(Json.fromInt).getOrElse(Json.Null),
+                "address" -> Json.fromString(f"0x$readAddress%x"),
+                "error" -> Json.fromString(error)
+              )
+            )
+          case Right(data) =>
+            val decoded = sub.decodeCodec match {
+              case None        => Json.Null
+              case Some(codec) =>
+                Try(Base64.getDecoder.decode(data)).toOption
+                  .flatMap(bytes => codec.decode(BitVector(bytes)).toOption.map(_.value))
+                  .getOrElse(Json.Null)
+            }
+            val resolvedDecoded = sub.valueType match {
+              case Some(struct: IrType.Struct) =>
+                resolveStructCStringPointers(
+                  struct,
+                  decoded,
+                  dapClient,
+                  Some(sub.wordSizeBits)
+                )
+              case _ =>
+                IO.pure(decoded)
+            }
+            resolvedDecoded.flatMap { finalDecoded =>
+              Ok(
+                Json.obj(
+                  "route" -> Json.fromString(routePath),
+                  "member" -> Json.fromString(sub.memberName),
+                  "index" -> index.map(Json.fromInt).getOrElse(Json.Null),
+                  "address" -> Json.fromString(f"0x$readAddress%x"),
+                  "bytes" -> Json.fromInt(sizeBytes),
+                  "decoded" -> finalDecoded
+                )
+              )
+            }
+        }
+    }
+  }
+
+  private def servePointerSubRoute(
+      routePath: String,
+      sub: MemberSubRoute.PointerSubRoute,
+      index: Option[Int],
+      dapClient: DapClient
+  ): IO[Response[IO]] = {
+    val wordBytes = sub.wordSizeBits / 8
+    val pointerAddress = sub.baseAddress + sub.memberOffsetBytes.toLong + index
+      .map(_.toLong * wordBytes)
+      .getOrElse(0L)
+
+    def readPointerAt(address: Long): IO[Either[String, Long]] =
+      dapClient.readMemory(address, wordBytes).map {
+        case Left(error) => Left(error)
+        case Right(data) =>
+          Try(Base64.getDecoder.decode(data)).toOption match {
+            case Some(bytes) =>
+              Right(PointerChainResolver.pointerValue(bytes, sub.endian))
+            case None =>
+              Left("Failed to decode pointer bytes from DAP response.")
+          }
+      }
+
+    readPointerAt(pointerAddress).flatMap {
+      case Left(error) =>
+        Ok(
+          Json.obj(
+            "route" -> Json.fromString(routePath),
+            "address" -> Json.fromString(f"0x$pointerAddress%x"),
+            "error" -> Json.fromString(error)
+          )
+        )
+      case Right(targetAddress) =>
+        val masked = maskToWordSize(targetAddress, Some(sub.wordSizeBits))
+        if (sub.followCString) {
+          readNullTerminatedCString(dapClient, masked).flatMap { value =>
+            Ok(
+              Json.obj(
+                "route" -> Json.fromString(routePath),
+                "member" -> Json.fromString(sub.memberName),
+                "index" -> index.map(Json.fromInt).getOrElse(Json.Null),
+                "pointerAddress" -> Json.fromString(f"0x$pointerAddress%x"),
+                "address" -> Json.fromString(f"0x$masked%x"),
+                "decoded" -> Json.fromString(value)
+              )
+            )
+          }
+        } else {
+          sub.pointeeSizeBytes match {
+            case None =>
+              Ok(
+                Json.obj(
+                  "route" -> Json.fromString(routePath),
+                  "member" -> Json.fromString(sub.memberName),
+                  "index" -> index.map(Json.fromInt).getOrElse(Json.Null),
+                  "address" -> Json.fromString(f"0x$masked%x"),
+                  "error" -> Json.fromString("Unable to determine pointee size.")
+                )
+              )
+            case Some(sizeBytes) =>
+              dapClient.readMemory(masked, sizeBytes).flatMap {
+                case Left(error) =>
+                  Ok(
+                    Json.obj(
+                      "route" -> Json.fromString(routePath),
+                      "member" -> Json.fromString(sub.memberName),
+                      "index" -> index.map(Json.fromInt).getOrElse(Json.Null),
+                      "address" -> Json.fromString(f"0x$masked%x"),
+                      "error" -> Json.fromString(error)
+                    )
+                  )
+                case Right(data) =>
+                  val decoded = sub.pointeeDecodeCodec match {
+                    case None        => Json.Null
+                    case Some(codec) =>
+                      Try(Base64.getDecoder.decode(data)).toOption
+                        .flatMap(bytes => codec.decode(BitVector(bytes)).toOption.map(_.value))
+                        .getOrElse(Json.Null)
+                  }
+                  val resolvedDecoded = sub.pointeeType match {
+                    case Some(struct: IrType.Struct) =>
+                      resolveStructCStringPointers(
+                        struct,
+                        decoded,
+                        dapClient,
+                        Some(sub.wordSizeBits)
+                      )
+                    case _ =>
+                      IO.pure(decoded)
+                  }
+                  resolvedDecoded.flatMap { finalDecoded =>
+                    Ok(
+                      Json.obj(
+                        "route" -> Json.fromString(routePath),
+                        "member" -> Json.fromString(sub.memberName),
+                        "index" -> index.map(Json.fromInt).getOrElse(Json.Null),
+                        "pointerAddress" -> Json.fromString(f"0x$pointerAddress%x"),
+                        "address" -> Json.fromString(f"0x$masked%x"),
+                        "bytes" -> Json.fromInt(sizeBytes),
+                        "decoded" -> finalDecoded
+                      )
+                    )
+                  }
+              }
+          }
+        }
+    }
+  }
 
   private def resolvePointerChainAddress(
       chain: PointerChainPlan,
@@ -359,7 +591,11 @@ object DapHttpServerMain extends IOApp {
 
   private def loadModel(smithyPaths: List[Path]): Either[List[String], Model] = {
     val smithyFiles = smithyPaths.flatMap(collectSmithyFiles).distinct
+    val traitsPath = SmithyIrEmitter.dapHttpTraitsPath
     val assembler = Model.assembler()
+    if (Files.exists(traitsPath)) {
+      assembler.addImport(traitsPath.toString)
+    }
     smithyFiles.foreach(path => assembler.addImport(path.toString))
     val result = assembler.assemble()
     if (result.isBroken) {
@@ -412,6 +648,8 @@ object DapHttpServerMain extends IOApp {
   ): IO[Json] =
     if (readPlan.cStringPointer) {
       decodeCStringPointer(readPlan, base64Data, dapClient)
+    } else if (readPlan.cStringPointerArray) {
+      decodeCStringPointerArray(readPlan, base64Data, dapClient)
     } else {
       val decoded = readPlan.decodeCodec match {
         case None        => Json.Null
@@ -422,7 +660,7 @@ object DapHttpServerMain extends IOApp {
       }
       readPlan.decodeType match {
         case Some(struct: IrType.Struct) =>
-          resolveStructCStringPointers(struct, decoded, dapClient)
+          resolveStructCStringPointers(struct, decoded, dapClient, readPlan.wordSizeBits)
         case _ =>
           IO.pure(decoded)
       }
@@ -431,14 +669,42 @@ object DapHttpServerMain extends IOApp {
   private def resolveStructCStringPointers(
       struct: IrType.Struct,
       decoded: Json,
-      dapClient: DapClient
+      dapClient: DapClient,
+      wordSizeBits: Option[Int]
   ): IO[Json] =
     struct.members.foldLeft(IO.pure(decoded)) { (accIO, member) =>
       accIO.flatMap { json =>
-        if (member.isPointer && member.primitiveOverride.contains(IrPrimitive.Char)) {
+        val isCharPointerArray =
+          member.isPointer && member.isArray && member.primitiveOverride.contains(IrPrimitive.Char)
+        val isSingleCharPointer =
+          member.isPointer && !member.isArray && member.primitiveOverride.contains(IrPrimitive.Char)
+        if (isCharPointerArray) {
+          json.hcursor.downField(member.name).as[List[Json]] match {
+            case Right(elements) =>
+              elements
+                .foldLeft(IO.pure(Vector.empty[Json])) { (acc2, element) =>
+                  acc2.flatMap { vec =>
+                    element.as[Long].toOption match {
+                      case Some(rawAddr) =>
+                        val addr = maskToWordSize(rawAddr, wordSizeBits)
+                        readNullTerminatedCString(dapClient, addr)
+                          .map(value => vec :+ Json.fromString(value))
+                      case None =>
+                        IO.pure(vec :+ element)
+                    }
+                  }
+                }
+                .map { strs =>
+                  json.mapObject(_.add(member.name, Json.arr(strs: _*)))
+                }
+            case _ =>
+              IO.pure(json)
+          }
+        } else if (isSingleCharPointer) {
           json.hcursor.downField(member.name).as[Long].toOption match {
-            case Some(address) =>
-              readNullTerminatedCString(dapClient, address).map { value =>
+            case Some(rawAddr) =>
+              val addr = maskToWordSize(rawAddr, wordSizeBits)
+              readNullTerminatedCString(dapClient, addr).map { value =>
                 json.mapObject(_.add(member.name, Json.fromString(value)))
               }
             case None =>
@@ -449,8 +715,9 @@ object DapHttpServerMain extends IOApp {
             case nested: IrType.Struct =>
               json.hcursor.downField(member.name).focus match {
                 case Some(nestedJson) =>
-                  resolveStructCStringPointers(nested, nestedJson, dapClient).map { resolved =>
-                    json.mapObject(_.add(member.name, resolved))
+                  resolveStructCStringPointers(nested, nestedJson, dapClient, wordSizeBits).map {
+                    resolved =>
+                      json.mapObject(_.add(member.name, resolved))
                   }
                 case None =>
                   IO.pure(json)
@@ -461,6 +728,45 @@ object DapHttpServerMain extends IOApp {
         }
       }
     }
+
+  private def maskToWordSize(value: Long, wordSizeBits: Option[Int]): Long =
+    wordSizeBits match {
+      case Some(bits) if bits < 64 => value & ((1L << bits) - 1L)
+      case _                       => value
+    }
+
+  private def decodeCStringPointerArray(
+      readPlan: ReadPlan,
+      base64Data: String,
+      dapClient: DapClient
+  ): IO[Json] = {
+    val decoded = readPlan.decodeCodec match {
+      case None        => Json.Null
+      case Some(codec) =>
+        Try(Base64.getDecoder.decode(base64Data)).toOption
+          .flatMap(bytes => codec.decode(BitVector(bytes)).toOption.map(_.value))
+          .getOrElse(Json.Null)
+    }
+    decoded.asArray match {
+      case Some(elements) =>
+        elements
+          .foldLeft(IO.pure(Vector.empty[Json])) { (acc, element) =>
+            acc.flatMap { vec =>
+              element.as[Long].toOption match {
+                case Some(rawAddr) =>
+                  val addr = maskToWordSize(rawAddr, readPlan.wordSizeBits)
+                  readNullTerminatedCString(dapClient, addr)
+                    .map(value => vec :+ Json.fromString(value))
+                case None =>
+                  IO.pure(vec :+ element)
+              }
+            }
+          }
+          .map(Json.arr)
+      case None =>
+        IO.pure(decoded)
+    }
+  }
 
   private def shouldFollowCString(chain: PointerChainPlan): Boolean =
     chain.followCString || chain.pointeeType == IrType.Primitive(IrPrimitive.Char)

@@ -11,7 +11,8 @@ final case class ReadPlan(
     endian: IrEndian,
     wordSizeBits: Option[Int],
     decodeCodec: Option[Codec[Json]],
-    cStringPointer: Boolean
+    cStringPointer: Boolean,
+    cStringPointerArray: Boolean = false
 )
 final case class PointerChainPlan(
     pointeeType: IrType,
@@ -24,10 +25,48 @@ final case class PointerChainPlan(
     pointeeDecodeCodec: Option[Codec[Json]],
     followCString: Boolean = false
 )
+sealed trait MemberSubRoute {
+  def memberName: String
+  def baseAddress: Long
+  def memberOffsetBytes: Int
+  def isArray: Boolean
+  def arrayLength: Option[Int]
+  def wordSizeBits: Int
+  def endian: IrEndian
+}
+object MemberSubRoute {
+  final case class ValueSubRoute(
+      memberName: String,
+      baseAddress: Long,
+      memberOffsetBytes: Int,
+      isArray: Boolean,
+      arrayLength: Option[Int],
+      wordSizeBits: Int,
+      endian: IrEndian,
+      valueType: Option[IrType],
+      elementSizeBytes: Option[Int],
+      decodeCodec: Option[Codec[Json]]
+  ) extends MemberSubRoute
+
+  final case class PointerSubRoute(
+      memberName: String,
+      baseAddress: Long,
+      memberOffsetBytes: Int,
+      isArray: Boolean,
+      arrayLength: Option[Int],
+      wordSizeBits: Int,
+      endian: IrEndian,
+      pointeeType: Option[IrType],
+      pointeeSizeBytes: Option[Int],
+      pointeeDecodeCodec: Option[Codec[Json]],
+      followCString: Boolean
+  ) extends MemberSubRoute
+}
 final case class RoutePlan(
     path: String,
     reads: List[ReadPlan],
-    pointerChain: Option[PointerChainPlan] = None
+    pointerChain: Option[PointerChainPlan] = None,
+    memberSubRoutes: List[MemberSubRoute] = Nil
 )
 final case class RoutePlansLoadResult(
     routes: Map[String, RoutePlan],
