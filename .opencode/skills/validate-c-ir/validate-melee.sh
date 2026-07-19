@@ -182,6 +182,7 @@ else
   exit 1
 fi
 
+cheaders_route_count=0
 cheaders_routes_json=$(curl -sf "http://127.0.0.1:${CHEADERS_PORT}/routes" || true)
 if [ -z "$cheaders_routes_json" ]; then
   record_fail "cheaders /routes returned no body"
@@ -236,6 +237,7 @@ else
   exit 1
 fi
 
+smithy_route_count=0
 smithy_routes_json=$(curl -sf "http://127.0.0.1:${SMITHY_PORT}/routes" || true)
 if [ -z "$smithy_routes_json" ]; then
   record_fail "smithy /routes returned no body"

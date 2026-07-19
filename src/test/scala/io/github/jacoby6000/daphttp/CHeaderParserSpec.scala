@@ -372,6 +372,33 @@ class CHeaderParserSpec extends AnyFunSuite {
     assert(declaration.pointerDepth == 2)
   }
 
+  test("registers globals defined with an inline struct definition") {
+    val source =
+      """
+        |struct InlineTag {
+        |    u32 value;
+        |} g_inline_tag;
+        |""".stripMargin
+
+    val declaration = CHeaderParser.parseGlobalDeclarations(source).head
+
+    assert(declaration.name == "g_inline_tag")
+    assert(declaration.typeName == "InlineTag")
+    assert(!declaration.isArray)
+    assert(declaration.pointerDepth == 0)
+  }
+
+  test("does not treat typedef struct aliases as globals") {
+    val source =
+      """
+        |typedef struct AliasTag {
+        |    u32 value;
+        |} AliasTag;
+        |""".stripMargin
+
+    assert(CHeaderParser.parseGlobalDeclarations(source).isEmpty)
+  }
+
   test("parses anonymous union members with shared union groups") {
     val source =
       """

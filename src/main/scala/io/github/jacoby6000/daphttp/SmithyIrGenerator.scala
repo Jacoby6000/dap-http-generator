@@ -292,7 +292,8 @@ object SmithyIrGenerator {
       endianOverride = endianValue(member, EndianTrait),
       primitiveOverride =
         if (isFuncPointer) None
-        else memberPrimitiveOverride(member)
+        else memberPrimitiveOverride(member),
+      readSizeBytes = intTraitValue(member, SizeTrait)
     )
   }
 

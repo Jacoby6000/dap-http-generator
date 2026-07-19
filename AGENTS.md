@@ -108,5 +108,8 @@ flowchart LR
   and array elements of structs), including pointees from pointer routes. Top-level response
   envelopes no longer carry a separate `address`/`offset` field for the decoded value;
   `pointerAddress` on pointer sub-routes still names where the pointer slot itself was read.
+- Member `@size(N)` (also structure `@size`) round-trips doldecomp symbol `size:` as
+  `IrMember.readSizeBytes` through `cheaders-smithy` → `smithy`. Structure `@size` still means
+  declared structure width; on members it is the explicit DAP read width.
 - First `sbt` invocation downloads sbt/Scala launchers and Coursier deps; expect a slow cold start.
   Building the server also builds the Scala.js UI via `resourceGenerators`.

@@ -409,7 +409,8 @@ object HttpRouteIrEmitter {
       pathPrefix: String,
       endian: IrEndian,
       wordSize: Option[Int],
-      errors: ListBuffer[String]
+      errors: ListBuffer[String],
+      sizeBytesOverride: Option[Int] = None
   ): List[ReadPlan] = {
     irType match {
       case struct: IrType.Struct =>
@@ -424,7 +425,9 @@ object HttpRouteIrEmitter {
               errors += s"${struct.id}: DAP-backed structures must be reachable from @staticAddress members."
               Nil
             case Some(address) =>
-              structureSizeBytes(struct, wordSize, errors) match {
+              // Prefer the enclosing member's symbol/read @size when layout-inferred width differs
+              // (e.g. after Smithy round-trip drops C offset comments).
+              sizeBytesOverride.orElse(structureSizeBytes(struct, wordSize, errors)) match {
                 case Some(sizeBytes) =>
                   List(
                     ReadPlan(
@@ -467,7 +470,8 @@ object HttpRouteIrEmitter {
                   memberPath,
                   member.endianOverride.getOrElse(endian),
                   wordSize,
-                  errors
+                  errors,
+                  sizeBytesOverride = member.readSizeBytes
                 )
               case _ =>
                 memberAddress.flatMap { address =>

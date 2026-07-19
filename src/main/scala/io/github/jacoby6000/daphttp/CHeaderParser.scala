@@ -180,12 +180,16 @@ object CHeaderParser {
     declaration match {
       case simple: IASTSimpleDeclaration =>
         simple.getDeclSpecifier match {
-          case composite: IASTCompositeTypeSpecifier if composite.getMembers.nonEmpty =>
-            Nil
           case composite: IASTCompositeTypeSpecifier =>
-            val typeName =
-              normalizeTypeName(Option(composite.getName).map(_.toString).getOrElse(""))
-            if (typeName.isEmpty) Nil else extractGlobalDeclarators(typeName, simple)
+            // Skip typedef struct Foo { ... } Foo; — those declarators are type aliases, not globals.
+            // Keep `struct Tag { ... } symbol;` so declaration lookup can resolve the symbol.
+            if (simple.getDeclSpecifier.getStorageClass == IASTDeclSpecifier.sc_typedef) {
+              Nil
+            } else {
+              val typeName =
+                normalizeTypeName(Option(composite.getName).map(_.toString).getOrElse(""))
+              if (typeName.isEmpty) Nil else extractGlobalDeclarators(typeName, simple)
+            }
           case _ =>
             val typeName = normalizeTypeName(simple.getDeclSpecifier.getRawSignature)
             if (typeName.isEmpty) Nil else extractGlobalDeclarators(typeName, simple)

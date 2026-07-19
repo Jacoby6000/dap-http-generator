@@ -2,6 +2,7 @@ package io.github.jacoby6000.daphttp
 
 import io.circe.Json
 import org.scalatest.funsuite.AnyFunSuite
+import software.amazon.smithy.model.Model
 
 import java.nio.file.Paths
 
@@ -170,6 +171,7 @@ class DoldecompSmithyGeneratorIntegrationSpec extends AnyFunSuite {
     val valueMember = operation.output.members.head
 
     assert(operation.name == "GetGm803DDAC0Scenes")
+    // ctype:GameScene is present in symbols.txt; array metadata must still come from the C decl.
     assert(valueMember.isArray)
     assert(valueMember.arrayLength.contains(2))
 
@@ -179,6 +181,39 @@ class DoldecompSmithyGeneratorIntegrationSpec extends AnyFunSuite {
     assert(route.reads.head.address == 0x803ddac0L)
     assert(route.reads.head.sizeBytes == 42)
     assert(route.reads.head.decodeCodec.nonEmpty)
+  }
+
+  test("preserves symbol readSizeBytes through Smithy emit/load") {
+    val fixtureRoot = Paths.get("src/test/resources/doldecomp-fixture-offsets")
+    val original = DoldecompIrGenerator
+      .generateFromPaths(
+        symbolsPath = fixtureRoot.resolve("symbols.txt"),
+        headerRoots = List(fixtureRoot),
+        namespace = "example.doldecomp.offsets",
+        serviceName = "DolDecompApi",
+        wordSizeBits = 32
+      )
+      .toOption
+      .get
+      .services
+
+    val smithyText =
+      SmithyIrEmitter.emit(original).fold(errors => fail(errors.mkString("\n")), identity)
+    val model = Model
+      .assembler()
+      .addImport("src/main/smithy/dap-http-traits.smithy")
+      .addUnparsedModel("offsets.smithy", smithyText)
+      .assemble()
+      .unwrap()
+    val roundTripped = SmithyIrGenerator
+      .generateFromModel(model)
+      .fold(errors => fail(errors.mkString("\n")), identity)
+
+    assert(original.head.operations.head.output.members.head.readSizeBytes.contains(0x0c))
+    assert(roundTripped.head.operations.head.output.members.head.readSizeBytes.contains(0x0c))
+
+    val plans = HttpRouteIrEmitter.emitRoutePlansFromIr(roundTripped)
+    assert(plans.routes("/api/DolDecompApi/padded_struct").reads.head.sizeBytes == 0x0c)
   }
 
   test("returns successful routes when some symbol derivations fail") {

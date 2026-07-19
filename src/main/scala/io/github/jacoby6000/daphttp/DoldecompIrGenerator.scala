@@ -448,7 +448,7 @@ object DoldecompIrGenerator {
       fieldInitializerLengths: Map[(String, String), Int],
       typedefs: Map[String, String]
   ): List[IrMember] =
-    groupBitfieldFields(fields).flatMap {
+    groupBitfieldFields(fields, wordSizeBits).flatMap {
       case RegularFieldGroup(field) =>
         List(
           toIrMember(
@@ -511,7 +511,10 @@ object DoldecompIrGenerator {
       field.copy(offsetBytes = offsets.get((structName, fieldName)).orElse(field.offsetBytes))
     }
 
-  private def groupBitfieldFields(fields: List[StructFieldDecl]): List[StructFieldGroup] = {
+  private def groupBitfieldFields(
+      fields: List[StructFieldDecl],
+      wordSizeBits: Int
+  ): List[StructFieldGroup] = {
     val groups = mutable.ListBuffer.empty[StructFieldGroup]
     val pending = mutable.ListBuffer.empty[StructFieldDecl]
     var pendingType: Option[String] = None
@@ -540,7 +543,7 @@ object DoldecompIrGenerator {
         case Some(width) =>
           val normalizedType =
             CHeaderParser.normalizeTypeName(field.typeName).replaceAll("\\s+", "")
-          val typeBits = primitiveStorageBits(normalizedType).getOrElse(8)
+          val typeBits = primitiveStorageBits(normalizedType, wordSizeBits).getOrElse(8)
           val sameType = pendingType.forall(_ == normalizedType)
           if (pending.nonEmpty && sameType && pendingUsedBits + width <= typeBits) {
             pending += field
@@ -572,8 +575,8 @@ object DoldecompIrGenerator {
     toCamelCase(trimmed)
   }
 
-  private def primitiveStorageBits(normalizedType: String): Option[Int] =
-    primitiveForType(normalizedType).flatMap(bitsForPrimitive(_, Some(32)))
+  private def primitiveStorageBits(normalizedType: String, wordSizeBits: Int): Option[Int] =
+    primitiveForType(normalizedType).flatMap(bitsForPrimitive(_, Some(wordSizeBits)))
 
   private def toBitmaskMember(
       namespace: String,
@@ -813,28 +816,35 @@ object DoldecompIrGenerator {
   private def resolveSymbol(
       symbol: DoldecompSymbol,
       globalDeclarations: Map[String, GlobalVariableDeclaration]
-  ): Option[ResolvedSymbol] =
+  ): Option[ResolvedSymbol] = {
+    val declaration = globalDeclarations.get(symbol.name)
     symbol.cType
       .map { explicitType =>
+        // DESNOTE(jbarber, 2026-07-19): ctype names the element/pointee type, but array length
+        // and pointer depth still come from the matching C global declaration when present.
+        val normalized = CHeaderParser.normalizeTypeName(explicitType).replaceAll("\\s+", "")
+        val pointerFromCtype = normalized.count(_ == '*')
+        val baseType = normalized.replaceAll("\\*", "")
         ResolvedSymbol(
           symbol = symbol,
-          typeName = explicitType,
-          isArray = false,
-          arrayLength = None,
-          pointerDepth = 0
+          typeName = baseType,
+          isArray = declaration.exists(_.isArray),
+          arrayLength = declaration.flatMap(_.resolvedArrayLength),
+          pointerDepth = declaration.map(_.pointerDepth).getOrElse(pointerFromCtype)
         )
       }
       .orElse {
-        globalDeclarations.get(symbol.name).map { declaration =>
+        declaration.map { decl =>
           ResolvedSymbol(
             symbol = symbol,
-            typeName = declaration.typeName,
-            isArray = declaration.isArray,
-            arrayLength = declaration.resolvedArrayLength,
-            pointerDepth = declaration.pointerDepth
+            typeName = decl.typeName,
+            isArray = decl.isArray,
+            arrayLength = decl.resolvedArrayLength,
+            pointerDepth = decl.pointerDepth
           )
         }
       }
+  }
 
   private def validateResolvedType(
       symbolName: String,
@@ -894,16 +904,10 @@ object DoldecompIrGenerator {
 
   private def inferArrayLength(symbol: DoldecompSymbol, elementSizeBytes: Int): Option[Int] =
     symbol.sizeBytes.flatMap { totalSize =>
-      def divided(size: Int): Option[Int] =
-        Option.when(size > 0 && totalSize % size == 0)(totalSize / size)
-
-      divided(elementSizeBytes).orElse {
-        divided(alignTo(elementSizeBytes, 4)).orElse(divided(alignTo(elementSizeBytes, 8)))
-      }
+      Option.when(elementSizeBytes > 0 && totalSize % elementSizeBytes == 0)(
+        totalSize / elementSizeBytes
+      )
     }
-
-  private def alignTo(size: Int, alignment: Int): Int =
-    ((size + alignment - 1) / alignment) * alignment
 
   private def irStructSizeBytes(struct: IrType.MemoryMappedStruct, wordSizeBits: Int): Int = {
     val wordSize = Some(wordSizeBits)
@@ -911,7 +915,7 @@ object DoldecompIrGenerator {
       struct.members
         .flatMap { member =>
           for {
-            offset <- member.offsetBytes.orElse(Some(0))
+            offset <- member.offsetBytes
             sizeBytes <- irMemberSizeBytes(member, wordSize)
           } yield offset + sizeBytes
         }

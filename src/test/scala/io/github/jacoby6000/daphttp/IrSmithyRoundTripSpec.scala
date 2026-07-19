@@ -206,6 +206,7 @@ class IrSmithyRoundTripSpec extends AnyFunSuite {
         |use com.jacoby6000.daphttp#char
         |use com.jacoby6000.daphttp#length
         |use com.jacoby6000.daphttp#pointer
+        |use com.jacoby6000.daphttp#size
         |use com.jacoby6000.daphttp#staticAddress
         |use com.jacoby6000.daphttp#u64
         |use com.jacoby6000.daphttp#wordSize
@@ -222,6 +223,7 @@ class IrSmithyRoundTripSpec extends AnyFunSuite {
         |
         |structure GetInfoOutput {
         |    @staticAddress("0x1000")
+        |    @size(17)
         |    @pointer
         |    @char
         |    label: Byte

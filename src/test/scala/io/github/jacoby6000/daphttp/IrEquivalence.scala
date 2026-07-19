@@ -33,7 +33,8 @@ object IrEquivalence extends Assertions {
       isPointer: Boolean,
       isArray: Boolean,
       arrayLength: Option[Int],
-      endianOverride: Option[IrEndian]
+      endianOverride: Option[IrEndian],
+      readSizeBytes: Option[Int]
   )
 
   sealed trait NormalizedValue
@@ -100,7 +101,8 @@ object IrEquivalence extends Assertions {
       isPointer = member.isPointer,
       isArray = member.isArray,
       arrayLength = member.arrayLength,
-      endianOverride = member.endianOverride
+      endianOverride = member.endianOverride,
+      readSizeBytes = member.readSizeBytes
     )
 
   private def normalizeValue(member: IrMember): NormalizedValue =

@@ -8,7 +8,7 @@ structure dapStruct {}
 @trait(selector: ":is(structure)")
 structure bitmask {}
 
-@trait(selector: ":is(structure)")
+@trait(selector: ":is(structure, member)")
 integer size
 
 @trait(selector: ":is(structure, member)")

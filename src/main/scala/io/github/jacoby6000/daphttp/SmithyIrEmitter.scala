@@ -380,6 +380,7 @@ object SmithyIrEmitter {
     List(
       member.staticAddress.map(address => stringTrait("staticAddress", formatAddress(address))),
       member.paddingRepeats.map(repeats => intTrait("padding", repeats)),
+      member.readSizeBytes.map(size => intTrait("size", size)),
       Option.when(member.isPointer)(annotationTrait("pointer")),
       Option.when(member.isArray)(annotationTrait("array")),
       member.arrayLength.map(length => intTrait("length", length)),

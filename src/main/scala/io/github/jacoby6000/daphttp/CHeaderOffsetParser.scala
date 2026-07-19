@@ -9,7 +9,8 @@ object CHeaderOffsetParser {
 
   def parse(source: String): Map[(String, String), Int] = {
     val offsets = mutable.Map.empty[(String, String), Int]
-    var currentStruct: Option[String] = None
+    // (structName, minimum depth while the struct body is open)
+    var frames = List.empty[(String, Int)]
     var depth = 0
     var activeOffset: Option[Int] = None
 
@@ -17,34 +18,43 @@ object CHeaderOffsetParser {
       val line = rawLine.trim
       if (line.isEmpty || line.startsWith("//")) {
         ()
-      } else if (currentStruct.isEmpty) {
-        StructStart.findFirstMatchIn(line).foreach { matched =>
-          currentStruct = Some(matched.group(1))
-          depth = line.count(_ == '{') - line.count(_ == '}')
-        }
       } else {
-        val lineOffset =
-          OffsetComment
-            .findFirstMatchIn(line)
-            .flatMap(matchResult => parseHexInt(matchResult.group(1)))
+        val opens = line.count(_ == '{')
+        val closes = line.count(_ == '}')
 
-        if (line.contains("union") && lineOffset.isDefined) {
-          activeOffset = lineOffset
-        } else if (line == "};" || line.endsWith("};")) {
-          activeOffset = None
+        StructStart.findFirstMatchIn(line).foreach { matched =>
+          // Regex requires `{` on the same line; body is active at depth after that open.
+          frames = (matched.group(1), depth + opens) :: frames
         }
 
-        lineOffset.orElse(activeOffset).foreach { offset =>
-          fieldNames(line).foreach { fieldName =>
-            currentStruct.foreach(structName => offsets.update((structName, fieldName), offset))
+        if (frames.nonEmpty) {
+          val currentStruct = frames.head._1
+          val lineOffset =
+            OffsetComment
+              .findFirstMatchIn(line)
+              .flatMap(matchResult => parseHexInt(matchResult.group(1)))
+
+          if (line.contains("union") && lineOffset.isDefined) {
+            activeOffset = lineOffset
+          } else if (line == "};" || line.endsWith("};")) {
+            activeOffset = None
+          }
+
+          lineOffset.orElse(activeOffset).foreach { offset =>
+            fieldNames(line).foreach { fieldName =>
+              offsets.update((currentStruct, fieldName), offset)
+            }
           }
         }
 
-        depth += line.count(_ == '{') - line.count(_ == '}')
-        if (depth <= 0) {
-          currentStruct = None
+        depth += opens - closes
+        while (frames.nonEmpty && depth < frames.head._2) {
+          frames = frames.tail
           activeOffset = None
+        }
+        if (frames.isEmpty) {
           depth = 0
+          activeOffset = None
         }
       }
     }

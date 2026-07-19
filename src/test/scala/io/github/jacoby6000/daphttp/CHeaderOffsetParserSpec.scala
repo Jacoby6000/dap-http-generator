@@ -38,4 +38,26 @@ class CHeaderOffsetParserSpec extends AnyFunSuite {
     assert(offsets(("Padded", "a")) == 0x00)
     assert(offsets(("Padded", "b")) == 0x08)
   }
+
+  test("records nested named struct fields under the inner type tag") {
+    val source =
+      """
+        |typedef struct Outer {
+        |    /* 0x00 */ u32 a;
+        |    struct Inner {
+        |        /* 0x00 */ u32 x;
+        |        /* 0x04 */ u32 y;
+        |    } inner;
+        |    /* 0x0C */ u32 b;
+        |} Outer;
+        |""".stripMargin
+
+    val offsets = CHeaderOffsetParser.parse(source)
+
+    assert(offsets(("Outer", "a")) == 0x00)
+    assert(offsets(("Outer", "b")) == 0x0c)
+    assert(offsets(("Inner", "x")) == 0x00)
+    assert(offsets(("Inner", "y")) == 0x04)
+    assert(!offsets.contains(("Outer", "x")))
+  }
 }
