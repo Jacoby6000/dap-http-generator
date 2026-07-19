@@ -1,17 +1,14 @@
 package io.github.jacoby6000.daphttp
 
 import org.eclipse.cdt.core.dom.ast.IASTArrayDeclarator
-import org.eclipse.cdt.core.dom.ast.IASTBinaryExpression
 import org.eclipse.cdt.core.dom.ast.IASTCompositeTypeSpecifier
 import org.eclipse.cdt.core.dom.ast.IASTDeclSpecifier
 import org.eclipse.cdt.core.dom.ast.IASTDeclaration
 import org.eclipse.cdt.core.dom.ast.IASTDeclarator
 import org.eclipse.cdt.core.dom.ast.IASTEnumerationSpecifier
 import org.eclipse.cdt.core.dom.ast.IASTEqualsInitializer
-import org.eclipse.cdt.core.dom.ast.IASTExpression
 import org.eclipse.cdt.core.dom.ast.IASTFieldDeclarator
 import org.eclipse.cdt.core.dom.ast.IASTFunctionDeclarator
-import org.eclipse.cdt.core.dom.ast.IASTIdExpression
 import org.eclipse.cdt.core.dom.ast.IASTInitializer
 import org.eclipse.cdt.core.dom.ast.IASTInitializerClause
 import org.eclipse.cdt.core.dom.ast.IASTInitializerList
@@ -19,16 +16,16 @@ import org.eclipse.cdt.core.dom.ast.IASTLiteralExpression
 import org.eclipse.cdt.core.dom.ast.IASTSimpleDeclaration
 import org.eclipse.cdt.core.dom.ast.IASTStandardFunctionDeclarator
 import org.eclipse.cdt.core.dom.ast.IASTTranslationUnit
-import org.eclipse.cdt.core.dom.ast.IASTUnaryExpression
 import org.eclipse.cdt.core.dom.ast.gnu.c.GCCLanguage
 import org.eclipse.cdt.core.model.ILanguage
 import org.eclipse.cdt.core.parser.DefaultLogService
 import org.eclipse.cdt.core.parser.FileContent
 import org.eclipse.cdt.core.parser.IncludeFileContentProvider
 import org.eclipse.cdt.core.parser.ScannerInfo
+import org.eclipse.cdt.internal.core.dom.parser.ValueFactory
 
+import scala.collection.mutable.ListBuffer
 import scala.jdk.CollectionConverters._
-import scala.util.Try
 import scala.util.control.NonFatal
 
 final case class GlobalVariableDeclaration(
@@ -61,6 +58,11 @@ final case class CEnumDefinition(
     values: List[IrEnumValue]
 )
 
+final case class EnumParseResult(
+    enums: Map[String, CEnumDefinition],
+    warnings: List[String] = Nil
+)
+
 object CHeaderParser {
   def parse(
       headerSource: String,
@@ -83,11 +85,20 @@ object CHeaderParser {
   def parseEnums(
       source: String,
       extraMacros: Map[String, String] = Map.empty
-  ): Map[String, CEnumDefinition] = {
-    val macros = BuiltInMacros ++ extraMacros ++ extractDefineMacros(source)
+  ): EnumParseResult = {
+    // DESNOTE(jbarber, 2026-07-19): Pass macros through CDT ScannerInfo so the preprocessor
+    // expands #define uses in enumerator initializers before we evaluate them. Prefer CDT's
+    // ValueFactory over hand-rolled expression/macro evaluation.
+    // See https://github.com/eclipse-cdt/cdt/blob/main/core/org.eclipse.cdt.core/parser/org/eclipse/cdt/internal/core/dom/parser/ValueFactory.java
     parseTranslationUnit(source, "header.h", extraMacros)
-      .map(_.getDeclarations.toList.flatMap(extractEnumDefinitions(_, macros)).toMap)
-      .getOrElse(Map.empty)
+      .map { translationUnit =>
+        val warnings = ListBuffer.empty[String]
+        val enums = translationUnit.getDeclarations.toList
+          .flatMap(extractEnumDefinitions(_, warnings))
+          .toMap
+        EnumParseResult(enums, warnings.toList)
+      }
+      .getOrElse(EnumParseResult(Map.empty, Nil))
   }
 
   private[daphttp] def extractDefineMacros(source: String): Map[String, String] = {
@@ -287,7 +298,7 @@ object CHeaderParser {
 
   private def extractEnumDefinitions(
       declaration: IASTDeclaration,
-      macros: Map[String, String]
+      warnings: ListBuffer[String]
   ): List[(String, CEnumDefinition)] =
     declaration match {
       case simple: IASTSimpleDeclaration =>
@@ -302,8 +313,8 @@ object CHeaderParser {
             if (names.isEmpty) {
               Nil
             } else {
-              val values = extractEnumeratorValues(enumSpec, macros)
               val primaryName = names.head
+              val values = extractEnumeratorValues(primaryName, enumSpec, warnings)
               val definition = CEnumDefinition(primaryName, values)
               names.map(_ -> definition)
             }
@@ -315,8 +326,9 @@ object CHeaderParser {
     }
 
   private def extractEnumeratorValues(
+      enumName: String,
       enumSpec: IASTEnumerationSpecifier,
-      macros: Map[String, String]
+      warnings: ListBuffer[String]
   ): List[IrEnumValue] = {
     val known = scala.collection.mutable.LinkedHashMap.empty[String, Int]
     var nextValue = 0
@@ -324,84 +336,25 @@ object CHeaderParser {
       val name =
         Option(enumerator.getName).map(_.toString.trim).filter(_.nonEmpty).getOrElse("")
       if (name.nonEmpty) {
-        val value = Option(enumerator.getValue)
-          .flatMap(expr => evaluateIntExpression(expr, known.toMap, macros))
-          .getOrElse(nextValue)
+        val value = Option(enumerator.getValue) match {
+          case None =>
+            nextValue
+          case Some(expr) =>
+            Option(ValueFactory.getConstantNumericalValue(expr))
+              .map(_.intValue())
+              .getOrElse {
+                // DESNOTE(jbarber, 2026-07-19): Never silently invent a sequential value for an
+                // explicit initializer we failed to evaluate — warn so wrong layouts are visible.
+                warnings +=
+                  s"$enumName.$name: Unable to evaluate enumerator initializer '${expr.getRawSignature}'; falling back to sequential value $nextValue."
+                nextValue
+              }
+        }
         known(name) = value
         nextValue = value + 1
       }
     }
     known.toList.map { case (name, value) => IrEnumValue(name, value) }
-  }
-
-  private def evaluateIntExpression(
-      expression: IASTExpression,
-      known: Map[String, Int],
-      macros: Map[String, String]
-  ): Option[Int] =
-    expression match {
-      case literal: IASTLiteralExpression
-          if literal.getKind == IASTLiteralExpression.lk_integer_constant =>
-        parseIntegerLiteral(literal.toString)
-      case unary: IASTUnaryExpression =>
-        val operand = evaluateIntExpression(unary.getOperand, known, macros)
-        unary.getOperator match {
-          case IASTUnaryExpression.op_plus             => operand
-          case IASTUnaryExpression.op_minus            => operand.map(v => -v)
-          case IASTUnaryExpression.op_tilde            => operand.map(v => ~v)
-          case IASTUnaryExpression.op_bracketedPrimary => operand
-          case _                                       => None
-        }
-      case binary: IASTBinaryExpression =>
-        for {
-          left <- evaluateIntExpression(binary.getOperand1, known, macros)
-          right <- evaluateIntExpression(binary.getOperand2, known, macros)
-          result <- binary.getOperator match {
-            case IASTBinaryExpression.op_plus                 => Some(left + right)
-            case IASTBinaryExpression.op_minus                => Some(left - right)
-            case IASTBinaryExpression.op_multiply             => Some(left * right)
-            case IASTBinaryExpression.op_divide if right != 0 =>
-              Some(left / right)
-            case IASTBinaryExpression.op_modulo if right != 0 =>
-              Some(left % right)
-            case IASTBinaryExpression.op_shiftLeft  => Some(left << right)
-            case IASTBinaryExpression.op_shiftRight => Some(left >> right)
-            case IASTBinaryExpression.op_binaryAnd  => Some(left & right)
-            case IASTBinaryExpression.op_binaryOr   => Some(left | right)
-            case IASTBinaryExpression.op_binaryXor  => Some(left ^ right)
-            case _                                  => None
-          }
-        } yield result
-      case id: IASTIdExpression =>
-        val name = Option(id.getName).map(_.toString.trim).filter(_.nonEmpty)
-        name.flatMap { n =>
-          known
-            .get(n)
-            .orElse(macros.get(n).flatMap(parseIntegerLiteral))
-        }
-      case _ =>
-        None
-    }
-
-  private def parseIntegerLiteral(raw: String): Option[Int] = {
-    val cleaned = raw.trim.toLowerCase
-      .stripSuffix("ull")
-      .stripSuffix("llu")
-      .stripSuffix("ul")
-      .stripSuffix("lu")
-      .stripSuffix("ll")
-      .stripSuffix("u")
-      .stripSuffix("l")
-    if (cleaned.startsWith("0x")) {
-      Try(Integer.parseUnsignedInt(cleaned.drop(2), 16)).toOption
-        .orElse(Try(java.lang.Long.parseUnsignedLong(cleaned.drop(2), 16).toInt).toOption)
-    } else if (cleaned.startsWith("0b")) {
-      Try(Integer.parseInt(cleaned.drop(2), 2)).toOption
-    } else if (cleaned.startsWith("0") && cleaned.length > 1 && cleaned.forall(_.isDigit)) {
-      Try(Integer.parseInt(cleaned, 8)).toOption
-    } else {
-      Try(cleaned.toInt).toOption
-    }
   }
 
   private def extractTypedef(

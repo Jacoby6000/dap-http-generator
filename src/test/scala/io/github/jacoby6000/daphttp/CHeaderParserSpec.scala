@@ -101,12 +101,20 @@ class CHeaderParserSpec extends AnyFunSuite {
     val source =
       """
         |#define BASE 10
+        |#define NESTED BASE
+        |#define PAREN (10)
+        |#define SHIFT (1 << 3)
         |typedef enum Color {
         |    RED,
         |    GREEN = 2,
         |    BLUE,
         |    CUSTOM = BASE + 5,
-        |    NEG = -1
+        |    FROM_NESTED = NESTED,
+        |    FROM_PAREN = PAREN,
+        |    FROM_SHIFT = SHIFT,
+        |    CASTED = (int)7,
+        |    NEG = -1,
+        |    REF = GREEN
         |} Color;
         |
         |enum Mode {
@@ -115,8 +123,10 @@ class CHeaderParserSpec extends AnyFunSuite {
         |};
         |""".stripMargin
 
-    val enums = CHeaderParser.parseEnums(source)
+    val parsed = CHeaderParser.parseEnums(source)
+    val enums = parsed.enums
 
+    assert(parsed.warnings.isEmpty)
     assert(enums.contains("Color"))
     assert(
       enums("Color").values == List(
@@ -124,7 +134,12 @@ class CHeaderParserSpec extends AnyFunSuite {
         IrEnumValue("GREEN", 2),
         IrEnumValue("BLUE", 3),
         IrEnumValue("CUSTOM", 15),
-        IrEnumValue("NEG", -1)
+        IrEnumValue("FROM_NESTED", 10),
+        IrEnumValue("FROM_PAREN", 10),
+        IrEnumValue("FROM_SHIFT", 8),
+        IrEnumValue("CASTED", 7),
+        IrEnumValue("NEG", -1),
+        IrEnumValue("REF", 2)
       )
     )
     assert(enums.contains("Mode"))
@@ -134,6 +149,21 @@ class CHeaderParserSpec extends AnyFunSuite {
         IrEnumValue("MODE_B", 0x11)
       )
     )
+  }
+
+  test("warns when an explicit enumerator initializer cannot be evaluated") {
+    val source =
+      """
+        |typedef enum Broken {
+        |    OK = 1,
+        |    BAD = sizeof(struct Missing)
+        |} Broken;
+        |""".stripMargin
+
+    val parsed = CHeaderParser.parseEnums(source)
+    assert(parsed.enums("Broken").values.exists(_.name == "BAD"))
+    assert(parsed.warnings.exists(_.contains("Broken.BAD")))
+    assert(parsed.warnings.exists(_.contains("Unable to evaluate enumerator initializer")))
   }
 
   test("infers global array length from C initializer entry count") {

@@ -64,13 +64,16 @@ object DoldecompIrGenerator {
     val globalDeclarations = loadGlobalDeclarations(headerRoots, allMacros)
     val fieldInitializerLengths = loadFieldInitializerLengths(headerRoots, headerStructs, allMacros)
     val typedefs = loadTypedefs(headerRoots, allMacros)
-    val enums = loadEnums(headerRoots, allMacros)
+    val enumParse = loadEnums(headerRoots, allMacros)
+    val enums = enumParse.enums
     val sectionResult = SectionFilter.filterDataSymbols(symbols, extraDataSections)
     sectionResult.warnings.foreach(w => DapHttpLoggers.irSourceDoldecomp.warn("{}", w))
     val dataObjectSymbols = sectionResult.dataSymbols
     val resolvedSymbols = dataObjectSymbols.flatMap(resolveSymbol(_, globalDeclarations))
     val warnings = mutable.ListBuffer.empty[String]
     warnings ++= sectionResult.warnings
+    warnings ++= enumParse.warnings
+    enumParse.warnings.foreach(w => DapHttpLoggers.irSourceDoldecomp.warn("{}", w))
 
     if (resolvedSymbols.isEmpty) {
       DapHttpLoggers.irSourceDoldecomp.warn(
@@ -1074,12 +1077,16 @@ object DoldecompIrGenerator {
   private def loadEnums(
       headerRoots: List[Path],
       macros: Map[String, String]
-  ): Map[String, CEnumDefinition] = {
+  ): EnumParseResult = {
     val sourceFiles = headerRoots.flatMap(collectSourceFiles).distinct
-    sourceFiles.flatMap { path =>
+    val results = sourceFiles.map { path =>
       val source = new String(Files.readAllBytes(path))
-      CHeaderParser.parseEnums(source, macros).toList
-    }.toMap
+      CHeaderParser.parseEnums(source, macros)
+    }
+    EnumParseResult(
+      enums = results.flatMap(_.enums.toList).toMap,
+      warnings = results.flatMap(_.warnings)
+    )
   }
 
   private def collectSourceFiles(root: Path): List[Path] = {
