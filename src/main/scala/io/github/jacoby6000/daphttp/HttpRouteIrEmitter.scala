@@ -102,13 +102,14 @@ object HttpRouteIrEmitter {
       irType: IrType,
       decoded: Json,
       baseAddress: Long,
-      wordSize: Option[Int]
+      wordSize: Option[Int],
+      elementStrideBytes: Option[Int] = None
   ): Json =
     irType match {
       case struct: IrType.Struct =>
         annotateStructAddresses(struct, decoded, baseAddress, wordSize)
       case listType: IrType.ListType =>
-        annotateArrayAddresses(listType, decoded, baseAddress, wordSize)
+        annotateArrayAddresses(listType, decoded, baseAddress, wordSize, elementStrideBytes)
       case _ =>
         decoded
     }
@@ -157,7 +158,13 @@ object HttpRouteIrEmitter {
         case nested: IrType.Struct =>
           annotateStructAddresses(nested, fieldJson, fieldAddress, wordSize)
         case listType: IrType.ListType if member.isArray =>
-          annotateArrayAddresses(listType, fieldJson, fieldAddress, wordSize)
+          annotateArrayAddresses(
+            listType,
+            fieldJson,
+            fieldAddress,
+            wordSize,
+            arrayElementStrideBytes(member, wordSize)
+          )
         case _ =>
           fieldJson
       }
@@ -167,7 +174,8 @@ object HttpRouteIrEmitter {
       listType: IrType.ListType,
       decoded: Json,
       baseAddress: Long,
-      wordSize: Option[Int]
+      wordSize: Option[Int],
+      elementStrideBytes: Option[Int]
   ): Json =
     listType.element match {
       case nested: IrType.Struct =>
@@ -176,8 +184,9 @@ object HttpRouteIrEmitter {
             decoded
           case Some(elements) =>
             val errors = ListBuffer.empty[String]
-            val elementSize =
+            val layoutSize =
               structureSizeBytes(nested, wordSize, errors).getOrElse(0).toLong
+            val elementSize = elementStrideBytes.map(_.toLong).getOrElse(layoutSize)
             Json.arr(
               elements.zipWithIndex.map { case (element, index) =>
                 annotateStructAddresses(
@@ -492,7 +501,8 @@ object HttpRouteIrEmitter {
                       wordSizeBits = wordSize,
                       decodeCodec = decodeCodec,
                       cStringPointer = isCharPointer && !member.isArray,
-                      cStringPointerArray = isCharPointer && member.isArray
+                      cStringPointerArray = isCharPointer && member.isArray,
+                      elementStrideBytes = arrayElementStrideBytes(member, wordSize)
                     )
                   }
                 }.toList
@@ -1135,8 +1145,9 @@ object HttpRouteIrEmitter {
     val elementCodec = compilePrimitiveCodec(IrPrimitive.LongWord, endian, wordSize)
     val elementWidth = bitsForPrimitive(IrPrimitive.LongWord, wordSize)
     (length, elementCodec, elementWidth) match {
-      case (Some(count), Some(codec), Some(width)) => Some(arrayCodec(count, width, codec))
-      case _                                       => None
+      case (Some(count), Some(codec), Some(width)) =>
+        Some(arrayCodec(count, width, strideBits = width, codec))
+      case _ => None
     }
   }
 
@@ -1162,15 +1173,56 @@ object HttpRouteIrEmitter {
         None
       }
       (length, elementCodec, elementWidth) match {
-        case (Some(count), Some(codec), Some(width)) => Some(arrayCodec(count, width, codec))
-        case _                                       => None
+        case (Some(count), Some(codec), Some(width)) =>
+          val strideBits = arrayElementStrideBits(member, width)
+          Some(arrayCodec(count, width, strideBits, codec))
+        case _ => None
       }
     }
   }
 
-  private def arrayCodec(count: Int, elementBits: Int, elementCodec: Codec[Json]): Codec[Json] =
+  private def arrayElementStrideBytes(member: IrMember, wordSize: Option[Int]): Option[Int] =
+    if (!member.isArray || member.isPointer) {
+      None
+    } else {
+      val layoutBytes = member.target match {
+        case listType: IrType.ListType =>
+          listElementBitWidth(listType.element, wordSize).map(bits => math.ceil(bits / 8d).toInt)
+        case _ =>
+          None
+      }
+      val fromSymbol = for {
+        totalBytes <- member.readSizeBytes
+        count <- member.arrayLength
+        if count > 0 && totalBytes % count == 0
+        stride = totalBytes / count
+        layout <- layoutBytes
+        if stride >= layout
+      } yield stride
+      fromSymbol.orElse(layoutBytes)
+    }
+
+  private def arrayElementStrideBits(member: IrMember, layoutBits: Int): Int =
+    (for {
+      totalBytes <- member.readSizeBytes
+      count <- member.arrayLength
+      if count > 0 && (totalBytes * 8) % count == 0
+      stride = (totalBytes * 8) / count
+      if stride >= layoutBits
+    } yield stride).getOrElse(layoutBits)
+
+  private def arrayCodec(
+      count: Int,
+      elementBits: Int,
+      strideBits: Int,
+      elementCodec: Codec[Json]
+  ): Codec[Json] =
     new Codec[Json] {
-      private val totalBits = count.toLong * elementBits.toLong
+      private val totalBits = count.toLong * strideBits.toLong
+      require(
+        strideBits >= elementBits,
+        s"Array stride ($strideBits bits) must cover element width ($elementBits bits)"
+      )
 
       override def sizeBound: SizeBound = SizeBound.exact(totalBits)
 
@@ -1188,8 +1240,10 @@ object HttpRouteIrEmitter {
           (0 until count)
             .foldLeft(Attempt.successful((input, List.empty[Json]))) { (accAttempt, _) =>
               accAttempt.flatMap { case (remainingBits, elements) =>
-                elementCodec.decode(remainingBits).map { decoded =>
-                  (decoded.remainder, elements :+ decoded.value)
+                val slot = remainingBits.take(strideBits.toLong)
+                val afterSlot = remainingBits.drop(strideBits.toLong)
+                elementCodec.decode(slot).map { decoded =>
+                  (afterSlot, elements :+ decoded.value)
                 }
               }
             }

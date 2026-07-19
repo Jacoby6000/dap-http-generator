@@ -683,4 +683,87 @@ class HttpRouteIrEmitterCodecSpec extends AnyFunSuite {
     assert(items(0).hcursor.downField("_address").as[String].toOption.contains("0x1000"))
     assert(items(1).hcursor.downField("_address").as[String].toOption.contains("0x1004"))
   }
+
+  test("array codec and _address use symbol stride when larger than packed layout") {
+    val item = IrType.MemoryMappedStruct(
+      id = id("StrideItem"),
+      members = List(
+        IrMember(
+          id = id("StrideItem_v"),
+          name = "v",
+          target = IrType.Primitive(IrPrimitive.U32),
+          staticAddress = None,
+          paddingRepeats = None,
+          isPointer = false,
+          isArray = false,
+          arrayLength = None,
+          endianOverride = None,
+          primitiveOverride = Some(IrPrimitive.U32),
+          offsetBytes = Some(0)
+        )
+      ),
+      declaredSizeBits = Some(4)
+    )
+    val listType =
+      IrType.ListType(id = id("StrideList"), element = item, bytesAlias = false, bitsAlias = false)
+    val output = IrType.EnclosingStruct(
+      id = id("StrideOutput"),
+      members = List(
+        IrMember(
+          id = id("StrideOutput_value"),
+          name = "value",
+          target = listType,
+          staticAddress = Some(0x2000L),
+          paddingRepeats = None,
+          isPointer = false,
+          isArray = true,
+          arrayLength = Some(2),
+          endianOverride = None,
+          primitiveOverride = None,
+          readSizeBytes = Some(16)
+        )
+      ),
+      declaredSizeBits = None
+    )
+
+    val read = HttpRouteIrEmitter
+      .emitRoutePlansFromIr(
+        List(
+          IrService(
+            name = "Api",
+            wordSizeBits = Some(32),
+            defaultEndian = IrEndian.Big,
+            operations = List(
+              IrOperation(name = "GetStride", routePath = "/api/Api/GetStride", output = output)
+            )
+          )
+        )
+      )
+      .routes("/api/Api/GetStride")
+      .reads
+      .head
+
+    assert(read.sizeBytes == 16)
+    assert(read.elementStrideBytes.contains(8))
+
+    // Packed element is 4 bytes; each slot is padded to 8.
+    val bytes = Array[Byte](
+      0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00
+    )
+    val decoded = decode(read, bytes)
+    val values = decoded.asArray.get.map(_.hcursor.downField("v").as[Long].toOption.get)
+    assert(values == Vector(1L, 2L))
+
+    val annotated =
+      HttpRouteIrEmitter.annotateDecodedAddresses(
+        listType,
+        decoded,
+        0x2000L,
+        Some(32),
+        read.elementStrideBytes
+      )
+    val elements = annotated.asArray.get
+    assert(elements(0).hcursor.downField("_address").as[String].toOption.contains("0x2000"))
+    assert(elements(1).hcursor.downField("_address").as[String].toOption.contains("0x2008"))
+  }
 }

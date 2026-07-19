@@ -230,11 +230,21 @@ class DoldecompSmithyGeneratorIntegrationSpec extends AnyFunSuite {
       .get
 
     assert(generation.warnings.exists(_.contains("badSymbol")))
+    assert(
+      generation.warnings.exists(w =>
+        w.contains("orphanSymbol") && w.contains("no matching global C declaration")
+      )
+    )
+    assert(
+      generation.warnings.exists(w => w.contains("textObject") && w.contains(".text"))
+    )
     assert(generation.services.head.operations.map(_.name) == List("GetGPlayerState"))
 
     val plans = HttpRouteIrEmitter.emitRoutePlansFromIr(generation.services)
     assert(plans.routes.contains("/api/MeleeApi/gPlayerState"))
     assert(!plans.routes.contains("/api/MeleeApi/badSymbol"))
+    assert(!plans.routes.contains("/api/MeleeApi/orphanSymbol"))
+    assert(!plans.routes.contains("/api/MeleeApi/textObject"))
     assert(plans.errors.isEmpty)
   }
 
@@ -730,5 +740,132 @@ class DoldecompSmithyGeneratorIntegrationSpec extends AnyFunSuite {
 
     assert(response.status == Status.Ok)
     assert(namesJson == List("Random", "Tosakinto", "Chicorita", "Kabigon", "Kamex"))
+  }
+
+  test("resolves char* fields inside global struct array elements") {
+    import cats.effect.IO
+    import cats.effect.Ref
+    import cats.effect.unsafe.implicits.global
+    import org.http4s.Method
+    import org.http4s.Request
+    import org.http4s.Status
+    import org.http4s.implicits._
+    import software.amazon.smithy.model.shapes.ShapeId
+    import java.util.Base64
+
+    def sid(name: String): ShapeId = ShapeId.from(s"example#$name")
+
+    val entry = IrType.MemoryMappedStruct(
+      id = sid("NamedEntry"),
+      members = List(
+        IrMember(
+          id = sid("NamedEntry$name"),
+          name = "name",
+          target = IrType.Primitive(IrPrimitive.Char),
+          staticAddress = None,
+          paddingRepeats = None,
+          isPointer = true,
+          isArray = false,
+          arrayLength = None,
+          endianOverride = None,
+          primitiveOverride = Some(IrPrimitive.Char),
+          offsetBytes = Some(0)
+        )
+      ),
+      declaredSizeBits = Some(4)
+    )
+    val listType =
+      IrType.ListType(
+        id = sid("NamedEntryList"),
+        element = entry,
+        bytesAlias = false,
+        bitsAlias = false
+      )
+    val output = IrType.EnclosingStruct(
+      id = sid("NamedEntriesOutput"),
+      members = List(
+        IrMember(
+          id = sid("NamedEntriesOutput$value"),
+          name = "value",
+          target = listType,
+          staticAddress = Some(0x80400000L),
+          paddingRepeats = None,
+          isPointer = false,
+          isArray = true,
+          arrayLength = Some(2),
+          endianOverride = None,
+          primitiveOverride = None,
+          readSizeBytes = Some(8)
+        )
+      ),
+      declaredSizeBits = None
+    )
+    val services = List(
+      IrService(
+        name = "Api",
+        wordSizeBits = Some(32),
+        defaultEndian = IrEndian.Big,
+        operations =
+          List(IrOperation(name = "GetEntries", routePath = "/api/Api/GetEntries", output = output))
+      )
+    )
+    val plans = HttpRouteIrEmitter.emitRoutePlansFromIr(services)
+    assert(plans.errors.isEmpty)
+
+    val memory = scala.collection.mutable.Map.empty[Long, Byte]
+    def storePointer(address: Long, pointer: Long): Unit = {
+      Array[Byte](
+        ((pointer >> 24) & 0xff).toByte,
+        ((pointer >> 16) & 0xff).toByte,
+        ((pointer >> 8) & 0xff).toByte,
+        (pointer & 0xff).toByte
+      ).zipWithIndex.foreach { case (byte, index) => memory(address + index) = byte }
+    }
+    def storeString(address: Long, value: String): Unit = {
+      value.getBytes("US-ASCII").zipWithIndex.foreach { case (byte, index) =>
+        memory(address + index) = byte
+      }
+      memory(address + value.length) = 0
+    }
+    storeString(0x80001000L, "Alpha")
+    storeString(0x80001010L, "Beta")
+    storePointer(0x80400000L, 0x80001000L)
+    storePointer(0x80400004L, 0x80001010L)
+
+    val dapClient = new DapHttpServerMain.DapClient {
+      override def readMemory(address: Long, sizeBytes: Int): IO[Either[String, String]] =
+        IO.pure(
+          Right(
+            Base64.getEncoder.encodeToString(
+              (0 until sizeBytes)
+                .map(offset => memory.getOrElse(address + offset, 0.toByte))
+                .toArray
+            )
+          )
+        )
+      override def continueExecution(): IO[Either[String, Json]] =
+        IO.pure(Right(Json.obj()))
+    }
+
+    val plansRef = Ref.unsafe[IO, RoutePlansLoadResult](plans)
+    val app = DapHttpServerMain.routes(plansRef, dapClient).orNotFound
+    val response =
+      app.run(Request[IO](Method.GET, uri"/api/Api/GetEntries")).unsafeRunSync()
+    val body = response.body.compile.toVector.unsafeRunSync().map(_.toChar).mkString
+    val decoded = io.circe.parser
+      .parse(body)
+      .toOption
+      .get
+      .hcursor
+      .downField("reads")
+      .downN(0)
+      .downField("decoded")
+      .as[List[Json]]
+      .toOption
+      .get
+
+    assert(response.status == Status.Ok)
+    assert(decoded(0).hcursor.downField("name").as[String].toOption.contains("Alpha"))
+    assert(decoded(1).hcursor.downField("name").as[String].toOption.contains("Beta"))
   }
 }

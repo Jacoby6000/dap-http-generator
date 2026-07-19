@@ -111,5 +111,8 @@ flowchart LR
 - Member `@size(N)` (also structure `@size`) round-trips doldecomp symbol `size:` as
   `IrMember.readSizeBytes` through `cheaders-smithy` → `smithy`. Structure `@size` still means
   declared structure width; on members it is the explicit DAP read width.
+- Global arrays use `readSizeBytes / length` as element stride when that exceeds packed layout
+  width (padding between elements). Object symbols in code sections (`.text`, etc.) and data
+  symbols without `ctype`/C declarations emit per-symbol warnings rather than failing silently.
 - First `sbt` invocation downloads sbt/Scala launchers and Coursier deps; expect a slow cold start.
   Building the server also builds the Scala.js UI via `resourceGenerators`.

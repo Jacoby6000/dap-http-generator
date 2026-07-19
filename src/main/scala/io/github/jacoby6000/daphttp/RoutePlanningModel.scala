@@ -12,7 +12,9 @@ final case class ReadPlan(
     wordSizeBits: Option[Int],
     decodeCodec: Option[Codec[Json]],
     cStringPointer: Boolean,
-    cStringPointerArray: Boolean = false
+    cStringPointerArray: Boolean = false,
+    /** Byte stride between array elements when symbol size exceeds packed layout width. */
+    elementStrideBytes: Option[Int] = None
 )
 final case class PointerChainPlan(
     pointeeType: IrType,

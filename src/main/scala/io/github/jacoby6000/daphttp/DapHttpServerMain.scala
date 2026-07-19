@@ -732,28 +732,52 @@ object DapHttpServerMain extends IOApp {
             .getOrElse(Json.Null)
       }
       readPlan.decodeType match {
-        case Some(struct: IrType.Struct) =>
-          resolveStructCStringPointers(struct, decoded, dapClient, readPlan.wordSizeBits).map {
+        case Some(irType) =>
+          resolveDecodedCStringPointers(irType, decoded, dapClient, readPlan.wordSizeBits).map {
             resolved =>
               HttpRouteIrEmitter.annotateDecodedAddresses(
-                struct,
+                irType,
                 resolved,
                 readPlan.address,
-                readPlan.wordSizeBits
+                readPlan.wordSizeBits,
+                readPlan.elementStrideBytes
               )
           }
-        case Some(other) =>
-          IO.pure(
-            HttpRouteIrEmitter.annotateDecodedAddresses(
-              other,
-              decoded,
-              readPlan.address,
-              readPlan.wordSizeBits
-            )
-          )
         case None =>
           IO.pure(decoded)
       }
+    }
+
+  private def resolveDecodedCStringPointers(
+      irType: IrType,
+      decoded: Json,
+      dapClient: DapClient,
+      wordSizeBits: Option[Int]
+  ): IO[Json] =
+    irType match {
+      case struct: IrType.Struct =>
+        resolveStructCStringPointers(struct, decoded, dapClient, wordSizeBits)
+      case listType: IrType.ListType =>
+        listType.element match {
+          case struct: IrType.Struct =>
+            decoded.asArray match {
+              case Some(elements) =>
+                elements
+                  .foldLeft(IO.pure(Vector.empty[Json])) { (accIO, element) =>
+                    accIO.flatMap { acc =>
+                      resolveStructCStringPointers(struct, element, dapClient, wordSizeBits)
+                        .map(acc :+ _)
+                    }
+                  }
+                  .map(resolved => Json.arr(resolved: _*))
+              case None =>
+                IO.pure(decoded)
+            }
+          case _ =>
+            IO.pure(decoded)
+        }
+      case _ =>
+        IO.pure(decoded)
     }
 
   private def resolveStructCStringPointers(

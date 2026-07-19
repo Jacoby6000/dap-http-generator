@@ -69,20 +69,31 @@ object DoldecompIrGenerator {
     val sectionResult = SectionFilter.filterDataSymbols(symbols, extraDataSections)
     sectionResult.warnings.foreach(w => DapHttpLoggers.irSourceDoldecomp.warn("{}", w))
     val dataObjectSymbols = sectionResult.dataSymbols
-    val resolvedSymbols = dataObjectSymbols.flatMap(resolveSymbol(_, globalDeclarations))
     val warnings = mutable.ListBuffer.empty[String]
     warnings ++= sectionResult.warnings
     warnings ++= enumParse.warnings
     enumParse.warnings.foreach(w => DapHttpLoggers.irSourceDoldecomp.warn("{}", w))
 
+    val resolvedSymbols = dataObjectSymbols.flatMap { symbol =>
+      resolveSymbol(symbol, globalDeclarations) match {
+        case some @ Some(_) =>
+          some
+        case None =>
+          val message =
+            s"${symbol.name}: No ctype and no matching global C declaration under --headers."
+          warnings += message
+          DapHttpLoggers.irSourceDoldecomp.warn("{}", message)
+          None
+      }
+    }
+
     if (resolvedSymbols.isEmpty) {
-      DapHttpLoggers.irSourceDoldecomp.warn(
-        "No data object symbols with a matching C declaration were found"
-      )
-      IrGenerationResult(
-        warnings = List("No data object symbols with a matching C declaration were found."),
-        services = Nil
-      )
+      if (!warnings.exists(_.contains("matching global C declaration"))) {
+        val message = "No data object symbols with a matching C declaration were found."
+        warnings += message
+        DapHttpLoggers.irSourceDoldecomp.warn("{}", message)
+      }
+      IrGenerationResult(warnings = warnings.toList.distinct, services = Nil)
     } else {
       val validResolved = resolvedSymbols.filter { resolved =>
         validateResolvedType(
