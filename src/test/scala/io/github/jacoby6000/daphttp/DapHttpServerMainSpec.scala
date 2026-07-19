@@ -131,10 +131,10 @@ class DapHttpServerMainSpec extends AnyFunSuite {
       .unwrap()
 
     val plans = DapHttpServerMain.buildRoutePlansFromModel(model).routes
-    val route = plans("/Api/GetInfo")
+    val route = plans("/api/Api/GetInfo")
 
     assert(route.reads.size == 1)
-    assert(route.reads.head.path == "/Api/GetInfo.info")
+    assert(route.reads.head.path == "/api/Api/GetInfo.info")
     assert(route.reads.head.address == 0x1000L)
     assert(route.reads.head.sizeBytes == 4)
     assert(route.reads.head.decodeType.nonEmpty)
@@ -219,10 +219,10 @@ class DapHttpServerMainSpec extends AnyFunSuite {
       .unwrap()
 
     val plans = DapHttpServerMain.buildRoutePlansFromModel(model).routes
-    val route = plans("/Api/GetInfo")
+    val route = plans("/api/Api/GetInfo")
 
     assert(route.reads.size == 1)
-    assert(route.reads.head.path == "/Api/GetInfo.value")
+    assert(route.reads.head.path == "/api/Api/GetInfo.value")
     assert(route.reads.head.address == 0x1000L)
     assert(route.reads.head.sizeBytes == 2)
   }
@@ -258,8 +258,8 @@ class DapHttpServerMainSpec extends AnyFunSuite {
       .unwrap()
 
     val result = DapHttpServerMain.buildRoutePlansFromModel(model)
-    assert(result.routes.contains("/Api/GetInfo"))
-    assert(result.routes("/Api/GetInfo").reads.isEmpty)
+    assert(result.routes.contains("/api/Api/GetInfo"))
+    assert(result.routes("/api/Api/GetInfo").reads.isEmpty)
     assert(result.errors.isEmpty)
   }
 
@@ -298,7 +298,7 @@ class DapHttpServerMainSpec extends AnyFunSuite {
       .unwrap()
 
     val plans = DapHttpServerMain.buildRoutePlansFromModel(model).routes
-    val route = plans("/Api/GetInfo")
+    val route = plans("/api/Api/GetInfo")
 
     assert(route.reads.head.sizeBytes == 8)
   }
@@ -340,7 +340,7 @@ class DapHttpServerMainSpec extends AnyFunSuite {
       .unwrap()
 
     val plans = DapHttpServerMain.buildRoutePlansFromModel(model).routes
-    val route = plans("/Api/GetInfo")
+    val route = plans("/api/Api/GetInfo")
     val codec = route.reads.head.decodeCodec.get
     val decoded =
       codec.decode(scodec.bits.BitVector(Array(0x34.toByte, 0x12.toByte))).toOption.get.value
@@ -385,7 +385,7 @@ class DapHttpServerMainSpec extends AnyFunSuite {
       .unwrap()
 
     val plans = DapHttpServerMain.buildRoutePlansFromModel(model).routes
-    val route = plans("/Api/GetInfo")
+    val route = plans("/api/Api/GetInfo")
 
     assert(route.reads.head.sizeBytes == 4)
     assert(route.reads.head.cStringPointer)

@@ -101,7 +101,7 @@ sbt "run cheaders \
 ```sh
 curl -s http://127.0.0.1:8080/health         # {"status":"ok"}
 curl -s http://127.0.0.1:8080/routes | jq .  # one route per statically accessible structure
-curl -s http://127.0.0.1:8080/melee/MasterHand/<Operation> | jq .
+curl -s http://127.0.0.1:8080/api/MasterHand/<Operation> | jq .
 ```
 
 Without a real debugger the DAP adapter is absent, so each data route still returns HTTP 200
@@ -134,7 +134,7 @@ To exercise data routes end-to-end you must supply DAP `readMemory` responses. T
 
 For each route, issue a `GET` and assert the `decoded` JSON has one field per C struct member
 with the right name, width, signedness, and endianness for that struct's layout. For pointer
-chains, append numeric index segments (`GET /melee/MasterHand/<Op>/<i>/<j>`) and assert the
+chains, append numeric index segments (`GET /api/MasterHand/<Op>/<i>/<j>`) and assert the
 deref returns the pointee struct shape (or a C string when the pointee is `char`).
 
 ## Definition of done (expected end state)
@@ -154,7 +154,7 @@ the current behavior - the script flags them as `ADVISORY` until the code is bro
    - that is the gap to close.
 
 3. **Standard Smithy 2.0 `@http` annotations.** Each operation carries
-   `@http(method: "GET", uri: "/MasterHand/<structure-name>")` from the `smithy.api` prelude.
+   `@http(method: "GET", uri: "/api/MasterHand/<structure-name>")` from the `smithy.api` prelude.
    Routes are declared on the model, not derived at runtime by string concatenation
    (`DoldecompIrGenerator.scala:232` / `SmithyIrGenerator.scala:187` are the derivation sites
    to retire). `SmithyIrEmitter.buildOperation` (`SmithyIrEmitter.scala:201`) is where the

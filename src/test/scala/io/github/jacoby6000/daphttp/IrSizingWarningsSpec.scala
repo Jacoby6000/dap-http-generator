@@ -217,7 +217,7 @@ class IrSizingWarningsSpec extends AnyFunSuite {
       operations = List(
         IrOperation(
           name = "GetInfo",
-          routePath = "/Api/GetInfo",
+          routePath = "/api/Api/GetInfo",
           output = output
         )
       )

@@ -1,5 +1,6 @@
 package io.github.jacoby6000.daphttp
 
+import cats.data.OptionT
 import cats.effect.ExitCode
 import cats.effect.IO
 import cats.effect.IOApp
@@ -9,12 +10,16 @@ import com.comcast.ip4s.Port
 import io.circe.Json
 import io.circe.syntax._
 import org.http4s.HttpRoutes
+import org.http4s.MediaType
 import org.http4s.Method.GET
 import org.http4s.Method.POST
+import org.http4s.Request
 import org.http4s.Response
+import org.http4s.StaticFile
 import org.http4s.circe.CirceEntityCodec._
 import org.http4s.dsl.io._
 import org.http4s.ember.server.EmberServerBuilder
+import org.http4s.headers.`Content-Type`
 import org.http4s.implicits._
 import scodec.bits.BitVector
 import software.amazon.smithy.model.Model
@@ -127,24 +132,10 @@ object DapHttpServerMain extends IOApp {
 
       case GET -> Root / "routes" =>
         plansRef.get.flatMap { result =>
-          val pointerRoutes = result.routes.toList.flatMap { case (basePath, plan) =>
-            val chainRoutes = plan.pointerChain.toList.map { chain =>
-              val suffix = (0 until PointerChainResolver.requiredSegmentCount(chain))
-                .map(_ => "{index}")
-                .mkString("/")
-              s"$basePath/$suffix"
-            }
-            val memberRoutes = plan.memberSubRoutes.flatMap { sub =>
-              if (sub.isArray)
-                s"$basePath/${sub.memberName}/{index}" :: Nil
-              else
-                s"$basePath/${sub.memberName}" :: Nil
-            }
-            chainRoutes ++ memberRoutes
-          }
           Ok(
             Json.obj(
-              "routes" -> (result.routes.keys.toList.sorted ++ pointerRoutes.sorted).distinct.asJson,
+              "routes" -> RouteTree.flatPaths(result.routes).asJson,
+              "tree" -> RouteTree.fromPlans(result.routes).asJson,
               "errors" -> result.errors.asJson
             )
           )
@@ -158,26 +149,72 @@ object DapHttpServerMain extends IOApp {
             InternalServerError(Json.obj("error" -> Json.fromString(error)))
         }
 
+      case request @ GET -> Root =>
+        serveWebAsset(request, "index.html")
+
+      case request @ GET -> Root / "assets" / fileName =>
+        serveWebAsset(request, fileName)
+
       case request @ GET -> _ =>
         val routePath = request.uri.path.renderString
-        plansRef.get.flatMap { result =>
-          matchRoute(routePath, result.routes) match {
-            case Some((routePlan, chainSegments)) if chainSegments.nonEmpty =>
-              servePointerChainRoute(routePlan, chainSegments, dapClient)
-            case Some((routePlan, _)) =>
-              serveRoutePlan(routePlan, dapClient)
-            case None =>
-              matchMemberSubRoute(routePath, result.routes) match {
-                case Some((_, subRoute, index)) =>
-                  serveMemberSubRoute(routePath, subRoute, index, dapClient)
-                case None =>
-                  NotFound(
-                    Json.obj("error" -> Json.fromString(s"No route generated for $routePath"))
-                  )
-              }
+        if (!ApiRoutes.isDataPath(routePath)) {
+          NotFound(Json.obj("error" -> Json.fromString(s"No route generated for $routePath")))
+        } else {
+          plansRef.get.flatMap { result =>
+            matchRoute(routePath, result.routes) match {
+              case Some((routePlan, chainSegments)) if chainSegments.nonEmpty =>
+                servePointerChainRoute(routePlan, chainSegments, dapClient)
+              case Some((routePlan, _)) =>
+                serveRoutePlan(routePlan, dapClient)
+              case None =>
+                matchMemberSubRoute(routePath, result.routes) match {
+                  case Some((_, subRoute, index)) =>
+                    serveMemberSubRoute(routePath, subRoute, index, dapClient)
+                  case None =>
+                    NotFound(
+                      Json.obj("error" -> Json.fromString(s"No route generated for $routePath"))
+                    )
+                }
+            }
           }
         }
     }
+
+  private def serveWebAsset(request: Request[IO], fileName: String): IO[Response[IO]] = {
+    val safeName = Paths.get(fileName).getFileName.toString
+    val resourcePath = s"/web/$safeName"
+    StaticFile
+      .fromResource[IO](resourcePath, Some(request))
+      .orElse {
+        // Fallback when the Scala.js bundle has not been packaged yet (e.g. tests).
+        if (safeName == "index.html")
+          OptionT.liftF(Ok(fallbackIndexHtml, `Content-Type`(MediaType.text.html)))
+        else OptionT.none[IO, Response[IO]]
+      }
+      .getOrElseF(NotFound())
+  }
+
+  private val fallbackIndexHtml: String =
+    """<!DOCTYPE html>
+      |<html lang="en">
+      |<head>
+      |  <meta charset="utf-8"/>
+      |  <title>dap-http</title>
+      |  <style>
+      |    body { font-family: ui-monospace, monospace; margin: 2rem; background: #0f1419; color: #e7ecf1; }
+      |    a { color: #7eb8ff; }
+      |  </style>
+      |</head>
+      |<body>
+      |  <h1>dap-http</h1>
+      |  <p>UI assets are not packaged. Run <code>sbt compile</code> to build the Scala.js bundle, or use the JSON API:</p>
+      |  <ul>
+      |    <li><a href="/routes">/routes</a></li>
+      |    <li><a href="/health">/health</a></li>
+      |  </ul>
+      |</body>
+      |</html>
+      |""".stripMargin
 
   private def matchRoute(
       path: String,

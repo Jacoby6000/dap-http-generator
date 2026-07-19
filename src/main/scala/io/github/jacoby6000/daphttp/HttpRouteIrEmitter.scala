@@ -26,18 +26,23 @@ object HttpRouteIrEmitter {
           DapHttpLoggers.irEmit.warn("{}: Services must declare @wordSize.", service.name)
         case Some(wordSizeBits) =>
           service.operations.foreach { operation =>
+            // DESNOTE(jbarber, 2026-07-18): All generated data routes live under /api so the
+            // HTML UI and meta endpoints (/health, /routes, /resume) can share the same host
+            // without colliding. Normalize here so hand-built IR in tests stays consistent
+            // even if a generator forgot ApiRoutes.normalize.
+            val httpPath = ApiRoutes.normalize(operation.routePath)
             val operationErrors = ListBuffer.empty[String]
             val reads = collectReadsForType(
               operation.output,
               None,
-              operation.routePath,
+              httpPath,
               service.defaultEndian,
               Some(wordSizeBits),
               operationErrors
             )
             if (operationErrors.nonEmpty) {
               operationErrors.foreach(error =>
-                DapHttpLoggers.irEmit.warn("{}: {}", operation.routePath, error)
+                DapHttpLoggers.irEmit.warn("{}: {}", httpPath, error)
               )
               errors ++= operationErrors.toList
             } else {
@@ -49,7 +54,7 @@ object HttpRouteIrEmitter {
               )
               if (operationErrors.nonEmpty) {
                 operationErrors.foreach(error =>
-                  DapHttpLoggers.irEmit.warn("{}: {}", operation.routePath, error)
+                  DapHttpLoggers.irEmit.warn("{}: {}", httpPath, error)
                 )
                 errors ++= operationErrors.toList
               } else {
@@ -61,17 +66,17 @@ object HttpRouteIrEmitter {
                 )
                 if (operationErrors.nonEmpty) {
                   operationErrors.foreach(error =>
-                    DapHttpLoggers.irEmit.warn("{}: {}", operation.routePath, error)
+                    DapHttpLoggers.irEmit.warn("{}: {}", httpPath, error)
                   )
                   errors ++= operationErrors.toList
                 } else {
                   DapHttpLoggers.irEmit.debug(
                     "Compiled route {} with {} read(s)",
-                    operation.routePath,
+                    httpPath,
                     Integer.valueOf(reads.size)
                   )
-                  routes += operation.routePath -> RoutePlan(
-                    operation.routePath,
+                  routes += httpPath -> RoutePlan(
+                    httpPath,
                     reads,
                     pointerChainPlan,
                     memberSubRoutes

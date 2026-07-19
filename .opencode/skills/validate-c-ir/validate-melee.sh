@@ -109,7 +109,7 @@ else
 fi
 
 # Desired future state: each operation should carry a standard Smithy 2.0
-# @http(method: "GET", uri: "/MasterHand/<StructureName>") trait.
+# @http(method: "GET", uri: "/api/MasterHand/<StructureName>") trait.
 http_trait_count=$(grep -cE '@http\(\s*method:\s*"GET"' "$SMITHY_OUT" || true)
 if [ "$http_trait_count" -ge "$operation_count" ] && [ "$operation_count" -gt 0 ]; then
   record_pass "@http GET trait attached to every operation ($http_trait_count/$operation_count)"

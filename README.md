@@ -117,17 +117,19 @@ flowchart LR
 The server:
 
 - loads API definitions from Smithy models or C headers,
-- generates read-only GET routes from service operations (`/<ServiceName>/<OperationName>`),
+- generates read-only GET data routes under `/api/<ServiceName>/...`,
+- serves an HTML + Scala.js explorer at `/` that mirrors those routes (collapse/expand + per-node refresh),
 - requires non-DAP output members to use `@staticAddress(...)`,
 - resolves DAP-backed structs (`@dapStruct`/`@bitmask`) and reads memory through a DAP `readMemory` request,
 - watches Smithy sources and reloads routes when model files change (`smithy --watch`).
 
-`/health`, `/routes`, and `POST /resume` work without generated data routes. On startup the server
-immediately tries to connect to the DAP adapter (1s TCP timeout per attempt, retrying every 5s until
-connected). `/resume` reuses the persistent DAP TCP session (then sends `continue`). Use it when the
-target is stopped and `readMemory` times out. Generated **data** routes use the same connection for
-`readMemory` (serialized under a lock); if the connection drops the client reconnects. If nothing
-is listening they return per-read `error` fields while the HTTP request still succeeds.
+`/`, `/health`, `/routes`, and `POST /resume` work without a debugger. `/routes` returns both a flat
+`routes` list and a `tree` for the UI. On startup the server immediately tries to connect to the DAP
+adapter (1s TCP timeout per attempt, retrying every 5s until connected). `/resume` reuses the
+persistent DAP TCP session (then sends `continue`). Use it when the target is stopped and
+`readMemory` times out. Generated **data** routes use the same connection for `readMemory`
+(serialized under a lock); if the connection drops the client reconnects. If nothing is listening
+they return per-read `error` fields while the HTTP request still succeeds.
 
 ### Running locally
 

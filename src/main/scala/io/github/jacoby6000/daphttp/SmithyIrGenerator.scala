@@ -190,16 +190,18 @@ object SmithyIrGenerator {
         operation.getOutput.toScala.flatMap { outputId =>
           buildIrType(outputId, Set.empty) match {
             case outputStruct: IrType.Struct =>
-              val routePath = operation
-                .findTrait(HttpTrait)
-                .toScala
-                .flatMap { rawTrait =>
-                  val node = rawTrait.toNode
-                  if (node.isObjectNode) {
-                    node.expectObjectNode.getStringMember("uri").toScala.map(_.getValue)
-                  } else None
-                }
-                .getOrElse(s"/${service.getId.getName}/${operation.getId.getName}")
+              val routePath = ApiRoutes.normalize(
+                operation
+                  .findTrait(HttpTrait)
+                  .toScala
+                  .flatMap { rawTrait =>
+                    val node = rawTrait.toNode
+                    if (node.isObjectNode) {
+                      node.expectObjectNode.getStringMember("uri").toScala.map(_.getValue)
+                    } else None
+                  }
+                  .getOrElse(s"/${service.getId.getName}/${operation.getId.getName}")
+              )
               val pointerChain = intTraitValue(operation, PointerDepthTrait).map { depth =>
                 val pointeeType = operation
                   .findTrait(PointeeShapeTrait)

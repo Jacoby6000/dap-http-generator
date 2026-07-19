@@ -104,13 +104,17 @@ object DoldecompIrGenerator {
         val usedRoutePaths = mutable.Set.empty[String]
         val operations = validResolved.map { resolved =>
           val pascalName = toPascalCase(resolved.symbol.name)
-          val baseRoutePath = s"/$serviceName/${resolved.symbol.name}"
+          val baseRoutePath = ApiRoutes.normalize(s"/$serviceName/${resolved.symbol.name}")
           val routePath =
             if (usedRoutePaths.contains(baseRoutePath)) {
               var suffix = 2
-              while (usedRoutePaths.contains(s"/$serviceName/${resolved.symbol.name}_$suffix"))
+              while (
+                usedRoutePaths.contains(
+                  ApiRoutes.normalize(s"/$serviceName/${resolved.symbol.name}_$suffix")
+                )
+              )
                 suffix += 1
-              val result = s"/$serviceName/${resolved.symbol.name}_$suffix"
+              val result = ApiRoutes.normalize(s"/$serviceName/${resolved.symbol.name}_$suffix")
               usedRoutePaths += result
               result
             } else {

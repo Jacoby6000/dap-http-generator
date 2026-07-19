@@ -43,11 +43,11 @@ class HttpRouteIrEmitterCodecSpec extends AnyFunSuite {
             wordSizeBits = wordSize,
             defaultEndian = endian,
             operations =
-              List(IrOperation(name = "GetValue", routePath = "/Api/GetValue", output = output))
+              List(IrOperation(name = "GetValue", routePath = "/api/Api/GetValue", output = output))
           )
         )
       )
-      .routes("/Api/GetValue")
+      .routes("/api/Api/GetValue")
       .reads
       .head
   }

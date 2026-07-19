@@ -20,6 +20,29 @@ ThisBuild / scalacOptions ++= Seq(
 
 lazy val smithyVersion = "1.72.0"
 lazy val declineVersion = "2.4.1"
+lazy val circeVersion = "0.14.16"
+
+lazy val ui = project
+  .in(file("ui"))
+  .enablePlugins(ScalaJSPlugin)
+  .settings(
+    name := "dap-http-ui",
+    scalaJSUseMainModuleInitializer := true,
+    // DESNOTE(jbarber, 2026-07-18): Scala.js DOM / Promise interop is noisy under the JVM
+    // module's strict -Xlint/-Wunused settings; keep those fatal warnings on the server.
+    scalacOptions --= Seq(
+      "-Xlint:_",
+      "-Wunused:imports,patvars,privates,locals,explicits,implicits",
+      "-Wvalue-discard"
+    ),
+    scalacOptions += "-P:scalajs:nowarnGlobalExecutionContext",
+    libraryDependencies ++= Seq(
+      "org.scala-js" %%% "scalajs-dom" % "2.8.0",
+      "io.circe" %%% "circe-core" % circeVersion,
+      "io.circe" %%% "circe-parser" % circeVersion,
+      "io.circe" %%% "circe-generic" % circeVersion
+    )
+  )
 
 lazy val root = (project in file("."))
   .settings(
@@ -29,8 +52,8 @@ lazy val root = (project in file("."))
       "org.http4s" %% "http4s-ember-server" % "0.23.32",
       "org.http4s" %% "http4s-dsl" % "0.23.32",
       "org.http4s" %% "http4s-circe" % "0.23.32",
-      "io.circe" %% "circe-generic" % "0.14.16",
-      "io.circe" %% "circe-parser" % "0.14.16",
+      "io.circe" %% "circe-generic" % circeVersion,
+      "io.circe" %% "circe-parser" % circeVersion,
       "co.fs2" %% "fs2-core" % "3.13.0",
       "org.scodec" %% "scodec-core" % "1.11.10",
       "io.joern" % "eclipse-cdt-core" % "8.4.0.202401242025_1",
@@ -43,7 +66,18 @@ lazy val root = (project in file("."))
       "org.scalatest" %% "scalatest" % "3.2.20" % Test
     ),
     Compile / mainClass := Some("io.github.jacoby6000.daphttp.Cli"),
-    Test / fork := true
+    Test / fork := true,
+    Compile / resourceGenerators += Def.task {
+      val jsFile = (ui / Compile / fastOptJS).value.data
+      val destDir = (Compile / resourceManaged).value / "web"
+      IO.createDirectory(destDir)
+      val destJs = destDir / "main.js"
+      IO.copyFile(jsFile, destJs)
+      val indexSrc = (ui / Compile / resourceDirectory).value / "index.html"
+      val destHtml = destDir / "index.html"
+      IO.copyFile(indexSrc, destHtml)
+      Seq(destJs, destHtml)
+    }.taskValue
   )
 
 addCommandAlias("fmt", ";scalafmtAll;scalafmtSbt")

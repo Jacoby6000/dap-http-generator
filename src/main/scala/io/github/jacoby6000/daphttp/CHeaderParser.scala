@@ -2,8 +2,10 @@ package io.github.jacoby6000.daphttp
 
 import org.eclipse.cdt.core.dom.ast.IASTArrayDeclarator
 import org.eclipse.cdt.core.dom.ast.IASTCompositeTypeSpecifier
+import org.eclipse.cdt.core.dom.ast.IASTDeclSpecifier
 import org.eclipse.cdt.core.dom.ast.IASTDeclaration
 import org.eclipse.cdt.core.dom.ast.IASTDeclarator
+import org.eclipse.cdt.core.dom.ast.IASTEnumerationSpecifier
 import org.eclipse.cdt.core.dom.ast.IASTEqualsInitializer
 import org.eclipse.cdt.core.dom.ast.IASTFieldDeclarator
 import org.eclipse.cdt.core.dom.ast.IASTFunctionDeclarator
@@ -11,8 +13,6 @@ import org.eclipse.cdt.core.dom.ast.IASTInitializer
 import org.eclipse.cdt.core.dom.ast.IASTInitializerClause
 import org.eclipse.cdt.core.dom.ast.IASTInitializerList
 import org.eclipse.cdt.core.dom.ast.IASTLiteralExpression
-import org.eclipse.cdt.core.dom.ast.IASTDeclSpecifier
-import org.eclipse.cdt.core.dom.ast.IASTEnumerationSpecifier
 import org.eclipse.cdt.core.dom.ast.IASTSimpleDeclaration
 import org.eclipse.cdt.core.dom.ast.IASTStandardFunctionDeclarator
 import org.eclipse.cdt.core.dom.ast.IASTTranslationUnit

@@ -179,7 +179,7 @@ class ComplexStructValidationSpec extends AnyFunSuite {
   test("complex struct route reads the full 64-byte struct") {
     val plans = HttpRouteIrEmitter.emitRoutePlansFromIr(generateIr)
     assert(plans.errors.isEmpty)
-    val route = plans.routes("/ComplexApi/gFighterInfo")
+    val route = plans.routes("/api/ComplexApi/gFighterInfo")
     assert(route.reads.size == 1)
     assert(route.reads.head.sizeBytes == 64)
     assert(route.reads.head.address == baseAddress)
@@ -192,7 +192,7 @@ class ComplexStructValidationSpec extends AnyFunSuite {
     val app = DapHttpServerMain.routes(plansRef, mockDapClient(memory)).orNotFound
 
     val response =
-      app.run(Request[IO](Method.GET, uri"/ComplexApi/gFighterInfo")).unsafeRunSync()
+      app.run(Request[IO](Method.GET, uri"/api/ComplexApi/gFighterInfo")).unsafeRunSync()
     val body = response.body.compile.toVector.unsafeRunSync().map(_.toChar).mkString
     val json = io.circe.parser.parse(body).toOption.get
 
@@ -255,8 +255,8 @@ class ComplexStructValidationSpec extends AnyFunSuite {
     assert(smithyPlans.errors.isEmpty)
     assert(cheadersPlans.routes.keySet == smithyPlans.routes.keySet)
 
-    val cheadersRoute = cheadersPlans.routes("/ComplexApi/gFighterInfo")
-    val smithyRoute = smithyPlans.routes("/ComplexApi/gFighterInfo")
+    val cheadersRoute = cheadersPlans.routes("/api/ComplexApi/gFighterInfo")
+    val smithyRoute = smithyPlans.routes("/api/ComplexApi/gFighterInfo")
     assert(cheadersRoute.reads.head.sizeBytes == smithyRoute.reads.head.sizeBytes)
   }
 
@@ -279,7 +279,7 @@ class ComplexStructValidationSpec extends AnyFunSuite {
     val app = DapHttpServerMain.routes(plansRef, mockDapClient(memory)).orNotFound
 
     val response =
-      app.run(Request[IO](Method.GET, uri"/ComplexApi/gFighterInfo")).unsafeRunSync()
+      app.run(Request[IO](Method.GET, uri"/api/ComplexApi/gFighterInfo")).unsafeRunSync()
     val body = response.body.compile.toVector.unsafeRunSync().map(_.toChar).mkString
     val json = io.circe.parser.parse(body).toOption.get
 
@@ -316,7 +316,7 @@ class ComplexStructValidationSpec extends AnyFunSuite {
   test("member sub-routes are generated for all struct members") {
     val plans = HttpRouteIrEmitter.emitRoutePlansFromIr(generateIr)
     assert(plans.errors.isEmpty)
-    val route = plans.routes("/ComplexApi/gFighterInfo")
+    val route = plans.routes("/api/ComplexApi/gFighterInfo")
     val subRouteNames = route.memberSubRoutes.map(_.memberName).toSet
     assert(
       subRouteNames == Set(
@@ -347,13 +347,13 @@ class ComplexStructValidationSpec extends AnyFunSuite {
     val json = io.circe.parser.parse(body).toOption.get
     val routeList = json.hcursor.downField("routes").as[List[String]].toOption.get
 
-    assert(routeList.contains("/ComplexApi/gFighterInfo/name"))
-    assert(routeList.contains("/ComplexApi/gFighterInfo/costumeNames/{index}"))
-    assert(routeList.contains("/ComplexApi/gFighterInfo/colors/{index}"))
-    assert(routeList.contains("/ComplexApi/gFighterInfo/weight"))
-    assert(routeList.contains("/ComplexApi/gFighterInfo/spawnPos"))
-    assert(routeList.contains("/ComplexApi/gFighterInfo/uniqueId"))
-    assert(routeList.contains("/ComplexApi/gFighterInfo/pad/{index}"))
+    assert(routeList.contains("/api/ComplexApi/gFighterInfo/name"))
+    assert(routeList.contains("/api/ComplexApi/gFighterInfo/costumeNames/{index}"))
+    assert(routeList.contains("/api/ComplexApi/gFighterInfo/colors/{index}"))
+    assert(routeList.contains("/api/ComplexApi/gFighterInfo/weight"))
+    assert(routeList.contains("/api/ComplexApi/gFighterInfo/spawnPos"))
+    assert(routeList.contains("/api/ComplexApi/gFighterInfo/uniqueId"))
+    assert(routeList.contains("/api/ComplexApi/gFighterInfo/pad/{index}"))
   }
 
   test("single char pointer sub-route dereferences to a C string") {
@@ -363,7 +363,7 @@ class ComplexStructValidationSpec extends AnyFunSuite {
     val app = DapHttpServerMain.routes(plansRef, mockDapClient(memory)).orNotFound
 
     val response =
-      app.run(Request[IO](Method.GET, uri"/ComplexApi/gFighterInfo/name")).unsafeRunSync()
+      app.run(Request[IO](Method.GET, uri"/api/ComplexApi/gFighterInfo/name")).unsafeRunSync()
     assert(response.status == Status.Ok)
     val body = response.body.compile.toVector.unsafeRunSync().map(_.toChar).mkString
     val json = io.circe.parser.parse(body).toOption.get
@@ -388,7 +388,7 @@ class ComplexStructValidationSpec extends AnyFunSuite {
         .run(
           Request[IO](
             Method.GET,
-            Uri.unsafeFromString(s"/ComplexApi/gFighterInfo/costumeNames/$idx")
+            Uri.unsafeFromString(s"/api/ComplexApi/gFighterInfo/costumeNames/$idx")
           )
         )
         .unsafeRunSync()
@@ -410,7 +410,7 @@ class ComplexStructValidationSpec extends AnyFunSuite {
 
     val response =
       app
-        .run(Request[IO](Method.GET, uri"/ComplexApi/gFighterInfo/costumeNames"))
+        .run(Request[IO](Method.GET, uri"/api/ComplexApi/gFighterInfo/costumeNames"))
         .unsafeRunSync()
     assert(response.status == Status.NotFound)
   }
@@ -430,7 +430,7 @@ class ComplexStructValidationSpec extends AnyFunSuite {
     expectedColors.zipWithIndex.foreach { case (expected, idx) =>
       val response = app
         .run(
-          Request[IO](Method.GET, Uri.unsafeFromString(s"/ComplexApi/gFighterInfo/colors/$idx"))
+          Request[IO](Method.GET, Uri.unsafeFromString(s"/api/ComplexApi/gFighterInfo/colors/$idx"))
         )
         .unsafeRunSync()
       assert(response.status == Status.Ok, s"colors/$idx should be Ok")
@@ -460,7 +460,7 @@ class ComplexStructValidationSpec extends AnyFunSuite {
         .run(
           Request[IO](
             Method.GET,
-            Uri.unsafeFromString(s"/ComplexApi/gFighterInfo/costumeNames/15")
+            Uri.unsafeFromString(s"/api/ComplexApi/gFighterInfo/costumeNames/15")
           )
         )
         .unsafeRunSync()
@@ -478,7 +478,7 @@ class ComplexStructValidationSpec extends AnyFunSuite {
 
     val response =
       app
-        .run(Request[IO](Method.GET, uri"/ComplexApi/gFighterInfo/unknownMember"))
+        .run(Request[IO](Method.GET, uri"/api/ComplexApi/gFighterInfo/unknownMember"))
         .unsafeRunSync()
     assert(response.status == Status.NotFound)
   }
@@ -501,8 +501,8 @@ class ComplexStructValidationSpec extends AnyFunSuite {
     assert(cheadersPlans.errors.isEmpty)
     assert(smithyPlans.errors.isEmpty)
 
-    val cheadersRoute = cheadersPlans.routes("/ComplexApi/gFighterInfo")
-    val smithyRoute = smithyPlans.routes("/ComplexApi/gFighterInfo")
+    val cheadersRoute = cheadersPlans.routes("/api/ComplexApi/gFighterInfo")
+    val smithyRoute = smithyPlans.routes("/api/ComplexApi/gFighterInfo")
 
     val cheadersSubs = cheadersRoute.memberSubRoutes.map(s => s.memberName -> s).toMap
     val smithySubs = smithyRoute.memberSubRoutes.map(s => s.memberName -> s).toMap
@@ -547,7 +547,7 @@ class ComplexStructValidationSpec extends AnyFunSuite {
     val app = DapHttpServerMain.routes(plansRef, mockDapClient(memory)).orNotFound
 
     val nameResponse =
-      app.run(Request[IO](Method.GET, uri"/ComplexApi/gFighterInfo/name")).unsafeRunSync()
+      app.run(Request[IO](Method.GET, uri"/api/ComplexApi/gFighterInfo/name")).unsafeRunSync()
     assert(nameResponse.status == Status.Ok)
     val nameBody = nameResponse.body.compile.toVector.unsafeRunSync().map(_.toChar).mkString
     val nameJson = io.circe.parser.parse(nameBody).toOption.get
@@ -556,7 +556,7 @@ class ComplexStructValidationSpec extends AnyFunSuite {
     val colorResponse =
       app
         .run(
-          Request[IO](Method.GET, Uri.unsafeFromString("/ComplexApi/gFighterInfo/colors/0"))
+          Request[IO](Method.GET, Uri.unsafeFromString("/api/ComplexApi/gFighterInfo/colors/0"))
         )
         .unsafeRunSync()
     assert(colorResponse.status == Status.Ok)
@@ -578,7 +578,7 @@ class ComplexStructValidationSpec extends AnyFunSuite {
     val app = DapHttpServerMain.routes(plansRef, mockDapClient(memory)).orNotFound
 
     val response =
-      app.run(Request[IO](Method.GET, uri"/ComplexApi/gFighterInfo/weight")).unsafeRunSync()
+      app.run(Request[IO](Method.GET, uri"/api/ComplexApi/gFighterInfo/weight")).unsafeRunSync()
     assert(response.status == Status.Ok)
     val body = response.body.compile.toVector.unsafeRunSync().map(_.toChar).mkString
     val json = io.circe.parser.parse(body).toOption.get
@@ -595,7 +595,7 @@ class ComplexStructValidationSpec extends AnyFunSuite {
     val app = DapHttpServerMain.routes(plansRef, mockDapClient(memory)).orNotFound
 
     val response =
-      app.run(Request[IO](Method.GET, uri"/ComplexApi/gFighterInfo/spawnPos")).unsafeRunSync()
+      app.run(Request[IO](Method.GET, uri"/api/ComplexApi/gFighterInfo/spawnPos")).unsafeRunSync()
     assert(response.status == Status.Ok)
     val body = response.body.compile.toVector.unsafeRunSync().map(_.toChar).mkString
     val json = io.circe.parser.parse(body).toOption.get
@@ -617,7 +617,7 @@ class ComplexStructValidationSpec extends AnyFunSuite {
 
     val response =
       app
-        .run(Request[IO](Method.GET, Uri.unsafeFromString("/ComplexApi/gFighterInfo/pad/0")))
+        .run(Request[IO](Method.GET, Uri.unsafeFromString("/api/ComplexApi/gFighterInfo/pad/0")))
         .unsafeRunSync()
     assert(response.status == Status.Ok)
     val body = response.body.compile.toVector.unsafeRunSync().map(_.toChar).mkString
@@ -635,7 +635,7 @@ class ComplexStructValidationSpec extends AnyFunSuite {
     val app = DapHttpServerMain.routes(plansRef, mockDapClient(memory)).orNotFound
 
     val response =
-      app.run(Request[IO](Method.GET, uri"/ComplexApi/gFighterInfo/uniqueId")).unsafeRunSync()
+      app.run(Request[IO](Method.GET, uri"/api/ComplexApi/gFighterInfo/uniqueId")).unsafeRunSync()
     assert(response.status == Status.Ok)
     val body = response.body.compile.toVector.unsafeRunSync().map(_.toChar).mkString
     val json = io.circe.parser.parse(body).toOption.get
@@ -665,14 +665,14 @@ class ComplexStructValidationSpec extends AnyFunSuite {
     val app = DapHttpServerMain.routes(plansRef, mockDapClient(memory)).orNotFound
 
     val weightResponse =
-      app.run(Request[IO](Method.GET, uri"/ComplexApi/gFighterInfo/weight")).unsafeRunSync()
+      app.run(Request[IO](Method.GET, uri"/api/ComplexApi/gFighterInfo/weight")).unsafeRunSync()
     assert(weightResponse.status == Status.Ok)
     val weightBody = weightResponse.body.compile.toVector.unsafeRunSync().map(_.toChar).mkString
     val weightJson = io.circe.parser.parse(weightBody).toOption.get
     assert(weightJson.hcursor.downField("decoded").as[Int].toOption.contains(100))
 
     val spawnResponse =
-      app.run(Request[IO](Method.GET, uri"/ComplexApi/gFighterInfo/spawnPos")).unsafeRunSync()
+      app.run(Request[IO](Method.GET, uri"/api/ComplexApi/gFighterInfo/spawnPos")).unsafeRunSync()
     assert(spawnResponse.status == Status.Ok)
     val spawnBody = spawnResponse.body.compile.toVector.unsafeRunSync().map(_.toChar).mkString
     val spawnJson = io.circe.parser.parse(spawnBody).toOption.get

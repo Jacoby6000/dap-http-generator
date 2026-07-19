@@ -321,9 +321,9 @@ class DapHttpIntegrationSpec extends AnyFunSuite {
       } yield {
         val port = server.address.getPort
         val client = HttpClient.newHttpClient()
-        val little16 = getResponse(client, s"http://127.0.0.1:$port/Api/GetLittle16")
-        val regs = getResponse(client, s"http://127.0.0.1:$port/Api/GetRegs")
-        val name = getResponse(client, s"http://127.0.0.1:$port/Api/GetName")
+        val little16 = getResponse(client, s"http://127.0.0.1:$port/api/Api/GetLittle16")
+        val regs = getResponse(client, s"http://127.0.0.1:$port/api/Api/GetRegs")
+        val name = getResponse(client, s"http://127.0.0.1:$port/api/Api/GetName")
 
         val littleDecoded = little16.hcursor
           .downField("reads")

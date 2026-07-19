@@ -65,15 +65,15 @@ class HttpRouteIrEmitterRouteSpec extends AnyFunSuite {
             wordSizeBits = Some(32),
             defaultEndian = IrEndian.Big,
             operations = List(
-              IrOperation(name = "GetSnapshot", routePath = "/Api/GetSnapshot", output = output)
+              IrOperation(name = "GetSnapshot", routePath = "/api/Api/GetSnapshot", output = output)
             )
           )
         )
       )
       .routes
 
-    val read = plans("/Api/GetSnapshot").reads.head
-    assert(read.path == "/Api/GetSnapshot.registers")
+    val read = plans("/api/Api/GetSnapshot").reads.head
+    assert(read.path == "/api/Api/GetSnapshot.registers")
     assert(read.address == 0x1000L)
     assert(read.sizeBytes == 4)
     assert(read.decodeCodec.nonEmpty)
@@ -138,13 +138,13 @@ class HttpRouteIrEmitterRouteSpec extends AnyFunSuite {
             wordSizeBits = Some(32),
             defaultEndian = IrEndian.Big,
             operations =
-              List(IrOperation(name = "GetFlags", routePath = "/Api/GetFlags", output = output))
+              List(IrOperation(name = "GetFlags", routePath = "/api/Api/GetFlags", output = output))
           )
         )
       )
       .routes
 
-    val read = plans("/Api/GetFlags").reads.head
+    val read = plans("/api/Api/GetFlags").reads.head
     assert(read.sizeBytes == 2)
   }
 }

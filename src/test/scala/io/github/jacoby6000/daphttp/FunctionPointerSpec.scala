@@ -121,7 +121,7 @@ class FunctionPointerSpec extends AnyFunSuite {
     val plans = HttpRouteIrEmitter.emitRoutePlansFromIr(fnptrIr.services)
     assert(plans.errors.isEmpty)
 
-    val route = plans.routes("/FnPtrApi/g_CallbackTable")
+    val route = plans.routes("/api/FnPtrApi/g_CallbackTable")
     assert(route.reads.nonEmpty)
     assert(route.reads.head.decodeCodec.nonEmpty)
 
@@ -149,7 +149,7 @@ class FunctionPointerSpec extends AnyFunSuite {
     val plans = HttpRouteIrEmitter.emitRoutePlansFromIr(fnptrIr.services)
     assert(plans.errors.isEmpty)
 
-    val route = plans.routes("/FnPtrApi/g_CallbackTable")
+    val route = plans.routes("/api/FnPtrApi/g_CallbackTable")
     val onInitSubRoute = route.memberSubRoutes.find(_.memberName == "onInit")
     assert(onInitSubRoute.isDefined)
     assert(onInitSubRoute.get.isInstanceOf[MemberSubRoute.ValueSubRoute])
@@ -161,7 +161,7 @@ class FunctionPointerSpec extends AnyFunSuite {
 
   test("function pointer ValueSubRoute has correct element size") {
     val plans = HttpRouteIrEmitter.emitRoutePlansFromIr(fnptrIr.services)
-    val route = plans.routes("/FnPtrApi/g_CallbackTable")
+    val route = plans.routes("/api/FnPtrApi/g_CallbackTable")
     val onInitSubRoute = route.memberSubRoutes
       .find(_.memberName == "onInit")
       .get
@@ -173,7 +173,7 @@ class FunctionPointerSpec extends AnyFunSuite {
 
   test("function pointer ValueSubRoute codec decodes address correctly") {
     val plans = HttpRouteIrEmitter.emitRoutePlansFromIr(fnptrIr.services)
-    val route = plans.routes("/FnPtrApi/g_CallbackTable")
+    val route = plans.routes("/api/FnPtrApi/g_CallbackTable")
     val onInitSubRoute = route.memberSubRoutes
       .find(_.memberName == "onInit")
       .get

@@ -67,9 +67,28 @@ flowchart LR
 `SmithyIrEmitter` builds a Smithy `Model` with smithy-model shape builders and serializes it via
 `SmithyIdlModelSerializer` (do not hand-render Smithy IDL text).
 
+### Modules
+
+- **root (JVM)** — CLI, IR pipeline, http4s server (`io.github.jacoby6000.daphttp.Cli`).
+- **ui (Scala.js)** — browser explorer under `ui/`; `Compile / resourceGenerators` copies
+  `fastOptJS` + `index.html` into `web/` resources served at `/` and `/assets/main.js`.
+
+### HTTP surface
+
+| Path | Purpose |
+|------|---------|
+| `GET /` | HTML + Scala.js route explorer |
+| `GET /assets/main.js` | Packaged Scala.js bundle |
+| `GET /health` | Liveness |
+| `GET /routes` | Flat `routes` list + `tree` (for the UI) + `errors` |
+| `POST /resume` | DAP `continue` |
+| `GET /api/...` | Generated memory / data routes |
+
 ### Non-obvious caveats
 
 - `scalafmtOnCompile := true`, so `sbt compile` will reformat sources in place.
+- Generated data routes are always under `/api` (`ApiRoutes.normalize`). Meta UI endpoints stay at
+  the root so they never collide with a Smithy service named `api`.
 - The `/health` and `/routes` endpoints work without a debugger. On startup the server immediately
   tries to connect to the DAP adapter on `--dap-port` (1s TCP timeout per attempt, retrying every
   5s until connected). Generated **data** routes reuse that persistent TCP connection (serialized
@@ -81,3 +100,4 @@ flowchart LR
   prelude types (`Integer`, `Long`, `Float`, `Double`) without explicit width traits (`@u32`,
   `@f64`, etc.). Pointer members are excluded.
 - First `sbt` invocation downloads sbt/Scala launchers and Coursier deps; expect a slow cold start.
+  Building the server also builds the Scala.js UI via `resourceGenerators`.

@@ -21,7 +21,7 @@ class DoldecompSmithyGeneratorIntegrationSpec extends AnyFunSuite {
       .services
 
     val plans = HttpRouteIrEmitter.emitRoutePlansFromIr(irServices).routes
-    val route = plans("/MeleeApi/gPlayerState")
+    val route = plans("/api/MeleeApi/gPlayerState")
     val playerState =
       irServices.head.operations.head.output.members.head.target.asInstanceOf[IrType.Struct]
     val scoreMember = playerState.members.find(_.name == "score").get
@@ -93,8 +93,8 @@ class DoldecompSmithyGeneratorIntegrationSpec extends AnyFunSuite {
 
     val service = irServices.head
     val plans = HttpRouteIrEmitter.emitRoutePlansFromIr(irServices).routes
-    val playerRoute = plans("/MeleeApi/gPlayerState")
-    val worldRoute = plans("/MeleeApi/gWorldState")
+    val playerRoute = plans("/api/MeleeApi/gPlayerState")
+    val worldRoute = plans("/api/MeleeApi/gWorldState")
 
     assert(service.operations.map(_.name).toSet == Set("GetGPlayerState", "GetGWorldState"))
     assert(playerRoute.reads.head.address == 0x80453100L)
@@ -144,7 +144,7 @@ class DoldecompSmithyGeneratorIntegrationSpec extends AnyFunSuite {
       .services
 
     val plans = HttpRouteIrEmitter.emitRoutePlansFromIr(irServices).routes
-    val route = plans("/MeleeApi/gPlayerState")
+    val route = plans("/api/MeleeApi/gPlayerState")
 
     assert(route.reads.size == 1)
     assert(route.reads.head.address == 0x80453100L)
@@ -174,7 +174,7 @@ class DoldecompSmithyGeneratorIntegrationSpec extends AnyFunSuite {
     assert(valueMember.arrayLength.contains(2))
 
     val plans = HttpRouteIrEmitter.emitRoutePlansFromIr(irServices).routes
-    val route = plans("/MeleeApi/gm_803DDAC0_Scenes")
+    val route = plans("/api/MeleeApi/gm_803DDAC0_Scenes")
 
     assert(route.reads.head.address == 0x803ddac0L)
     assert(route.reads.head.sizeBytes == 42)
@@ -198,8 +198,8 @@ class DoldecompSmithyGeneratorIntegrationSpec extends AnyFunSuite {
     assert(generation.services.head.operations.map(_.name) == List("GetGPlayerState"))
 
     val plans = HttpRouteIrEmitter.emitRoutePlansFromIr(generation.services)
-    assert(plans.routes.contains("/MeleeApi/gPlayerState"))
-    assert(!plans.routes.contains("/MeleeApi/badSymbol"))
+    assert(plans.routes.contains("/api/MeleeApi/gPlayerState"))
+    assert(!plans.routes.contains("/api/MeleeApi/badSymbol"))
     assert(plans.errors.isEmpty)
   }
 
@@ -223,8 +223,8 @@ class DoldecompSmithyGeneratorIntegrationSpec extends AnyFunSuite {
     assert(valueMember.target == IrType.Primitive(IrPrimitive.S32))
 
     val plans = HttpRouteIrEmitter.emitRoutePlansFromIr(generation.services)
-    assert(plans.routes.contains("/MeleeApi/intVar"))
-    assert(plans.routes("/MeleeApi/intVar").reads.head.sizeBytes == 4)
+    assert(plans.routes.contains("/api/MeleeApi/intVar"))
+    assert(plans.routes("/api/MeleeApi/intVar").reads.head.sizeBytes == 4)
   }
 
   test("maps char arrays and char pointers to string semantics in IR") {
@@ -254,8 +254,8 @@ class DoldecompSmithyGeneratorIntegrationSpec extends AnyFunSuite {
     assert(labelMember.primitiveOverride.contains(IrPrimitive.Char))
 
     val plans = HttpRouteIrEmitter.emitRoutePlansFromIr(generation.services)
-    assert(plans.routes.contains("/StringsApi/g_string_fields"))
-    assert(plans.routes("/StringsApi/g_string_fields").reads.head.decodeCodec.nonEmpty)
+    assert(plans.routes.contains("/api/StringsApi/g_string_fields"))
+    assert(plans.routes("/api/StringsApi/g_string_fields").reads.head.decodeCodec.nonEmpty)
   }
 
   test("decodes char globals as full null-terminated strings") {
@@ -276,7 +276,7 @@ class DoldecompSmithyGeneratorIntegrationSpec extends AnyFunSuite {
       HttpRouteIrEmitter
         .emitRoutePlansFromIr(generation.services)
         .routes(
-          "/DolDecompApi/strPlLoadCommonData"
+          "/api/DolDecompApi/strPlLoadCommonData"
         )
     val payload = "pLoadCommonData\u0000\u0000".getBytes("US-ASCII")
     val decoded =
@@ -332,12 +332,12 @@ class DoldecompSmithyGeneratorIntegrationSpec extends AnyFunSuite {
 
     val plans = HttpRouteIrEmitter.emitRoutePlansFromIr(generation.services)
     assert(plans.errors.isEmpty)
-    val tableRoute = plans.routes("/MeleeApi/event_init_data_level_table")
+    val tableRoute = plans.routes("/api/MeleeApi/event_init_data_level_table")
     assert(tableRoute.pointerChain.nonEmpty)
     assert(tableRoute.reads.head.sizeBytes == 8)
 
     val mappingRoute =
-      plans.routes("/MeleeApi/event_match_selection_index_to_event_match_id_mapping")
+      plans.routes("/api/MeleeApi/event_match_selection_index_to_event_match_id_mapping")
     assert(mappingRoute.reads.head.sizeBytes == 0x33)
   }
 
@@ -360,8 +360,8 @@ class DoldecompSmithyGeneratorIntegrationSpec extends AnyFunSuite {
     assert(operation.output.members.head.primitiveOverride.contains(IrPrimitive.Char))
 
     val plans = HttpRouteIrEmitter.emitRoutePlansFromIr(generation.services)
-    assert(plans.routes("/DolDecompApi/db_PokemonNames").pointerChain.exists(_.followCString))
-    assert(!plans.routes("/DolDecompApi/db_PokemonNames").reads.head.cStringPointer)
+    assert(plans.routes("/api/DolDecompApi/db_PokemonNames").pointerChain.exists(_.followCString))
+    assert(!plans.routes("/api/DolDecompApi/db_PokemonNames").reads.head.cStringPointer)
   }
 
   test("serves char pointer array sub-routes as full C strings over HTTP") {
@@ -432,7 +432,7 @@ class DoldecompSmithyGeneratorIntegrationSpec extends AnyFunSuite {
     val plansRef = Ref.unsafe[IO, RoutePlansLoadResult](plans)
     val app = DapHttpServerMain.routes(plansRef, dapClient).orNotFound
     val response =
-      app.run(Request[IO](Method.GET, uri"/DolDecompApi/db_PokemonNames/2")).unsafeRunSync()
+      app.run(Request[IO](Method.GET, uri"/api/DolDecompApi/db_PokemonNames/2")).unsafeRunSync()
     val body = response.body.compile.toVector.unsafeRunSync().map(_.toChar).mkString
     val decoded = io.circe.parser.parse(body).toOption.get.hcursor.downField("decoded").as[String]
 
@@ -468,7 +468,7 @@ class DoldecompSmithyGeneratorIntegrationSpec extends AnyFunSuite {
 
     val plans = HttpRouteIrEmitter.emitRoutePlansFromIr(generation.services)
     assert(plans.errors.isEmpty)
-    assert(plans.routes("/DolDecompApi/start_event_rules").reads.head.decodeCodec.nonEmpty)
+    assert(plans.routes("/api/DolDecompApi/start_event_rules").reads.head.decodeCodec.nonEmpty)
   }
 
   test("honors doldecomp member offset comments in struct layout") {
@@ -498,7 +498,7 @@ class DoldecompSmithyGeneratorIntegrationSpec extends AnyFunSuite {
     assert(outputMember.readSizeBytes.contains(0x0c))
 
     val plans = HttpRouteIrEmitter.emitRoutePlansFromIr(generation.services)
-    val route = plans.routes("/DolDecompApi/padded_struct")
+    val route = plans.routes("/api/DolDecompApi/padded_struct")
     assert(route.reads.head.sizeBytes == 0x0c)
 
     val payload = Array.fill[Byte](12)(0)
@@ -552,7 +552,7 @@ class DoldecompSmithyGeneratorIntegrationSpec extends AnyFunSuite {
 
     val plans = HttpRouteIrEmitter.emitRoutePlansFromIr(generation.services)
     assert(plans.errors.isEmpty)
-    val route = plans.routes("/DolDecompApi/gStringTable")
+    val route = plans.routes("/api/DolDecompApi/gStringTable")
     assert(route.reads.head.sizeBytes == 20)
 
     val baseAddress = 0x80400000L
@@ -601,7 +601,7 @@ class DoldecompSmithyGeneratorIntegrationSpec extends AnyFunSuite {
     val plansRef = Ref.unsafe[IO, RoutePlansLoadResult](plans)
     val app = DapHttpServerMain.routes(plansRef, dapClient).orNotFound
     val response =
-      app.run(Request[IO](Method.GET, uri"/DolDecompApi/gStringTable")).unsafeRunSync()
+      app.run(Request[IO](Method.GET, uri"/api/DolDecompApi/gStringTable")).unsafeRunSync()
     val body = response.body.compile.toVector.unsafeRunSync().map(_.toChar).mkString
     val namesJson = io.circe.parser
       .parse(body)

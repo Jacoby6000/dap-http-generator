@@ -210,7 +210,7 @@ object SmithyIrEmitter {
       .id(ShapeId.from(s"$namespace#${operation.name}"))
       .output(operation.output.id)
 
-    builder.addTrait(httpGetTrait(operation.routePath))
+    builder.addTrait(httpGetTrait(ApiRoutes.normalize(operation.routePath)))
 
     operation.pointerChain.foreach { chain =>
       builder.addTrait(intTrait("pointerDepth", chain.pointerDepth))
