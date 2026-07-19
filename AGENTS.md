@@ -100,6 +100,8 @@ flowchart LR
   prelude types (`Integer`, `Long`, `Float`, `Double`) without explicit width traits (`@u32`,
   `@f64`, etc.). Pointer members are excluded.
 - C `enum` / Smithy `intEnum` values decode to the enumerator name in JSON. Values that do not
-  match any enumerator decode as a hex literal (`0xN`), not a numeric type.
+  match any enumerator decode as a hex literal (`0xN`), not a numeric type. Enumerator
+  initializers are evaluated with CDT `ValueFactory` after preprocessor expansion; unevaluable
+  explicit initializers warn instead of silently inventing sequential values.
 - First `sbt` invocation downloads sbt/Scala launchers and Coursier deps; expect a slow cold start.
   Building the server also builds the Scala.js UI via `resourceGenerators`.

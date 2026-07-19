@@ -446,4 +446,81 @@ class HttpRouteIrEmitterCodecSpec extends AnyFunSuite {
     assert(decode(read, Array(0x00, 0x00, 0x00, 0x01)) == Json.fromString("PRIMARY"))
     assert(decode(read, Array(0x00, 0x00, 0x00, 0x02)) == Json.fromString("OTHER"))
   }
+
+  test("decodes negative enum values from two's complement memory") {
+    val status = IrType.IntEnum(
+      id = id("SignedStatus"),
+      values = List(IrEnumValue("OK", 0), IrEnumValue("NEG", -1))
+    )
+    val read = compileSingleRead(status)
+    assert(
+      decode(read, Array(0xff.toByte, 0xff.toByte, 0xff.toByte, 0xff.toByte)) ==
+        Json.fromString("NEG")
+    )
+  }
+
+  test("decodes little-endian enum values") {
+    val color = IrType.IntEnum(
+      id = id("LeColor"),
+      values = List(IrEnumValue("RED", 0), IrEnumValue("GREEN", 1))
+    )
+    val read = compileSingleRead(color, endian = IrEndian.Little)
+    assert(decode(read, Array(0x01, 0x00, 0x00, 0x00)) == Json.fromString("GREEN"))
+  }
+
+  test("decodes arrays of enums to arrays of names") {
+    val color = IrType.IntEnum(
+      id = id("PaletteColor"),
+      values = List(IrEnumValue("RED", 0), IrEnumValue("GREEN", 1), IrEnumValue("BLUE", 2))
+    )
+    val output = IrType.EnclosingStruct(
+      id = id("Output"),
+      members = List(
+        IrMember(
+          id = id("Output_colors"),
+          name = "colors",
+          target = IrType.ListType(
+            id = id("ColorArray"),
+            element = color,
+            bytesAlias = false,
+            bitsAlias = false
+          ),
+          staticAddress = Some(0x1000L),
+          paddingRepeats = None,
+          isPointer = false,
+          isArray = true,
+          arrayLength = Some(3),
+          endianOverride = None,
+          primitiveOverride = None
+        )
+      ),
+      declaredSizeBits = None
+    )
+    val read = HttpRouteIrEmitter
+      .emitRoutePlansFromIr(
+        List(
+          IrService(
+            name = "Api",
+            wordSizeBits = Some(32),
+            defaultEndian = IrEndian.Big,
+            operations =
+              List(IrOperation(name = "GetValue", routePath = "/api/Api/GetValue", output = output))
+          )
+        )
+      )
+      .routes("/api/Api/GetValue")
+      .reads
+      .head
+
+    val bytes = Array[Byte](
+      0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x2a
+    )
+    assert(
+      decode(read, bytes) == Json.arr(
+        Json.fromString("RED"),
+        Json.fromString("GREEN"),
+        Json.fromString("0x2a")
+      )
+    )
+  }
 }
