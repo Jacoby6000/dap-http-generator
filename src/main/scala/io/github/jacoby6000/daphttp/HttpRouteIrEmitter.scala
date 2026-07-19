@@ -226,9 +226,14 @@ object HttpRouteIrEmitter {
                 errors,
                 context
               )
-            (member.staticAddress.get, resolvedPointeeSizeBytes, pointeeDecodeCodec)
+            (
+              member.staticAddress.get,
+              resolvedPointeeSizeBytes,
+              pointeeDecodeCodec,
+              arrayElementStrideBytes(member, Some(wordSizeBits))
+            )
         }
-        .flatMap { case (baseAddress, resolvedSizeBytes, codecOpt) =>
+        .flatMap { case (baseAddress, resolvedSizeBytes, codecOpt, outerStride) =>
           for {
             sizeBytes <- resolvedSizeBytes
             codec <- codecOpt
@@ -242,7 +247,8 @@ object HttpRouteIrEmitter {
             pointeeSizeBytes = sizeBytes,
             pointeeDecodeCodec = Some(codec),
             followCString =
-              chain.followCString || chain.pointeeType == IrType.Primitive(IrPrimitive.Char)
+              chain.followCString || chain.pointeeType == IrType.Primitive(IrPrimitive.Char),
+            outerElementStrideBytes = outerStride
           )
         }
     }
@@ -1148,7 +1154,8 @@ object HttpRouteIrEmitter {
     val elementWidth = bitsForPrimitive(IrPrimitive.LongWord, wordSize)
     (length, elementCodec, elementWidth) match {
       case (Some(count), Some(codec), Some(width)) =>
-        Some(arrayCodec(count, width, strideBits = width, codec))
+        val strideBits = arrayElementStrideBits(member, width)
+        Some(arrayCodec(count, width, strideBits, codec))
       case _ => None
     }
   }
@@ -1184,15 +1191,22 @@ object HttpRouteIrEmitter {
   }
 
   private def arrayElementStrideBytes(member: IrMember, wordSize: Option[Int]): Option[Int] =
-    if (!member.isArray || member.isPointer) {
+    if (!member.isArray) {
       None
     } else {
-      val layoutBytes = member.target match {
-        case listType: IrType.ListType =>
-          listElementBitWidth(listType.element, wordSize).map(bits => math.ceil(bits / 8d).toInt)
-        case _ =>
-          None
-      }
+      val layoutBytes =
+        if (member.isPointer) {
+          wordSize.map(bits => math.ceil(bits / 8d).toInt)
+        } else {
+          member.target match {
+            case listType: IrType.ListType =>
+              listElementBitWidth(listType.element, wordSize).map(bits =>
+                math.ceil(bits / 8d).toInt
+              )
+            case _ =>
+              None
+          }
+        }
       val fromSymbol = for {
         totalBytes <- member.readSizeBytes
         count <- member.arrayLength

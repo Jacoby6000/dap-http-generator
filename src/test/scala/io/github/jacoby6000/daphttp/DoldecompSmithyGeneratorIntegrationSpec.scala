@@ -868,4 +868,85 @@ class DoldecompSmithyGeneratorIntegrationSpec extends AnyFunSuite {
     assert(decoded(0).hcursor.downField("name").as[String].toOption.contains("Alpha"))
     assert(decoded(1).hcursor.downField("name").as[String].toOption.contains("Beta"))
   }
+
+  test("mergeGlobalDeclarations prefers non-static definition over pointer forward decl") {
+    val merged = DoldecompIrGenerator.mergeGlobalDeclarations(
+      List(
+        GlobalVariableDeclaration(
+          name = "g_table",
+          typeName = "u8",
+          isArray = false,
+          declaratorLength = None,
+          initializerLength = None,
+          pointerDepth = 1,
+          isStatic = true
+        ),
+        GlobalVariableDeclaration(
+          name = "g_table",
+          typeName = "GameScene",
+          isArray = true,
+          declaratorLength = None,
+          initializerLength = Some(2),
+          pointerDepth = 0,
+          isStatic = false
+        )
+      )
+    )
+
+    assert(merged.typeName == "GameScene")
+    assert(merged.isArray)
+    assert(merged.initializerLength.contains(2))
+    assert(merged.pointerDepth == 0)
+    assert(!merged.isStatic)
+  }
+
+  test("warns when symbol size is inconsistent with C-derived array length") {
+    val tmp = java.nio.file.Files.createTempDirectory("dap-size-mismatch")
+    try {
+      val header = tmp.resolve("types.h")
+      val source = tmp.resolve("data.c")
+      val symbols = tmp.resolve("symbols.txt")
+      java.nio.file.Files.writeString(
+        header,
+        """
+          |typedef struct Item {
+          |    u32 value;
+          |} Item;
+          |""".stripMargin
+      )
+      java.nio.file.Files.writeString(
+        source,
+        """
+          |#include "types.h"
+          |Item g_items[2];
+          |""".stripMargin
+      )
+      // 3 bytes is too small for Item[2] (element size 4 → need at least 8).
+      java.nio.file.Files.writeString(
+        symbols,
+        "g_items = .data:0x80000000; // type:object size:0x3 scope:global\n"
+      )
+
+      val generation = DoldecompIrGenerator
+        .generateFromPaths(
+          symbolsPath = symbols,
+          headerRoots = List(tmp),
+          namespace = "example.size.mismatch",
+          serviceName = "Api",
+          wordSizeBits = 32
+        )
+        .toOption
+        .get
+
+      assert(
+        generation.warnings.exists(w =>
+          w.contains("g_items") && w.contains("inconsistent with array length")
+        )
+      )
+    } finally {
+      java.nio.file.Files.walk(tmp).sorted(java.util.Comparator.reverseOrder()).forEach { path =>
+        val _ = java.nio.file.Files.deleteIfExists(path)
+      }
+    }
+  }
 }

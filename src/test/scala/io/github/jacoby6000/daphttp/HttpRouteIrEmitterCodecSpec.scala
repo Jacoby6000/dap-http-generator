@@ -766,4 +766,70 @@ class HttpRouteIrEmitterCodecSpec extends AnyFunSuite {
     assert(elements(0).hcursor.downField("_address").as[String].toOption.contains("0x2000"))
     assert(elements(1).hcursor.downField("_address").as[String].toOption.contains("0x2008"))
   }
+
+  test("pointer array codec uses symbol stride when larger than pointer width") {
+    val listType = IrType.ListType(
+      id = id("PtrList"),
+      element = IrType.Primitive(IrPrimitive.LongWord),
+      bytesAlias = false,
+      bitsAlias = false
+    )
+    val output = IrType.EnclosingStruct(
+      id = id("PtrOutput"),
+      members = List(
+        IrMember(
+          id = id("PtrOutput_value"),
+          name = "value",
+          target = listType,
+          staticAddress = Some(0x3000L),
+          paddingRepeats = None,
+          isPointer = true,
+          isArray = true,
+          arrayLength = Some(2),
+          endianOverride = None,
+          primitiveOverride = None,
+          readSizeBytes = Some(0x10)
+        )
+      ),
+      declaredSizeBits = None
+    )
+
+    val route = HttpRouteIrEmitter
+      .emitRoutePlansFromIr(
+        List(
+          IrService(
+            name = "Api",
+            wordSizeBits = Some(32),
+            defaultEndian = IrEndian.Big,
+            operations = List(
+              IrOperation(
+                name = "GetPtrs",
+                routePath = "/api/Api/GetPtrs",
+                output = output,
+                pointerChain = Some(
+                  IrPointerChain(
+                    pointeeType = IrType.Primitive(IrPrimitive.U8),
+                    pointerDepth = 1,
+                    outerArrayLength = Some(2)
+                  )
+                )
+              )
+            )
+          )
+        )
+      )
+      .routes("/api/Api/GetPtrs")
+
+    val read = route.reads.head
+    assert(read.sizeBytes == 0x10)
+    assert(read.elementStrideBytes.contains(8))
+    assert(route.pointerChain.flatMap(_.outerElementStrideBytes).contains(8))
+
+    // Packed pointers are 4 bytes; each slot is padded to 8.
+    val bytes = Array[Byte](
+      0x10, 0x00, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x00, 0x20, 0x00, 0x00, 0x00, 0x00, 0x00
+    )
+    val decoded = decode(read, bytes).asArray.get.map(_.as[Long].toOption.get)
+    assert(decoded == Vector(0x10001000L, 0x10002000L))
+  }
 }

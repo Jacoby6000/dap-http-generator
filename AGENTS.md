@@ -111,8 +111,12 @@ flowchart LR
 - Member `@size(N)` (also structure `@size`) round-trips doldecomp symbol `size:` as
   `IrMember.readSizeBytes` through `cheaders-smithy` → `smithy`. Structure `@size` still means
   declared structure width; on members it is the explicit DAP read width.
-- Global arrays use `readSizeBytes / length` as element stride when that exceeds packed layout
-  width (padding between elements). Object symbols in code sections (`.text`, etc.) and data
-  symbols without `ctype`/C declarations emit per-symbol warnings rather than failing silently.
+- Global arrays (including pointer arrays) use `readSizeBytes / length` as element stride when that
+  exceeds packed layout/pointer width (padding between elements). Pointer-chain outer indices use
+  the same stride. Object symbols in code sections (`.text`, etc.) and data symbols without
+  `ctype`/C declarations emit per-symbol warnings rather than failing silently.
+- Duplicate C globals for one symbol name merge deterministically: prefer non-`static` declarations
+  with array length metadata; take `pointerDepth` from that primary (not `max`). `cheaders-smithy`
+  fails when the service has zero operations.
 - First `sbt` invocation downloads sbt/Scala launchers and Coursier deps; expect a slow cold start.
   Building the server also builds the Scala.js UI via `resourceGenerators`.

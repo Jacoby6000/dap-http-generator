@@ -332,6 +332,25 @@ object DoldecompIrGenerator {
         }
 
         operationsWithArrayLengths.foreach { operation =>
+          if (operation.isArray) {
+            for {
+              length <- operation.arrayLength
+              totalSize <- operation.symbol.sizeBytes
+              elementSize <- elementSizeBytesForRootType(
+                operation.rootTypeName,
+                operation.pointerDepth
+              )
+              // Warn only when the symbol is too small for a packed array. Larger sizes may be
+              // per-element stride padding (when divisible) or trailing section padding.
+              if length > 0 && totalSize < length.toLong * elementSize
+            } {
+              warnings +=
+                s"${operation.symbol.name}: symbol size 0x${totalSize.toHexString} is inconsistent with array length $length and element size $elementSize."
+            }
+          }
+        }
+
+        operationsWithArrayLengths.foreach { operation =>
           val resolvedRoot = resolveTypedef(operation.rootTypeName, typedefs)
           if (operation.pointerDepth == 0 && isStructType(resolvedRoot)) {
             buildStruct(resolvedRoot)
@@ -1028,17 +1047,41 @@ object DoldecompIrGenerator {
       .toMap
   }
 
-  private def mergeGlobalDeclarations(
+  private[daphttp] def mergeGlobalDeclarations(
       declarations: List[GlobalVariableDeclaration]
   ): GlobalVariableDeclaration = {
-    val primary = declarations.head
+    // DESNOTE(jbarber, 2026-07-19): Files.walk order is not stable across environments, so never
+    // take "first declaration wins" for lengths/pointer depth. Prefer non-static definitions with
+    // explicit array metadata; take pointerDepth from that primary rather than max() (a mismatched
+    // forward decl must not promote a non-pointer global into a pointer chain).
+    def preference(d: GlobalVariableDeclaration): (Boolean, Boolean, Boolean, Boolean, String) =
+      (
+        !d.isStatic,
+        d.declaratorLength.isDefined,
+        d.initializerLength.isDefined,
+        d.typeName.nonEmpty,
+        d.typeName
+      )
+    val ordered = declarations.sortBy(preference)(
+      Ordering
+        .Tuple5(
+          Ordering.Boolean,
+          Ordering.Boolean,
+          Ordering.Boolean,
+          Ordering.Boolean,
+          Ordering.String
+        )
+        .reverse
+    )
+    val primary = ordered.head
     GlobalVariableDeclaration(
       name = primary.name,
-      typeName = declarations.map(_.typeName).find(_.nonEmpty).getOrElse(primary.typeName),
-      isArray = declarations.exists(_.isArray),
-      declaratorLength = declarations.flatMap(_.declaratorLength).headOption,
-      initializerLength = declarations.flatMap(_.initializerLength).headOption,
-      pointerDepth = declarations.map(_.pointerDepth).max
+      typeName = ordered.map(_.typeName).find(_.nonEmpty).getOrElse(primary.typeName),
+      isArray = ordered.exists(_.isArray),
+      declaratorLength = ordered.flatMap(_.declaratorLength).headOption,
+      initializerLength = ordered.flatMap(_.initializerLength).headOption,
+      pointerDepth = primary.pointerDepth,
+      isStatic = primary.isStatic
     )
   }
 
@@ -1138,6 +1181,7 @@ object DoldecompIrGenerator {
           .asScala
           .filter(path => Files.isRegularFile(path) && isSourceFile(path))
           .toList
+          .sortBy(_.toString)
       } finally {
         stream.close()
       }

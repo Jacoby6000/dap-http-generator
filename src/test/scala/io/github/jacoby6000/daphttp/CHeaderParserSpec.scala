@@ -351,6 +351,36 @@ class CHeaderParserSpec extends AnyFunSuite {
     assert(declaration.isArray)
     assert(declaration.initializerLength.contains(3))
     assert(declaration.pointerDepth == 0)
+    assert(declaration.isStatic)
+  }
+
+  test("collapses union members to one initializer slot") {
+    val header =
+      """
+        |typedef struct WithUnion {
+        |    u8 tag;
+        |    union {
+        |        u32 asInt;
+        |        f32 asFloat;
+        |    };
+        |    u8 items[];
+        |} WithUnion;
+        |""".stripMargin
+
+    val source =
+      """
+        |WithUnion g_with_union = {
+        |    1,
+        |    { 0x2a },
+        |    { 0x10, 0x20, 0x30 },
+        |};
+        |""".stripMargin
+
+    val structs = CHeaderParser.parse(header).toMap
+    val fields = CHeaderParser.extractFields(structs("WithUnion"))
+    assert(CHeaderParser.initializerSlots(fields).length == 3)
+    val lengths = CHeaderParser.parseStructFieldInitializerLengths(source, structs)
+    assert(lengths(("WithUnion", "items")) == 3)
   }
 
   test("parses pointer global declarations") {

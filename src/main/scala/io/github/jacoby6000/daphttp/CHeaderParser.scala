@@ -34,7 +34,8 @@ final case class GlobalVariableDeclaration(
     isArray: Boolean,
     declaratorLength: Option[Int],
     initializerLength: Option[Int],
-    pointerDepth: Int
+    pointerDepth: Int,
+    isStatic: Boolean = false
 ) {
   def resolvedArrayLength: Option[Int] = declaratorLength.orElse(initializerLength)
 }
@@ -217,7 +218,8 @@ object CHeaderParser {
             isArray = isArray,
             declaratorLength = declaratorLength,
             initializerLength = initializerLength,
-            pointerDepth = pointerDepth(declarator)
+            pointerDepth = pointerDepth(declarator),
+            isStatic = simple.getDeclSpecifier.getStorageClass == IASTDeclSpecifier.sc_static
           )
         )
       }
@@ -588,20 +590,43 @@ object CHeaderParser {
 
     initializerClause match {
       case Some(clause: IASTInitializerList) =>
-        fields
-          .zip(clause.getClauses)
-          .flatMap { case (field, fieldClause) =>
-            if (isArrayDeclarator(field.declarator) && arrayLength(field.declarator).isEmpty) {
-              countInitializerClause(fieldClause).map { count =>
-                (structName, fieldName(field.declarator)) -> count
+        // DESNOTE(jbarber, 2026-07-19): Positional zip against flattened extractFields misaligns
+        // when anonymous/named unions expand to multiple members for one initializer slot. Collapse
+        // each unionGroup to a single slot; if slot count still disagrees with the clause list,
+        // refuse rather than attach unsized-array lengths to the wrong fields.
+        val slots = initializerSlots(fields)
+        val clauses = clause.getClauses.toList
+        if (slots.length != clauses.length) {
+          Map.empty
+        } else {
+          slots
+            .zip(clauses)
+            .flatMap { case (field, fieldClause) =>
+              if (isArrayDeclarator(field.declarator) && arrayLength(field.declarator).isEmpty) {
+                countInitializerClause(fieldClause).map { count =>
+                  (structName, fieldName(field.declarator)) -> count
+                }
+              } else {
+                None
               }
-            } else {
-              None
             }
-          }
-          .toMap
+            .toMap
+        }
       case _ =>
         Map.empty
+    }
+  }
+
+  /** One C initializer slot per field, collapsing union members that share a
+    * [[StructFieldDecl.unionGroup]].
+    */
+  private[daphttp] def initializerSlots(fields: List[StructFieldDecl]): List[StructFieldDecl] = {
+    val seenUnionGroups = scala.collection.mutable.LinkedHashSet.empty[String]
+    fields.filter { field =>
+      field.unionGroup match {
+        case Some(group) => seenUnionGroups.add(group)
+        case None        => true
+      }
     }
   }
 

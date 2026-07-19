@@ -24,11 +24,13 @@ object PointerChainResolver {
       )
     } else {
       val wordBytes = plan.wordSizeBits / 8
+      val outerStrideBytes = plan.outerElementStrideBytes.getOrElse(wordBytes)
       resolveAtFromMemory(
         plan.baseAddress,
         segments,
         plan.outerArrayLength.isDefined,
         wordBytes,
+        outerStrideBytes,
         plan.endian,
         readMemory
       )
@@ -40,6 +42,7 @@ object PointerChainResolver {
       segments: List[Int],
       hasOuterArray: Boolean,
       wordBytes: Int,
+      outerStrideBytes: Int,
       endian: IrEndian,
       readMemory: (Long, Int) => Either[String, Array[Byte]]
   ): Either[String, Long] = {
@@ -48,7 +51,7 @@ object PointerChainResolver {
     } else if (hasOuterArray) {
       val outerIndex = segments.head
       val innerSegments = segments.tail
-      val outerAddress = baseAddress + outerIndex.toLong * wordBytes
+      val outerAddress = baseAddress + outerIndex.toLong * outerStrideBytes
       readMemory(outerAddress, wordBytes).map(bytes => pointerValue(bytes, endian)).flatMap {
         pointer =>
           resolveInnerFromMemory(pointer, innerSegments, wordBytes, endian, readMemory)

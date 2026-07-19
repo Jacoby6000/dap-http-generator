@@ -629,7 +629,8 @@ object DapHttpServerMain extends IOApp {
     } else if (chain.outerArrayLength.isDefined) {
       val outerIndex = segments.head
       val innerSegments = segments.tail
-      val outerAddress = chain.baseAddress + outerIndex.toLong * wordBytes
+      val outerStrideBytes = chain.outerElementStrideBytes.getOrElse(wordBytes)
+      val outerAddress = chain.baseAddress + outerIndex.toLong * outerStrideBytes
       readPointer(outerAddress).flatMap {
         case Left(error)    => IO.pure(Left(error))
         case Right(pointer) =>

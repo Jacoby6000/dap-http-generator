@@ -266,8 +266,13 @@ object Cli
   ): Either[List[String], Unit] =
     loadIrFromCHeaders(symbolsPath, headerPaths, namespace, service, wordSize, extraDataSections)
       .flatMap { generation =>
-        if (generation.services.isEmpty) {
-          Left(generation.warnings)
+        val operations = generation.services.flatMap(_.operations)
+        if (generation.services.isEmpty || operations.isEmpty) {
+          val emptyOpsWarning =
+            if (operations.isEmpty && generation.services.nonEmpty)
+              List("No operations generated from C headers / symbols.")
+            else Nil
+          Left(generation.warnings ++ emptyOpsWarning)
         } else {
           IrSizingWarnings.writeToStderr(generation.services)
           generation.warnings.foreach(System.err.println)

@@ -49,4 +49,21 @@ class PointerChainResolverSpec extends AnyFunSuite {
 
     assert(resolved.contains(0x80002004L))
   }
+
+  test("outer pointer-array index uses symbol stride when present") {
+    val paddedPlan = chainPlan.copy(outerElementStrideBytes = Some(8))
+    val memory = Map[Long, Array[Byte]](
+      // index 1 at base+8 (not base+4)
+      0x804d6908L -> Array[Byte](0x80.toByte, 0x00, 0x10, 0x00),
+      0x80001000L -> Array[Byte](0x80.toByte, 0x00, 0x20, 0x00)
+    )
+
+    def readMemory(address: Long, sizeBytes: Int): Either[String, Array[Byte]] =
+      memory.get(address).filter(_.length >= sizeBytes).toRight(s"missing memory at 0x$address%x")
+
+    val resolved =
+      PointerChainResolver.resolveStructAddressFromMemory(paddedPlan, List(1, 0), readMemory)
+
+    assert(resolved.contains(0x80002000L))
+  }
 }

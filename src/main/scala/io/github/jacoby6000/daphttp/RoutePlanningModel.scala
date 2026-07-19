@@ -25,7 +25,10 @@ final case class PointerChainPlan(
     wordSizeBits: Int,
     pointeeSizeBytes: Int,
     pointeeDecodeCodec: Option[Codec[Json]],
-    followCString: Boolean = false
+    followCString: Boolean = false,
+    /** Byte stride between outer pointer-array slots when symbol size exceeds packed pointer width.
+      */
+    outerElementStrideBytes: Option[Int] = None
 )
 sealed trait MemberSubRoute {
   def memberName: String
