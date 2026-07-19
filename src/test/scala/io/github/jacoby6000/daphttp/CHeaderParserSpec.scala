@@ -166,6 +166,46 @@ class CHeaderParserSpec extends AnyFunSuite {
     assert(parsed.warnings.exists(_.contains("Unable to evaluate enumerator initializer")))
   }
 
+  test("extracts parenthesized and chained macros via CDT preprocessor") {
+    val source =
+      """
+        |#define BASE 10
+        |#define NESTED BASE
+        |#define PAREN (10)
+        |#define SHIFT (1 << 3)
+        |""".stripMargin
+
+    val macros = CHeaderParser.extractDefineMacros(source)
+    assert(macros.get("BASE").contains("10"))
+    assert(macros.get("NESTED").contains("BASE"))
+    assert(macros.get("PAREN").contains("(10)"))
+    assert(macros.get("SHIFT").contains("(1 << 3)"))
+  }
+
+  test("evaluates enum initializers that depend on macros from ScannerInfo") {
+    val source =
+      """
+        |typedef enum Color {
+        |    CUSTOM = BASE + 5,
+        |    P = PAREN,
+        |    S = SHIFT
+        |} Color;
+        |""".stripMargin
+
+    val parsed = CHeaderParser.parseEnums(
+      source,
+      Map("BASE" -> "10", "PAREN" -> "(10)", "SHIFT" -> "(1 << 3)")
+    )
+    assert(parsed.warnings.isEmpty)
+    assert(
+      parsed.enums("Color").values == List(
+        IrEnumValue("CUSTOM", 15),
+        IrEnumValue("P", 10),
+        IrEnumValue("S", 8)
+      )
+    )
+  }
+
   test("infers global array length from C initializer entry count") {
     val source =
       """

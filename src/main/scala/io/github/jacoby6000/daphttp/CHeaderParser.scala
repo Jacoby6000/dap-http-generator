@@ -102,16 +102,20 @@ object CHeaderParser {
   }
 
   private[daphttp] def extractDefineMacros(source: String): Map[String, String] = {
-    val definePattern = """^\s*#\s*define\s+(\w+)\s+(\S.*)$""".r
-    source.linesIterator.flatMap { line =>
-      line match {
-        case definePattern(name, value) =>
-          val v = value.trim
-          if (v.nonEmpty && !v.startsWith("(")) Some(name -> v)
-          else None
-        case _ => None
+    // DESNOTE(jbarber, 2026-07-19): Prefer CDT's preprocessor view of #define expansions
+    // (including parenthesized and chained bodies) over a line regex that skipped `(...)`.
+    parseTranslationUnit(source, "macros.h", Map.empty)
+      .map { translationUnit =>
+        translationUnit.getMacroDefinitions.toList.flatMap { macroDef =>
+          val name = Option(macroDef.getName).map(_.toString.trim).filter(_.nonEmpty)
+          val expansion = Option(macroDef.getExpansion).map(_.trim).filter(_.nonEmpty)
+          (name, expansion) match {
+            case (Some(n), Some(e)) => Some(n -> e)
+            case _                  => None
+          }
+        }.toMap
       }
-    }.toMap
+      .getOrElse(Map.empty)
   }
 
   def parseGlobalDeclarations(
