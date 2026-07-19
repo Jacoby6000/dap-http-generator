@@ -1083,10 +1083,31 @@ object DoldecompIrGenerator {
       val source = new String(Files.readAllBytes(path))
       CHeaderParser.parseEnums(source, macros)
     }
-    EnumParseResult(
-      enums = results.flatMap(_.enums.toList).toMap,
-      warnings = results.flatMap(_.warnings)
-    )
+    mergeEnumParseResults(results)
+  }
+
+  private def mergeEnumParseResults(results: List[EnumParseResult]): EnumParseResult = {
+    val warnings = mutable.ListBuffer.empty[String]
+    warnings ++= results.flatMap(_.warnings)
+    val merged = mutable.LinkedHashMap.empty[String, CEnumDefinition]
+    results.foreach { result =>
+      result.enums.foreach { case (name, definition) =>
+        merged.get(name) match {
+          case None =>
+            merged(name) = definition
+          case Some(existing) if existing.values == definition.values =>
+            ()
+          case Some(existing) if existing.values.isEmpty && definition.values.nonEmpty =>
+            merged(name) = definition
+          case Some(existing) if existing.values.nonEmpty && definition.values.isEmpty =>
+            warnings += s"$name: Ignoring empty enum redefinition."
+          case Some(existing) =>
+            warnings +=
+              s"$name: Conflicting enum definitions; keeping first (${existing.values.size} values vs ${definition.values.size})."
+        }
+      }
+    }
+    EnumParseResult(merged.toMap, warnings.toList)
   }
 
   private def collectSourceFiles(root: Path): List[Path] = {

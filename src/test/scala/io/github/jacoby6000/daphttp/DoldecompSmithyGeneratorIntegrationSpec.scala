@@ -273,6 +273,33 @@ class DoldecompSmithyGeneratorIntegrationSpec extends AnyFunSuite {
     assert(unknown == io.circe.Json.fromString("0x2a"))
   }
 
+  test("warns on conflicting multi-file enum definitions and keeps the first") {
+    val fixtureRoot = Paths.get("src/test/resources/doldecomp-fixture-enum-merge")
+    val generation = DoldecompIrGenerator
+      .generateFromPaths(
+        symbolsPath = fixtureRoot.resolve("symbols.txt"),
+        headerRoots = List(fixtureRoot),
+        namespace = "example.doldecomp.enummerge",
+        serviceName = "EnumMergeApi",
+        wordSizeBits = 32
+      )
+      .toOption
+      .get
+
+    assert(generation.warnings.exists(_.contains("Color: Conflicting enum definitions")))
+    val color = generation.services.head.operations.head.output.members.head.target
+      .asInstanceOf[IrType.MemoryMappedStruct]
+      .members
+      .find(_.name == "color")
+      .get
+      .target
+      .asInstanceOf[IrType.IntEnum]
+    assert(
+      color.values.map(_.name) == List("COLOR_RED", "COLOR_BLUE") ||
+        color.values.map(_.name) == List("COLOR_RED", "COLOR_GREEN")
+    )
+  }
+
   test("maps char arrays and char pointers to string semantics in IR") {
     val fixtureRoot = Paths.get("src/test/resources/doldecomp-fixture-strings")
     val generation = DoldecompIrGenerator

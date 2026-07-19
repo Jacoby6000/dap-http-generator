@@ -1,0 +1,1 @@
+gGame = .data:0x80470000; // type:object size:0x4 scope:global
