@@ -206,6 +206,47 @@ class CHeaderParserSpec extends AnyFunSuite {
     )
   }
 
+  test("parses nested and anonymous in-struct enums") {
+    val source =
+      """
+        |typedef struct GameState {
+        |    enum Phase {
+        |        PHASE_INIT = 0,
+        |        PHASE_RUN = 1
+        |    } phase;
+        |    enum {
+        |        FLAG_A = 1,
+        |        FLAG_B = 2
+        |    } flags;
+        |} GameState;
+        |""".stripMargin
+
+    val parsed = CHeaderParser.parseEnums(source)
+    assert(parsed.enums.contains("Phase"))
+    assert(
+      parsed.enums("Phase").values == List(
+        IrEnumValue("PHASE_INIT", 0),
+        IrEnumValue("PHASE_RUN", 1)
+      )
+    )
+    assert(parsed.enums.contains("FlagsEnum"))
+    assert(
+      parsed.enums("FlagsEnum").values == List(
+        IrEnumValue("FLAG_A", 1),
+        IrEnumValue("FLAG_B", 2)
+      )
+    )
+
+    val structs = CHeaderParser.parse(source)
+    val fields = CHeaderParser.extractFields(structs.head._2)
+    assert(
+      fields.map(f => CHeaderParser.fieldName(f.declarator) -> f.typeName) == List(
+        "phase" -> "Phase",
+        "flags" -> "FlagsEnum"
+      )
+    )
+  }
+
   test("infers global array length from C initializer entry count") {
     val source =
       """

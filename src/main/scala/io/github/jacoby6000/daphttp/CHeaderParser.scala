@@ -308,19 +308,13 @@ object CHeaderParser {
       case simple: IASTSimpleDeclaration =>
         simple.getDeclSpecifier match {
           case enumSpec: IASTEnumerationSpecifier =>
-            val tagName =
-              Option(enumSpec.getName).map(_.toString.trim).filter(_.nonEmpty)
-            val aliases = simple.getDeclarators.toList
-              .map(extractDeclaratorName)
-              .filter(_.nonEmpty)
-            val names = (tagName.toList ++ aliases).distinct
-            if (names.isEmpty) {
-              Nil
-            } else {
-              val primaryName = names.head
-              val values = extractEnumeratorValues(primaryName, enumSpec, warnings)
-              val definition = CEnumDefinition(primaryName, values)
-              names.map(_ -> definition)
+            enumDefinitionEntries(simple, enumSpec, warnings)
+          case composite: IASTCompositeTypeSpecifier =>
+            composite.getMembers.toList.flatMap {
+              case nested: IASTSimpleDeclaration =>
+                extractEnumDefinitions(nested, warnings)
+              case _ =>
+                Nil
             }
           case _ =>
             Nil
@@ -328,6 +322,53 @@ object CHeaderParser {
       case _ =>
         Nil
     }
+
+  private def enumDefinitionEntries(
+      simple: IASTSimpleDeclaration,
+      enumSpec: IASTEnumerationSpecifier,
+      warnings: ListBuffer[String]
+  ): List[(String, CEnumDefinition)] = {
+    if (enumSpec.getEnumerators.isEmpty) {
+      Nil
+    } else {
+      val names = enumerationTypeNames(simple, enumSpec)
+      if (names.isEmpty) {
+        Nil
+      } else {
+        val primaryName = names.head
+        val values = extractEnumeratorValues(primaryName, enumSpec, warnings)
+        val definition = CEnumDefinition(primaryName, values)
+        names.map(_ -> definition)
+      }
+    }
+  }
+
+  private def enumerationTypeNames(
+      simple: IASTSimpleDeclaration,
+      enumSpec: IASTEnumerationSpecifier
+  ): List[String] = {
+    val tagName = Option(enumSpec.getName).map(_.toString.trim).filter(_.nonEmpty)
+    val aliases = simple.getDeclarators.toList
+      .map(extractDeclaratorName)
+      .filter(_.nonEmpty)
+    val isTypedef =
+      simple.getDeclSpecifier.getStorageClass == IASTDeclSpecifier.sc_typedef
+    if (tagName.nonEmpty) {
+      (tagName.toList ++ (if (isTypedef) aliases else Nil)).distinct
+    } else if (isTypedef) {
+      aliases.distinct
+    } else {
+      aliases.headOption.map(name => s"${toPascalCaseIdentifier(name)}Enum").toList
+    }
+  }
+
+  private def toPascalCaseIdentifier(raw: String): String = {
+    raw
+      .split("[_\\s]+")
+      .filter(_.nonEmpty)
+      .map(part => part.take(1).toUpperCase + part.drop(1))
+      .mkString
+  }
 
   private def extractEnumeratorValues(
       enumName: String,
@@ -428,6 +469,15 @@ object CHeaderParser {
             member.getDeclarators.toList.flatMap { declarator =>
               Option.when(extractDeclaratorName(declarator).nonEmpty) {
                 StructFieldDecl(baseType, declarator, unionGroup = None, bitFieldWidth(declarator))
+              }
+            }
+          case enumSpec: IASTEnumerationSpecifier =>
+            member.getDeclarators.toList.flatMap { declarator =>
+              Option.when(extractDeclaratorName(declarator).nonEmpty) {
+                val typeName = enumerationTypeNames(member, enumSpec).headOption.getOrElse {
+                  normalizeTypeName(enumSpec.getRawSignature)
+                }
+                StructFieldDecl(typeName, declarator, unionGroup = None, bitFieldWidth(declarator))
               }
             }
           case _ =>
