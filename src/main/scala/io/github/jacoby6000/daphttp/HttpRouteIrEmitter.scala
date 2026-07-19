@@ -97,6 +97,105 @@ object HttpRouteIrEmitter {
     result
   }
 
+  /** Inject `_address` hex fields into every decoded struct (and struct array element). */
+  def annotateDecodedAddresses(
+      irType: IrType,
+      decoded: Json,
+      baseAddress: Long,
+      wordSize: Option[Int]
+  ): Json =
+    irType match {
+      case struct: IrType.Struct =>
+        annotateStructAddresses(struct, decoded, baseAddress, wordSize)
+      case listType: IrType.ListType =>
+        annotateArrayAddresses(listType, decoded, baseAddress, wordSize)
+      case _ =>
+        decoded
+    }
+
+  private def annotateStructAddresses(
+      struct: IrType.Struct,
+      decoded: Json,
+      baseAddress: Long,
+      wordSize: Option[Int]
+  ): Json =
+    decoded.asObject match {
+      case None =>
+        decoded
+      case Some(obj) =>
+        val errors = ListBuffer.empty[String]
+        val offsets = computeMemberOffsets(struct, wordSize, errors)
+        val withoutPrior = obj.filterKeys(_ != "_address")
+        val annotatedMembers = struct.members.foldLeft(withoutPrior) { (acc, member) =>
+          acc(member.name) match {
+            case None =>
+              acc
+            case Some(fieldJson) =>
+              val fieldAddress = baseAddress + offsets.getOrElse(member.name, 0).toLong
+              acc.add(
+                member.name,
+                annotateMemberAddresses(member, fieldJson, fieldAddress, wordSize)
+              )
+          }
+        }
+        Json.obj(
+          (("_address" -> Json.fromString(formatHexAddress(baseAddress))) +:
+            annotatedMembers.toList): _*
+        )
+    }
+
+  private def annotateMemberAddresses(
+      member: IrMember,
+      fieldJson: Json,
+      fieldAddress: Long,
+      wordSize: Option[Int]
+  ): Json =
+    if (member.isPointer) {
+      fieldJson
+    } else {
+      member.target match {
+        case nested: IrType.Struct =>
+          annotateStructAddresses(nested, fieldJson, fieldAddress, wordSize)
+        case listType: IrType.ListType if member.isArray =>
+          annotateArrayAddresses(listType, fieldJson, fieldAddress, wordSize)
+        case _ =>
+          fieldJson
+      }
+    }
+
+  private def annotateArrayAddresses(
+      listType: IrType.ListType,
+      decoded: Json,
+      baseAddress: Long,
+      wordSize: Option[Int]
+  ): Json =
+    listType.element match {
+      case nested: IrType.Struct =>
+        decoded.asArray match {
+          case None =>
+            decoded
+          case Some(elements) =>
+            val errors = ListBuffer.empty[String]
+            val elementSize =
+              structureSizeBytes(nested, wordSize, errors).getOrElse(0).toLong
+            Json.arr(
+              elements.zipWithIndex.map { case (element, index) =>
+                annotateStructAddresses(
+                  nested,
+                  element,
+                  baseAddress + index.toLong * elementSize,
+                  wordSize
+                )
+              }: _*
+            )
+        }
+      case _ =>
+        decoded
+    }
+
+  private def formatHexAddress(address: Long): String =
+    f"0x$address%x"
+
   private def buildPointerChainPlan(
       operation: IrOperation,
       defaultEndian: IrEndian,

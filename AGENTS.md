@@ -104,5 +104,9 @@ flowchart LR
   initializers, array bounds, and bitfield widths are evaluated with CDT `ValueFactory` after
   preprocessor expansion — never by hand-parsing `#define` text. Unevaluable explicit enum
   initializers warn instead of silently inventing sequential values.
+- Decoded struct JSON includes `"_address": "0x…"` on every struct object (root, nested members,
+  and array elements of structs), including pointees from pointer routes. Top-level response
+  envelopes no longer carry a separate `address`/`offset` field for the decoded value;
+  `pointerAddress` on pointer sub-routes still names where the pointer slot itself was read.
 - First `sbt` invocation downloads sbt/Scala launchers and Coursier deps; expect a slow cold start.
   Building the server also builds the Scala.js UI via `resourceGenerators`.

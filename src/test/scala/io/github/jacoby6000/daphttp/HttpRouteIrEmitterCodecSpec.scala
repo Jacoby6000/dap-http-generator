@@ -523,4 +523,164 @@ class HttpRouteIrEmitterCodecSpec extends AnyFunSuite {
       )
     )
   }
+
+  test("annotateDecodedAddresses adds _address to root and nested structs") {
+    val vec3 = IrType.MemoryMappedStruct(
+      id = id("Vec3"),
+      members = List(
+        IrMember(
+          id = id("Vec3_x"),
+          name = "x",
+          target = IrType.Primitive(IrPrimitive.F32),
+          staticAddress = None,
+          paddingRepeats = None,
+          isPointer = false,
+          isArray = false,
+          arrayLength = None,
+          endianOverride = None,
+          primitiveOverride = Some(IrPrimitive.F32),
+          offsetBytes = Some(0)
+        ),
+        IrMember(
+          id = id("Vec3_y"),
+          name = "y",
+          target = IrType.Primitive(IrPrimitive.F32),
+          staticAddress = None,
+          paddingRepeats = None,
+          isPointer = false,
+          isArray = false,
+          arrayLength = None,
+          endianOverride = None,
+          primitiveOverride = Some(IrPrimitive.F32),
+          offsetBytes = Some(4)
+        )
+      ),
+      declaredSizeBits = Some(8)
+    )
+    val outer = IrType.MemoryMappedStruct(
+      id = id("Outer"),
+      members = List(
+        IrMember(
+          id = id("Outer_id"),
+          name = "id",
+          target = IrType.Primitive(IrPrimitive.U32),
+          staticAddress = None,
+          paddingRepeats = None,
+          isPointer = false,
+          isArray = false,
+          arrayLength = None,
+          endianOverride = None,
+          primitiveOverride = Some(IrPrimitive.U32),
+          offsetBytes = Some(0)
+        ),
+        IrMember(
+          id = id("Outer_pos"),
+          name = "pos",
+          target = vec3,
+          staticAddress = None,
+          paddingRepeats = None,
+          isPointer = false,
+          isArray = false,
+          arrayLength = None,
+          endianOverride = None,
+          primitiveOverride = None,
+          offsetBytes = Some(0x10)
+        ),
+        IrMember(
+          id = id("Outer_ptr"),
+          name = "ptr",
+          target = vec3,
+          staticAddress = None,
+          paddingRepeats = None,
+          isPointer = true,
+          isArray = false,
+          arrayLength = None,
+          endianOverride = None,
+          primitiveOverride = None,
+          offsetBytes = Some(0x20)
+        )
+      ),
+      declaredSizeBits = Some(0x28 * 8)
+    )
+
+    val decoded = Json.obj(
+      "id" -> Json.fromLong(1L),
+      "pos" -> Json.obj("x" -> Json.fromDoubleOrNull(1.0), "y" -> Json.fromDoubleOrNull(2.0)),
+      "ptr" -> Json.fromLong(0x80001000L)
+    )
+
+    val annotated =
+      HttpRouteIrEmitter.annotateDecodedAddresses(outer, decoded, 0x80400000L, Some(32))
+
+    assert(annotated.hcursor.downField("_address").as[String].toOption.contains("0x80400000"))
+    assert(
+      annotated.hcursor
+        .downField("pos")
+        .downField("_address")
+        .as[String]
+        .toOption
+        .contains("0x80400010")
+    )
+    assert(annotated.hcursor.downField("pos").downField("x").as[Double].toOption.contains(1.0))
+    // Pointer slots stay numeric — no struct wrapper / _address on the pointee value.
+    assert(annotated.hcursor.downField("ptr").as[Long].toOption.contains(0x80001000L))
+    assert(annotated.hcursor.downField("ptr").downField("_address").failed)
+  }
+
+  test("annotateDecodedAddresses annotates each struct array element") {
+    val item = IrType.MemoryMappedStruct(
+      id = id("Item"),
+      members = List(
+        IrMember(
+          id = id("Item_v"),
+          name = "v",
+          target = IrType.Primitive(IrPrimitive.U32),
+          staticAddress = None,
+          paddingRepeats = None,
+          isPointer = false,
+          isArray = false,
+          arrayLength = None,
+          endianOverride = None,
+          primitiveOverride = Some(IrPrimitive.U32),
+          offsetBytes = Some(0)
+        )
+      ),
+      declaredSizeBits = Some(4)
+    )
+    val listType =
+      IrType.ListType(id = id("ItemList"), element = item, bytesAlias = false, bitsAlias = false)
+    val outer = IrType.MemoryMappedStruct(
+      id = id("Bag"),
+      members = List(
+        IrMember(
+          id = id("Bag_items"),
+          name = "items",
+          target = listType,
+          staticAddress = None,
+          paddingRepeats = None,
+          isPointer = false,
+          isArray = true,
+          arrayLength = Some(2),
+          endianOverride = None,
+          primitiveOverride = None,
+          offsetBytes = Some(0)
+        )
+      ),
+      declaredSizeBits = Some(8)
+    )
+
+    val decoded = Json.obj(
+      "items" -> Json.arr(
+        Json.obj("v" -> Json.fromLong(1L)),
+        Json.obj("v" -> Json.fromLong(2L))
+      )
+    )
+
+    val annotated =
+      HttpRouteIrEmitter.annotateDecodedAddresses(outer, decoded, 0x1000L, Some(32))
+
+    val items = annotated.hcursor.downField("items").values.get.toVector
+    assert(items(0).hcursor.downField("_address").as[String].toOption.contains("0x1000"))
+    assert(items(1).hcursor.downField("_address").as[String].toOption.contains("0x1004"))
+  }
 }

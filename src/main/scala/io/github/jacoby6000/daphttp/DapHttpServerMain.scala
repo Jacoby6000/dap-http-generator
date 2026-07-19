@@ -280,7 +280,6 @@ object DapHttpServerMain extends IOApp {
             case Right(data) =>
               Json.obj(
                 "path" -> Json.fromString(readPlan.path),
-                "address" -> Json.fromString(f"0x${readPlan.address}%x"),
                 "bytes" -> Json.fromInt(readPlan.sizeBytes),
                 "data" -> Json.fromString(data),
                 "decoded" -> decoded
@@ -288,7 +287,6 @@ object DapHttpServerMain extends IOApp {
             case Left(error) =>
               Json.obj(
                 "path" -> Json.fromString(readPlan.path),
-                "address" -> Json.fromString(f"0x${readPlan.address}%x"),
                 "bytes" -> Json.fromInt(readPlan.sizeBytes),
                 "error" -> Json.fromString(error)
               )
@@ -326,7 +324,6 @@ object DapHttpServerMain extends IOApp {
                   Json.obj(
                     "route" -> Json.fromString(routePlan.path),
                     "segments" -> chainSegments.asJson,
-                    "address" -> Json.fromString(f"0x$structAddress%x"),
                     "decoded" -> Json.fromString(value)
                   )
                 )
@@ -338,7 +335,6 @@ object DapHttpServerMain extends IOApp {
                     Json.obj(
                       "route" -> Json.fromString(routePlan.path),
                       "segments" -> chainSegments.asJson,
-                      "address" -> Json.fromString(f"0x$structAddress%x"),
                       "error" -> Json.fromString(error)
                     )
                   )
@@ -357,16 +353,29 @@ object DapHttpServerMain extends IOApp {
                         decoded,
                         dapClient,
                         Some(chain.wordSizeBits)
+                      ).map { resolved =>
+                        HttpRouteIrEmitter.annotateDecodedAddresses(
+                          struct,
+                          resolved,
+                          structAddress,
+                          Some(chain.wordSizeBits)
+                        )
+                      }
+                    case other =>
+                      IO.pure(
+                        HttpRouteIrEmitter.annotateDecodedAddresses(
+                          other,
+                          decoded,
+                          structAddress,
+                          Some(chain.wordSizeBits)
+                        )
                       )
-                    case _ =>
-                      IO.pure(decoded)
                   }
                   resolvedDecoded.flatMap { finalDecoded =>
                     Ok(
                       Json.obj(
                         "route" -> Json.fromString(routePlan.path),
                         "segments" -> chainSegments.asJson,
-                        "address" -> Json.fromString(f"0x$structAddress%x"),
                         "bytes" -> Json.fromInt(chain.pointeeSizeBytes),
                         "data" -> Json.fromString(data),
                         "decoded" -> finalDecoded
@@ -407,7 +416,6 @@ object DapHttpServerMain extends IOApp {
             "route" -> Json.fromString(routePath),
             "member" -> Json.fromString(sub.memberName),
             "index" -> index.map(Json.fromInt).getOrElse(Json.Null),
-            "address" -> Json.fromString(f"0x$readAddress%x"),
             "error" -> Json.fromString("Unable to determine member size.")
           )
         )
@@ -419,7 +427,6 @@ object DapHttpServerMain extends IOApp {
                 "route" -> Json.fromString(routePath),
                 "member" -> Json.fromString(sub.memberName),
                 "index" -> index.map(Json.fromInt).getOrElse(Json.Null),
-                "address" -> Json.fromString(f"0x$readAddress%x"),
                 "error" -> Json.fromString(error)
               )
             )
@@ -438,8 +445,24 @@ object DapHttpServerMain extends IOApp {
                   decoded,
                   dapClient,
                   Some(sub.wordSizeBits)
+                ).map { resolved =>
+                  HttpRouteIrEmitter.annotateDecodedAddresses(
+                    struct,
+                    resolved,
+                    readAddress,
+                    Some(sub.wordSizeBits)
+                  )
+                }
+              case Some(other) =>
+                IO.pure(
+                  HttpRouteIrEmitter.annotateDecodedAddresses(
+                    other,
+                    decoded,
+                    readAddress,
+                    Some(sub.wordSizeBits)
+                  )
                 )
-              case _ =>
+              case None =>
                 IO.pure(decoded)
             }
             resolvedDecoded.flatMap { finalDecoded =>
@@ -448,7 +471,6 @@ object DapHttpServerMain extends IOApp {
                   "route" -> Json.fromString(routePath),
                   "member" -> Json.fromString(sub.memberName),
                   "index" -> index.map(Json.fromInt).getOrElse(Json.Null),
-                  "address" -> Json.fromString(f"0x$readAddress%x"),
                   "bytes" -> Json.fromInt(sizeBytes),
                   "decoded" -> finalDecoded
                 )
@@ -486,7 +508,7 @@ object DapHttpServerMain extends IOApp {
         Ok(
           Json.obj(
             "route" -> Json.fromString(routePath),
-            "address" -> Json.fromString(f"0x$pointerAddress%x"),
+            "pointerAddress" -> Json.fromString(f"0x$pointerAddress%x"),
             "error" -> Json.fromString(error)
           )
         )
@@ -500,7 +522,6 @@ object DapHttpServerMain extends IOApp {
                 "member" -> Json.fromString(sub.memberName),
                 "index" -> index.map(Json.fromInt).getOrElse(Json.Null),
                 "pointerAddress" -> Json.fromString(f"0x$pointerAddress%x"),
-                "address" -> Json.fromString(f"0x$masked%x"),
                 "decoded" -> Json.fromString(value)
               )
             )
@@ -513,7 +534,7 @@ object DapHttpServerMain extends IOApp {
                   "route" -> Json.fromString(routePath),
                   "member" -> Json.fromString(sub.memberName),
                   "index" -> index.map(Json.fromInt).getOrElse(Json.Null),
-                  "address" -> Json.fromString(f"0x$masked%x"),
+                  "pointerAddress" -> Json.fromString(f"0x$pointerAddress%x"),
                   "error" -> Json.fromString("Unable to determine pointee size.")
                 )
               )
@@ -525,7 +546,7 @@ object DapHttpServerMain extends IOApp {
                       "route" -> Json.fromString(routePath),
                       "member" -> Json.fromString(sub.memberName),
                       "index" -> index.map(Json.fromInt).getOrElse(Json.Null),
-                      "address" -> Json.fromString(f"0x$masked%x"),
+                      "pointerAddress" -> Json.fromString(f"0x$pointerAddress%x"),
                       "error" -> Json.fromString(error)
                     )
                   )
@@ -544,8 +565,24 @@ object DapHttpServerMain extends IOApp {
                         decoded,
                         dapClient,
                         Some(sub.wordSizeBits)
+                      ).map { resolved =>
+                        HttpRouteIrEmitter.annotateDecodedAddresses(
+                          struct,
+                          resolved,
+                          masked,
+                          Some(sub.wordSizeBits)
+                        )
+                      }
+                    case Some(other) =>
+                      IO.pure(
+                        HttpRouteIrEmitter.annotateDecodedAddresses(
+                          other,
+                          decoded,
+                          masked,
+                          Some(sub.wordSizeBits)
+                        )
                       )
-                    case _ =>
+                    case None =>
                       IO.pure(decoded)
                   }
                   resolvedDecoded.flatMap { finalDecoded =>
@@ -555,7 +592,6 @@ object DapHttpServerMain extends IOApp {
                         "member" -> Json.fromString(sub.memberName),
                         "index" -> index.map(Json.fromInt).getOrElse(Json.Null),
                         "pointerAddress" -> Json.fromString(f"0x$pointerAddress%x"),
-                        "address" -> Json.fromString(f"0x$masked%x"),
                         "bytes" -> Json.fromInt(sizeBytes),
                         "decoded" -> finalDecoded
                       )
@@ -697,8 +733,25 @@ object DapHttpServerMain extends IOApp {
       }
       readPlan.decodeType match {
         case Some(struct: IrType.Struct) =>
-          resolveStructCStringPointers(struct, decoded, dapClient, readPlan.wordSizeBits)
-        case _ =>
+          resolveStructCStringPointers(struct, decoded, dapClient, readPlan.wordSizeBits).map {
+            resolved =>
+              HttpRouteIrEmitter.annotateDecodedAddresses(
+                struct,
+                resolved,
+                readPlan.address,
+                readPlan.wordSizeBits
+              )
+          }
+        case Some(other) =>
+          IO.pure(
+            HttpRouteIrEmitter.annotateDecodedAddresses(
+              other,
+              decoded,
+              readPlan.address,
+              readPlan.wordSizeBits
+            )
+          )
+        case None =>
           IO.pure(decoded)
       }
     }

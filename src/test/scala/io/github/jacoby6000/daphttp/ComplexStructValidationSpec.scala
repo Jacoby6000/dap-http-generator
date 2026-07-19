@@ -200,6 +200,7 @@ class ComplexStructValidationSpec extends AnyFunSuite {
 
     val decoded = json.hcursor.downField("reads").downN(0).downField("decoded")
 
+    assert(decoded.downField("_address").as[String].toOption.contains("0x80400000"))
     assert(decoded.downField("name").as[String].toOption.contains("Mario"))
 
     val costumes = decoded.downField("costumeNames").as[List[String]].toOption.get
@@ -218,6 +219,7 @@ class ComplexStructValidationSpec extends AnyFunSuite {
     assert(math.abs(gravity - 0.08) < 0.001)
 
     val spawnPos = decoded.downField("spawnPos")
+    assert(spawnPos.downField("_address").as[String].toOption.contains("0x80400020"))
     assert(math.abs(spawnPos.downField("x").as[Double].toOption.get - 1.5) < 0.001)
     assert(math.abs(spawnPos.downField("y").as[Double].toOption.get - 2.0) < 0.001)
     assert(math.abs(spawnPos.downField("z").as[Double].toOption.get - (-3.5)) < 0.001)
@@ -602,8 +604,10 @@ class ComplexStructValidationSpec extends AnyFunSuite {
 
     assert(json.hcursor.downField("member").as[String].toOption.contains("spawnPos"))
     assert(json.hcursor.downField("bytes").as[Int].toOption.contains(12))
+    assert(json.hcursor.downField("address").failed)
 
     val decoded = json.hcursor.downField("decoded")
+    assert(decoded.downField("_address").as[String].toOption.contains("0x80400020"))
     assert(math.abs(decoded.downField("x").as[Double].toOption.get - 1.5) < 0.001)
     assert(math.abs(decoded.downField("y").as[Double].toOption.get - 2.0) < 0.001)
     assert(math.abs(decoded.downField("z").as[Double].toOption.get - (-3.5)) < 0.001)
