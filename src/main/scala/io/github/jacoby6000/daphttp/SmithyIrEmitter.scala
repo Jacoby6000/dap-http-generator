@@ -295,6 +295,10 @@ object SmithyIrEmitter {
   private def buildIntEnum(id: ShapeId, intEnum: IrType.IntEnum): IntEnumShape = {
     val builder = IntEnumShape.builder().id(id)
     val seenValues = scala.collection.mutable.Set.empty[Int]
+    // DESNOTE(jbarber, 2026-07-19): Smithy intEnum member values must be unique, while C allows
+    // aliases (A = 1, B = 1). Keep the first name for each value on emit; decode still maps the
+    // shared numeric value to that first name via IrType.IntEnum.values order.
+    // See https://smithy.io/2.0/spec/simple-types.html#intenum
     intEnum.values.foreach { enumValue =>
       if (seenValues.add(enumValue.value)) {
         val _ = builder.addMember(enumValue.name, enumValue.value)

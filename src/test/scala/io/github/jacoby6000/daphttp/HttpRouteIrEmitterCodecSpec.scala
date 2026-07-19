@@ -432,4 +432,18 @@ class HttpRouteIrEmitterCodecSpec extends AnyFunSuite {
       )
     )
   }
+
+  test("decodes duplicate enum values to the first enumerator name") {
+    val aliases = IrType.IntEnum(
+      id = id("Alias"),
+      values = List(
+        IrEnumValue("PRIMARY", 1),
+        IrEnumValue("ALIAS", 1),
+        IrEnumValue("OTHER", 2)
+      )
+    )
+    val read = compileSingleRead(aliases)
+    assert(decode(read, Array(0x00, 0x00, 0x00, 0x01)) == Json.fromString("PRIMARY"))
+    assert(decode(read, Array(0x00, 0x00, 0x00, 0x02)) == Json.fromString("OTHER"))
+  }
 }
