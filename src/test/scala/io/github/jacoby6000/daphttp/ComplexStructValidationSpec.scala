@@ -632,6 +632,47 @@ class ComplexStructValidationSpec extends AnyFunSuite {
     assert(json.hcursor.downField("decoded").as[Int].toOption.contains(0))
   }
 
+  test("non-pointer array sub-route uses explicit element stride") {
+    val ir = generateIr.map { service =>
+      service.copy(operations = service.operations.map { operation =>
+        val output = operation.output.asInstanceOf[IrType.EnclosingStruct]
+        val rootMember = output.members.head
+        val struct = rootMember.target.asInstanceOf[IrType.MemoryMappedStruct]
+        val paddedStruct = struct.copy(members = struct.members.map {
+          case member if member.name == "pad" => member.copy(readSizeBytes = Some(4))
+          case member                         => member
+        })
+        operation.copy(
+          output = output.copy(members = List(rootMember.copy(target = paddedStruct)))
+        )
+      })
+    }
+    val memory = buildMemoryMap.updated(baseAddress + 0x18, 99.toByte)
+    val plans = HttpRouteIrEmitter.emitRoutePlansFromIr(ir)
+    val padSubRoute = plans
+      .routes("/api/ComplexApi/gFighterInfo")
+      .memberSubRoutes
+      .collectFirst {
+        case value: MemberSubRoute.ValueSubRoute if value.memberName == "pad" =>
+          value
+      }
+      .get
+    assert(padSubRoute.elementSizeBytes.contains(1))
+    assert(padSubRoute.elementStrideBytes.contains(2))
+
+    val plansRef = Ref.unsafe[IO, RoutePlansLoadResult](plans)
+    val app = DapHttpServerMain.routes(plansRef, mockDapClient(memory)).orNotFound
+    val response =
+      app
+        .run(Request[IO](Method.GET, Uri.unsafeFromString("/api/ComplexApi/gFighterInfo/pad/1")))
+        .unsafeRunSync()
+    val body = response.body.compile.toVector.unsafeRunSync().map(_.toChar).mkString
+    val json = io.circe.parser.parse(body).toOption.get
+
+    assert(response.status == Status.Ok)
+    assert(json.hcursor.downField("decoded").as[Int].toOption.contains(99))
+  }
+
   test("u64 value sub-route reads 8 bytes at offset") {
     val memory = buildMemoryMap
     val plans = HttpRouteIrEmitter.emitRoutePlansFromIr(generateIr)

@@ -900,6 +900,91 @@ class DoldecompSmithyGeneratorIntegrationSpec extends AnyFunSuite {
     assert(!merged.isStatic)
   }
 
+  test("mergeGlobalDeclarations keeps preferred scalar definition scalar") {
+    val merged = DoldecompIrGenerator.mergeGlobalDeclarations(
+      List(
+        GlobalVariableDeclaration(
+          name = "g_state",
+          typeName = "State",
+          isArray = true,
+          declaratorLength = Some(4),
+          initializerLength = None,
+          pointerDepth = 0,
+          isStatic = true
+        ),
+        GlobalVariableDeclaration(
+          name = "g_state",
+          typeName = "State",
+          isArray = false,
+          declaratorLength = None,
+          initializerLength = None,
+          pointerDepth = 0,
+          isStatic = false
+        )
+      )
+    )
+
+    assert(!merged.isArray)
+    assert(merged.declaratorLength.isEmpty)
+    assert(merged.initializerLength.isEmpty)
+    assert(!merged.isStatic)
+  }
+
+  test("does not infer an unsized aggregate array length from symbol size") {
+    val tmp = java.nio.file.Files.createTempDirectory("dap-aggregate-array-stride")
+    try {
+      val source = tmp.resolve("data.c")
+      val symbols = tmp.resolve("symbols.txt")
+      java.nio.file.Files.writeString(
+        source,
+        """
+          |typedef struct Item {
+          |    u32 value;
+          |} Item;
+          |extern Item g_items[];
+          |u32 g_count;
+          |""".stripMargin
+      )
+      java.nio.file.Files.writeString(
+        symbols,
+        """g_items = .data:0x80000000; // type:object size:0x10 scope:global
+          |g_count = .data:0x80000010; // type:object size:0x4 scope:global
+          |""".stripMargin
+      )
+
+      val generation = DoldecompIrGenerator
+        .generateFromPaths(
+          symbolsPath = symbols,
+          headerRoots = List(tmp),
+          namespace = "example.aggregate.stride",
+          serviceName = "Api",
+          wordSizeBits = 32
+        )
+        .toOption
+        .get
+
+      assert(
+        generation.warnings.exists(w =>
+          w.contains("g_items") && w.contains("symbol size may include element-stride padding")
+        )
+      )
+      assert(
+        !generation.services.head.operations.exists(
+          _.output.members.exists(_.staticAddress.contains(0x80000000L))
+        )
+      )
+      assert(
+        generation.services.head.operations.exists(
+          _.output.members.exists(_.staticAddress.contains(0x80000010L))
+        )
+      )
+    } finally {
+      java.nio.file.Files.walk(tmp).sorted(java.util.Comparator.reverseOrder()).forEach { path =>
+        val _ = java.nio.file.Files.deleteIfExists(path)
+      }
+    }
+  }
+
   test("warns when symbol size is inconsistent with C-derived array length") {
     val tmp = java.nio.file.Files.createTempDirectory("dap-size-mismatch")
     try {

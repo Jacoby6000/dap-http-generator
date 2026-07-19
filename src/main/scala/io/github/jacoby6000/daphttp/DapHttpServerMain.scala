@@ -407,8 +407,9 @@ object DapHttpServerMain extends IOApp {
       dapClient: DapClient
   ): IO[Response[IO]] = {
     val elementSize = sub.elementSizeBytes.getOrElse(0)
+    val elementStride = sub.elementStrideBytes.getOrElse(elementSize)
     val readAddress = sub.baseAddress + sub.memberOffsetBytes.toLong +
-      index.map(_.toLong * elementSize).getOrElse(0L)
+      index.map(_.toLong * elementStride).getOrElse(0L)
     sub.elementSizeBytes match {
       case None =>
         Ok(

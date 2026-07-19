@@ -50,6 +50,7 @@ object MemberSubRoute {
       endian: IrEndian,
       valueType: Option[IrType],
       elementSizeBytes: Option[Int],
+      elementStrideBytes: Option[Int],
       decodeCodec: Option[Codec[Json]]
   ) extends MemberSubRoute
 

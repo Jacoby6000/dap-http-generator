@@ -113,8 +113,10 @@ flowchart LR
   declared structure width; on members it is the explicit DAP read width.
 - Global arrays (including pointer arrays) use `readSizeBytes / length` as element stride when that
   exceeds packed layout/pointer width (padding between elements). Pointer-chain outer indices use
-  the same stride. Object symbols in code sections (`.text`, etc.) and data symbols without
-  `ctype`/C declarations emit per-symbol warnings rather than failing silently.
+  the same stride. Unsized aggregate arrays require a C declarator bound or initializer count:
+  symbol size alone cannot distinguish element count from ABI stride padding. Object symbols in
+  code sections (`.text`, etc.) and data symbols without `ctype`/C declarations emit per-symbol
+  warnings rather than failing silently.
 - Duplicate C globals for one symbol name merge deterministically: prefer non-`static` declarations
   with array length metadata; take `pointerDepth` from that primary (not `max`). `cheaders-smithy`
   fails when the service has zero operations.

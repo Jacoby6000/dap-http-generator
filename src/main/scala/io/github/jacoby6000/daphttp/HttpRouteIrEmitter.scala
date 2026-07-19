@@ -376,6 +376,7 @@ object HttpRouteIrEmitter {
           endian = endian,
           valueType = valueType,
           elementSizeBytes = elementSizeBytes,
+          elementStrideBytes = arrayElementStrideBytes(member, Some(wordSizeBits)),
           decodeCodec = valueType.flatMap(vt =>
             compileJsonCodecForType(vt, endian, Some(wordSizeBits), errors, context)
           )

@@ -6,6 +6,10 @@ import scala.util.matching.Regex
 object CHeaderOffsetParser {
   private val StructStart: Regex = """(?:typedef\s+)?struct\s+(\w+)\s*\{""".r
   private val OffsetComment: Regex = """/\*\s*(0x[0-9A-Fa-f]+)\s*\*/""".r
+  private val BlockComment: Regex = """/\*.*?\*/""".r
+  private val FunctionPointerName: Regex =
+    """\(\s*\*+\s*([A-Za-z_]\w*)\s*(?:\[[^\]]*\]\s*)*\)""".r
+  private val Identifier: Regex = """[A-Za-z_]\w*""".r
 
   def parse(source: String): Map[(String, String), Int] = {
     val offsets = mutable.Map.empty[(String, String), Int]
@@ -36,14 +40,24 @@ object CHeaderOffsetParser {
 
           if (line.contains("union") && lineOffset.isDefined) {
             activeOffset = lineOffset
-          } else if (line == "};" || line.endsWith("};")) {
-            activeOffset = None
           }
 
-          lineOffset.orElse(activeOffset).foreach { offset =>
-            fieldNames(line).foreach { fieldName =>
-              offsets.update((currentStruct, fieldName), offset)
-            }
+          val names = fieldNames(line)
+          lineOffset match {
+            case Some(offset) if activeOffset.isDefined && !line.contains("union") =>
+              names.foreach(fieldName => offsets.update((currentStruct, fieldName), offset))
+            case Some(offset) =>
+              names.headOption.foreach(fieldName =>
+                offsets.update((currentStruct, fieldName), offset)
+              )
+            case None =>
+              activeOffset.foreach { offset =>
+                names.foreach(fieldName => offsets.update((currentStruct, fieldName), offset))
+              }
+          }
+
+          if (closes > 0 && activeOffset.isDefined) {
+            activeOffset = None
           }
         }
 
@@ -66,12 +80,51 @@ object CHeaderOffsetParser {
     if (!line.contains(";")) {
       Nil
     } else {
-      val beforeSemi = line.takeWhile(_ != ';').trim
-      val lastToken = beforeSemi.split("\\s+").lastOption.getOrElse("")
-      val cleaned = lastToken.stripPrefix("*").filter(ch => ch.isLetterOrDigit || ch == '_')
-      Option.when(cleaned.nonEmpty && !isReservedWord(cleaned))(cleaned).toList
+      val beforeSemi = BlockComment.replaceAllIn(line.takeWhile(_ != ';'), " ").trim
+      splitDeclarators(beforeSemi).flatMap(declaratorName)
     }
   }
+
+  private def splitDeclarators(declaration: String): List[String] = {
+    val parts = mutable.ListBuffer.empty[String]
+    val current = new StringBuilder
+    var parentheses = 0
+    var brackets = 0
+    var braces = 0
+
+    declaration.foreach {
+      case ',' if parentheses == 0 && brackets == 0 && braces == 0 =>
+        parts += current.result()
+        current.clear()
+      case ch =>
+        current.append(ch)
+        ch match {
+          case '(' => parentheses += 1
+          case ')' => parentheses = math.max(0, parentheses - 1)
+          case '[' => brackets += 1
+          case ']' => brackets = math.max(0, brackets - 1)
+          case '{' => braces += 1
+          case '}' => braces = math.max(0, braces - 1)
+          case _   => ()
+        }
+    }
+    parts += current.result()
+    parts.toList
+  }
+
+  private def declaratorName(declarator: String): Option[String] =
+    FunctionPointerName
+      .findFirstMatchIn(declarator)
+      .map(_.group(1))
+      .orElse {
+        val withoutArrays = declarator.replaceAll("""\[[^\]]*\]""", " ")
+        val beforeBitfield = withoutArrays.takeWhile(_ != ':')
+        Identifier
+          .findAllIn(beforeBitfield)
+          .toList
+          .lastOption
+      }
+      .filterNot(isReservedWord)
 
   private def isReservedWord(name: String): Boolean =
     Set(

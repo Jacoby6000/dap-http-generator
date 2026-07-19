@@ -39,6 +39,22 @@ class CHeaderOffsetParserSpec extends AnyFunSuite {
     assert(offsets(("Padded", "b")) == 0x08)
   }
 
+  test("anchors a co-declared field offset to the first declarator") {
+    val source =
+      """
+        |typedef struct Grouped {
+        |    /* 0x00 */ u8 first, second;
+        |    /* 0x02 */ u8 third;
+        |} Grouped;
+        |""".stripMargin
+
+    val offsets = CHeaderOffsetParser.parse(source)
+
+    assert(offsets(("Grouped", "first")) == 0x00)
+    assert(!offsets.contains(("Grouped", "second")))
+    assert(offsets(("Grouped", "third")) == 0x02)
+  }
+
   test("records nested named struct fields under the inner type tag") {
     val source =
       """

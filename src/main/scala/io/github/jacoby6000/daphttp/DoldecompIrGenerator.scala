@@ -313,18 +313,25 @@ object DoldecompIrGenerator {
 
         val operationsWithArrayLengths = operations.flatMap { operation =>
           if (operation.isArray && operation.arrayLength.isEmpty) {
-            elementSizeBytesForRootType(operation.rootTypeName, operation.pointerDepth) match {
-              case Some(elementSizeBytes) =>
-                inferArrayLength(operation.symbol, elementSizeBytes) match {
-                  case Some(length) =>
-                    Some(operation.copy(arrayLength = Some(length)))
-                  case None =>
-                    warnings += s"${operation.symbol.name}: Unable to infer array length for '${operation.rootTypeName}'."
-                    None
-                }
-              case None =>
-                warnings += s"${operation.symbol.name}: Unable to determine element size for '${operation.rootTypeName}'."
-                None
+            val resolvedRoot = resolveTypedef(operation.rootTypeName, typedefs)
+            if (operation.pointerDepth == 0 && isStructType(resolvedRoot)) {
+              warnings +=
+                s"${operation.symbol.name}: Unable to infer array length for aggregate '${operation.rootTypeName}' without a C declarator bound or initializer; symbol size may include element-stride padding."
+              None
+            } else {
+              elementSizeBytesForRootType(operation.rootTypeName, operation.pointerDepth) match {
+                case Some(elementSizeBytes) =>
+                  inferArrayLength(operation.symbol, elementSizeBytes) match {
+                    case Some(length) =>
+                      Some(operation.copy(arrayLength = Some(length)))
+                    case None =>
+                      warnings += s"${operation.symbol.name}: Unable to infer array length for '${operation.rootTypeName}'."
+                      None
+                  }
+                case None =>
+                  warnings += s"${operation.symbol.name}: Unable to determine element size for '${operation.rootTypeName}'."
+                  None
+              }
             }
           } else {
             Some(operation)
@@ -1052,8 +1059,8 @@ object DoldecompIrGenerator {
   ): GlobalVariableDeclaration = {
     // DESNOTE(jbarber, 2026-07-19): Files.walk order is not stable across environments, so never
     // take "first declaration wins" for lengths/pointer depth. Prefer non-static definitions with
-    // explicit array metadata; take pointerDepth from that primary rather than max() (a mismatched
-    // forward decl must not promote a non-pointer global into a pointer chain).
+    // explicit array metadata; array-ness and pointerDepth come from that primary so a mismatched
+    // forward declaration cannot change the preferred definition's route shape.
     def preference(d: GlobalVariableDeclaration): (Boolean, Boolean, Boolean, Boolean, String) =
       (
         !d.isStatic,
@@ -1074,12 +1081,15 @@ object DoldecompIrGenerator {
         .reverse
     )
     val primary = ordered.head
+    val compatibleArrayDeclarations =
+      if (primary.isArray) ordered.filter(d => d.isArray && d.pointerDepth == primary.pointerDepth)
+      else Nil
     GlobalVariableDeclaration(
       name = primary.name,
       typeName = ordered.map(_.typeName).find(_.nonEmpty).getOrElse(primary.typeName),
-      isArray = ordered.exists(_.isArray),
-      declaratorLength = ordered.flatMap(_.declaratorLength).headOption,
-      initializerLength = ordered.flatMap(_.initializerLength).headOption,
+      isArray = primary.isArray,
+      declaratorLength = compatibleArrayDeclarations.flatMap(_.declaratorLength).headOption,
+      initializerLength = compatibleArrayDeclarations.flatMap(_.initializerLength).headOption,
       pointerDepth = primary.pointerDepth,
       isStatic = primary.isStatic
     )
