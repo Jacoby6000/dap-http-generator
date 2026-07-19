@@ -75,12 +75,10 @@ object CHeaderParser {
   def parseTypedefs(
       source: String,
       extraMacros: Map[String, String] = Map.empty
-  ): Map[String, String] = {
-    val fromAst = parseTranslationUnit(source, "header.h", extraMacros)
+  ): Map[String, String] =
+    parseTranslationUnit(source, "header.h", extraMacros)
       .map(_.getDeclarations.toList.flatMap(extractTypedef).toMap)
       .getOrElse(Map.empty)
-    fromAst ++ extractDefineMacros(source)
-  }
 
   def parseEnums(
       source: String,
@@ -101,9 +99,10 @@ object CHeaderParser {
       .getOrElse(EnumParseResult(Map.empty, Nil))
   }
 
-  private[daphttp] def extractDefineMacros(source: String): Map[String, String] = {
-    // DESNOTE(jbarber, 2026-07-19): Prefer CDT's preprocessor view of #define expansions
-    // (including parenthesized and chained bodies) over a line regex that skipped `(...)`.
+  private[daphttp] def extractMacros(source: String): Map[String, String] = {
+    // DESNOTE(jbarber, 2026-07-19): Always collect macros from CDT's preprocessor AST — never
+    // regex/#define line scraping. Expansions (including parenthesized bodies) feed ScannerInfo
+    // for later translation units.
     parseTranslationUnit(source, "macros.h", Map.empty)
       .map { translationUnit =>
         translationUnit.getMacroDefinitions.toList.flatMap { macroDef =>
@@ -123,7 +122,7 @@ object CHeaderParser {
       extraMacros: Map[String, String] = Map.empty
   ): List[GlobalVariableDeclaration] =
     parseTranslationUnit(source, "source.c", extraMacros)
-      .map(_.getDeclarations.toList.flatMap(extractGlobalDeclaration(_, extraMacros)))
+      .map(_.getDeclarations.toList.flatMap(extractGlobalDeclaration))
       .getOrElse(Nil)
 
   def parseStructFieldInitializerLengths(
@@ -134,7 +133,7 @@ object CHeaderParser {
     parseTranslationUnit(source, "source.c", extraMacros)
       .map { translationUnit =>
         translationUnit.getDeclarations.toList.flatMap { declaration =>
-          extractGlobalDeclaration(declaration, extraMacros).flatMap { global =>
+          extractGlobalDeclaration(declaration).flatMap { global =>
             structs.get(global.typeName).toList.flatMap { struct =>
               extractGlobalDeclaratorWithInitializer(declaration, global.typeName).toList.flatMap {
                 declarator =>
@@ -176,9 +175,8 @@ object CHeaderParser {
   }
 
   private[daphttp] def extractGlobalDeclaration(
-      declaration: IASTDeclaration,
-      macros: Map[String, String] = Map.empty
-  ): List[GlobalVariableDeclaration] = {
+      declaration: IASTDeclaration
+  ): List[GlobalVariableDeclaration] =
     declaration match {
       case simple: IASTSimpleDeclaration =>
         simple.getDeclSpecifier match {
@@ -187,20 +185,18 @@ object CHeaderParser {
           case composite: IASTCompositeTypeSpecifier =>
             val typeName =
               normalizeTypeName(Option(composite.getName).map(_.toString).getOrElse(""))
-            if (typeName.isEmpty) Nil else extractGlobalDeclarators(typeName, simple, macros)
+            if (typeName.isEmpty) Nil else extractGlobalDeclarators(typeName, simple)
           case _ =>
             val typeName = normalizeTypeName(simple.getDeclSpecifier.getRawSignature)
-            if (typeName.isEmpty) Nil else extractGlobalDeclarators(typeName, simple, macros)
+            if (typeName.isEmpty) Nil else extractGlobalDeclarators(typeName, simple)
         }
       case _ =>
         Nil
     }
-  }
 
   private[daphttp] def extractGlobalDeclarators(
       typeName: String,
-      simple: IASTSimpleDeclaration,
-      macros: Map[String, String] = Map.empty
+      simple: IASTSimpleDeclaration
   ): List[GlobalVariableDeclaration] =
     simple.getDeclarators.toList.flatMap { declarator =>
       val name = extractDeclaratorName(declarator)
@@ -208,7 +204,7 @@ object CHeaderParser {
         Nil
       } else {
         val isArray = isArrayDeclarator(declarator)
-        val declaratorLength = if (isArray) arrayLength(declarator, macros) else None
+        val declaratorLength = if (isArray) arrayLength(declarator) else None
         val initializerLength = if (isArray) initializerElementCount(declarator) else None
         List(
           GlobalVariableDeclaration(
@@ -493,44 +489,32 @@ object CHeaderParser {
   }
 
   def bitFieldWidth(declarator: IASTDeclarator): Option[Int] =
-    declaratorChain(declarator).collectFirst { case field: IASTFieldDeclarator =>
-      Option(field.getBitFieldSize)
-        .map(_.getRawSignature.trim)
-        .flatMap(_.toIntOption)
-    }.flatten
+    declaratorChain(declarator).collectFirst(Function.unlift {
+      case field: IASTFieldDeclarator =>
+        Option(field.getBitFieldSize).flatMap { expr =>
+          Option(ValueFactory.getConstantNumericalValue(expr)).map(_.intValue())
+        }
+      case _ =>
+        None
+    })
 
   def pointerDepth(declarator: IASTDeclarator): Int = {
     declaratorChain(declarator).map(_.getPointerOperators.length).sum
   }
 
-  def arrayLength(
-      declarator: IASTDeclarator,
-      macros: Map[String, String] = Map.empty
-  ): Option[Int] = {
+  def arrayLength(declarator: IASTDeclarator): Option[Int] = {
+    // DESNOTE(jbarber, 2026-07-19): Array bounds come from CDT's already-preprocessed AST via
+    // ValueFactory — do not re-parse raw signatures or look up macro names by hand.
     declaratorChain(declarator).collectFirst(Function.unlift {
       case arrayDeclarator: IASTArrayDeclarator =>
         arrayDeclarator.getArrayModifiers.toList.collectFirst(Function.unlift { modifier =>
-          Option(modifier.getConstantExpression)
-            .map(_.getRawSignature.trim)
-            .flatMap(parseArraySize)
-            .orElse {
-              Option(modifier.getConstantExpression)
-                .map(_.getRawSignature.trim)
-                .flatMap(s => macros.get(s).flatMap(parseArraySize))
-            }
+          Option(modifier.getConstantExpression).flatMap { expr =>
+            Option(ValueFactory.getConstantNumericalValue(expr)).map(_.intValue())
+          }
         })
       case _ =>
         None
     })
-  }
-
-  private def parseArraySize(s: String): Option[Int] = {
-    val trimmed = s.trim
-    if (trimmed.startsWith("0x") || trimmed.startsWith("0X")) {
-      scala.util.Try(java.lang.Integer.parseUnsignedInt(trimmed.drop(2), 16)).toOption
-    } else {
-      trimmed.toIntOption
-    }
   }
 
   def initializerElementCount(declarator: IASTDeclarator): Option[Int] =

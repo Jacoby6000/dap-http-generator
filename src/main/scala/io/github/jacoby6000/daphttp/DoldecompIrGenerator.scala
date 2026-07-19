@@ -642,7 +642,7 @@ object DoldecompIrGenerator {
     val isPointer = CHeaderParser.pointerDepth(fieldDeclarator) > 0
     val arrayLength =
       CHeaderParser
-        .arrayLength(fieldDeclarator, typedefs)
+        .arrayLength(fieldDeclarator)
         .orElse(fieldInitializerLengths.get((structName, fieldName)))
 
     val funcPointerSig =
@@ -1048,7 +1048,7 @@ object DoldecompIrGenerator {
     val sourceFiles = headerRoots.flatMap(collectSourceFiles).distinct
     sourceFiles.flatMap { path =>
       val source = new String(Files.readAllBytes(path))
-      CHeaderParser.extractDefineMacros(source).toList
+      CHeaderParser.extractMacros(source).toList
     }.toMap
   }
 

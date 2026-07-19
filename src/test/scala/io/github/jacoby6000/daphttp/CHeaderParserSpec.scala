@@ -175,11 +175,31 @@ class CHeaderParserSpec extends AnyFunSuite {
         |#define SHIFT (1 << 3)
         |""".stripMargin
 
-    val macros = CHeaderParser.extractDefineMacros(source)
+    val macros = CHeaderParser.extractMacros(source)
     assert(macros.get("BASE").contains("10"))
     assert(macros.get("NESTED").contains("BASE"))
     assert(macros.get("PAREN").contains("(10)"))
     assert(macros.get("SHIFT").contains("(1 << 3)"))
+  }
+
+  test("resolves array lengths and bitfield widths from macros via CDT ValueFactory") {
+    val source =
+      """
+        |#define LEN 4
+        |#define WIDTH (1 + 2)
+        |typedef struct Table {
+        |    u8 entries[LEN];
+        |    u8 flag : WIDTH;
+        |} Table;
+        |""".stripMargin
+
+    val macros = CHeaderParser.extractMacros(source)
+    val structs = CHeaderParser.parse(source, macros)
+    val fields = CHeaderParser.extractFields(structs.head._2)
+    val entries = fields.find(f => CHeaderParser.fieldName(f.declarator) == "entries").get
+    val flag = fields.find(f => CHeaderParser.fieldName(f.declarator) == "flag").get
+    assert(CHeaderParser.arrayLength(entries.declarator).contains(4))
+    assert(flag.bitFieldWidth.contains(3))
   }
 
   test("evaluates enum initializers that depend on macros from ScannerInfo") {
