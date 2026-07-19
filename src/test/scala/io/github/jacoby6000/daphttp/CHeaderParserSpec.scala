@@ -97,6 +97,45 @@ class CHeaderParserSpec extends AnyFunSuite {
     assert(!declarations(1).isArray)
   }
 
+  test("parses enum definitions with explicit and implicit values") {
+    val source =
+      """
+        |#define BASE 10
+        |typedef enum Color {
+        |    RED,
+        |    GREEN = 2,
+        |    BLUE,
+        |    CUSTOM = BASE + 5,
+        |    NEG = -1
+        |} Color;
+        |
+        |enum Mode {
+        |    MODE_A = 0x10,
+        |    MODE_B
+        |};
+        |""".stripMargin
+
+    val enums = CHeaderParser.parseEnums(source)
+
+    assert(enums.contains("Color"))
+    assert(
+      enums("Color").values == List(
+        IrEnumValue("RED", 0),
+        IrEnumValue("GREEN", 2),
+        IrEnumValue("BLUE", 3),
+        IrEnumValue("CUSTOM", 15),
+        IrEnumValue("NEG", -1)
+      )
+    )
+    assert(enums.contains("Mode"))
+    assert(
+      enums("Mode").values == List(
+        IrEnumValue("MODE_A", 0x10),
+        IrEnumValue("MODE_B", 0x11)
+      )
+    )
+  }
+
   test("infers global array length from C initializer entry count") {
     val source =
       """

@@ -1,6 +1,7 @@
 package io.github.jacoby6000.daphttp
 
 import software.amazon.smithy.model.Model
+import software.amazon.smithy.model.shapes.IntEnumShape
 import software.amazon.smithy.model.shapes.ListShape
 import software.amazon.smithy.model.shapes.MapShape
 import software.amazon.smithy.model.shapes.MemberShape
@@ -170,6 +171,22 @@ object SmithyIrGenerator {
               id = mapShape.getId,
               key = buildIrType(mapShape.getKey.getTarget, stack + shapeId),
               value = buildIrType(mapShape.getValue.getTarget, stack + shapeId)
+            )
+          case ShapeType.INT_ENUM =>
+            val intEnum = shape.asInstanceOf[IntEnumShape]
+            val values = intEnum
+              .members()
+              .asScala
+              .toList
+              .flatMap { member =>
+                intEnum.getEnumValues.asScala
+                  .get(member.getMemberName)
+                  .map(value => IrEnumValue(member.getMemberName, value.intValue()))
+              }
+            IrType.IntEnum(
+              id = intEnum.getId,
+              values = values,
+              underlying = IrPrimitive.S32
             )
           case primitiveType =>
             primitiveForShapeType(primitiveType)

@@ -64,6 +64,7 @@ object DoldecompIrGenerator {
     val globalDeclarations = loadGlobalDeclarations(headerRoots, allMacros)
     val fieldInitializerLengths = loadFieldInitializerLengths(headerRoots, headerStructs, allMacros)
     val typedefs = loadTypedefs(headerRoots, allMacros)
+    val enums = loadEnums(headerRoots, allMacros)
     val sectionResult = SectionFilter.filterDataSymbols(symbols, extraDataSections)
     sectionResult.warnings.foreach(w => DapHttpLoggers.irSourceDoldecomp.warn("{}", w))
     val dataObjectSymbols = sectionResult.dataSymbols
@@ -85,7 +86,8 @@ object DoldecompIrGenerator {
           resolved.symbol.name,
           resolved.typeName,
           headerStructs,
-          typedefs
+          typedefs,
+          enums
         ) match {
           case Some(error) =>
             warnings += error
@@ -161,6 +163,24 @@ object DoldecompIrGenerator {
         val reachableByName = reachableStructs.toMap
         val builtStructs = mutable.Map.empty[String, IrType.MemoryMappedStruct]
         val buildingStructs = mutable.Set.empty[String]
+        val builtEnums = mutable.Map.empty[String, IrType.IntEnum]
+
+        def buildEnum(name: String): IrType.IntEnum =
+          builtEnums.getOrElseUpdate(
+            name, {
+              val definition = enums.getOrElse(
+                name,
+                throw new IllegalStateException(
+                  s"Missing enum definition for '$name' while building IR."
+                )
+              )
+              IrType.IntEnum(
+                id = ShapeId.from(s"$namespace#${definition.name}"),
+                values = definition.values,
+                underlying = IrPrimitive.S32
+              )
+            }
+          )
 
         def buildStruct(name: String): IrType.MemoryMappedStruct = {
           builtStructs.getOrElseUpdate(
@@ -186,9 +206,11 @@ object DoldecompIrGenerator {
                       ),
                       reachableStructs = reachableByName,
                       buildStruct = buildStruct,
+                      buildEnum = buildEnum,
+                      enums = enums,
                       pointeeTypeFor = pointeeTypeFor,
                       fieldInitializerLengths = fieldInitializerLengths,
-                      macros = typedefs
+                      typedefs = typedefs
                     ),
                     declaredSizeBits = None
                   )
@@ -203,12 +225,26 @@ object DoldecompIrGenerator {
           if (structs.contains(name) && buildingStructs.contains(name))
             IrType.Ref(ShapeId.from(s"$namespace#$name"))
           else
-            typeForName(name, structs, buildStruct)
+            typeForName(name, structs, buildStruct, buildEnum, enums, typedefs)
 
         def isStructType(typeName: String): Boolean =
           reachableByName.contains(typeName) || reachableByName.contains(
             resolveTypedef(typeName, typedefs)
           )
+
+        def isEnumType(typeName: String): Boolean = {
+          val normalized = CHeaderParser.normalizeTypeName(typeName).replaceAll("\\s+", "")
+          enums.contains(normalized) || enums.contains(resolveTypedef(typeName, typedefs))
+        }
+
+        def resolveEnumName(typeName: String): Option[String] = {
+          val normalized = CHeaderParser.normalizeTypeName(typeName).replaceAll("\\s+", "")
+          if (enums.contains(normalized)) Some(normalized)
+          else {
+            val resolved = resolveTypedef(typeName, typedefs)
+            if (enums.contains(resolved)) Some(resolved) else None
+          }
+        }
 
         def rootElementIrType(typeName: String, pointerDepth: Int): IrType =
           if (pointerDepth > 0) {
@@ -221,7 +257,12 @@ object DoldecompIrGenerator {
               if (reachableByName.contains(resolved)) {
                 buildStruct(resolved)
               } else {
-                IrType.Primitive(primitiveForType(resolved).getOrElse(IrPrimitive.LongWord))
+                resolveEnumName(typeName)
+                  .orElse(resolveEnumName(resolved))
+                  .map(buildEnum)
+                  .getOrElse(
+                    IrType.Primitive(primitiveForType(resolved).getOrElse(IrPrimitive.LongWord))
+                  )
               }
             }
           }
@@ -245,6 +286,9 @@ object DoldecompIrGenerator {
             val resolved = resolveTypedef(typeName, typedefs)
             if (isStructType(resolved)) {
               Some(irStructSizeBytes(buildStruct(resolved), wordSizeBits))
+            } else if (isEnumType(resolved) || isEnumType(typeName)) {
+              bitsForPrimitive(IrPrimitive.S32, Some(wordSizeBits))
+                .map(bits => math.ceil(bits.toDouble / 8d).toInt)
             } else {
               primitiveForType(resolved).flatMap { kind =>
                 bitsForPrimitive(kind, Some(wordSizeBits))
@@ -279,6 +323,10 @@ object DoldecompIrGenerator {
             buildStruct(resolvedRoot)
           } else if (operation.pointerDepth > 0 && isStructType(resolvedRoot)) {
             buildStruct(resolvedRoot)
+          } else {
+            resolveEnumName(operation.rootTypeName).orElse(resolveEnumName(resolvedRoot)).foreach {
+              buildEnum
+            }
           }
         }
 
@@ -286,6 +334,7 @@ object DoldecompIrGenerator {
           try {
             val outputShapeId = ShapeId.from(s"$namespace#${operation.outputName}")
             val rootTarget = rootOutputIrType(operation)
+            val resolvedRoot = resolveTypedef(operation.rootTypeName, typedefs)
             val outputMember = IrMember(
               id = ShapeId.from(s"$namespace#${operation.outputName}$$value"),
               name = "value",
@@ -306,11 +355,10 @@ object DoldecompIrGenerator {
                 } else if (
                   operation.pointerDepth > 0 || operation.isArray || isStructType(
                     operation.rootTypeName
-                  )
+                  ) || isEnumType(operation.rootTypeName) || isEnumType(resolvedRoot)
                 ) {
                   None
                 } else {
-                  val resolvedRoot = resolveTypedef(operation.rootTypeName, typedefs)
                   primitiveForType(resolvedRoot)
                     .filter(isExplicitSizedPrimitive)
                     .orElse(wordSizePrimitive(wordSizeBits))
@@ -391,9 +439,11 @@ object DoldecompIrGenerator {
       fields: List[StructFieldDecl],
       reachableStructs: Map[String, IASTCompositeTypeSpecifier],
       buildStruct: String => IrType.MemoryMappedStruct,
+      buildEnum: String => IrType.IntEnum,
+      enums: Map[String, CEnumDefinition],
       pointeeTypeFor: (String, Map[String, IASTCompositeTypeSpecifier]) => IrType,
       fieldInitializerLengths: Map[(String, String), Int],
-      macros: Map[String, String]
+      typedefs: Map[String, String]
   ): List[IrMember] =
     groupBitfieldFields(fields).flatMap {
       case RegularFieldGroup(field) =>
@@ -408,9 +458,11 @@ object DoldecompIrGenerator {
             wordSizeBits = wordSizeBits,
             reachableStructs = reachableStructs,
             buildStruct = buildStruct,
+            buildEnum = buildEnum,
+            enums = enums,
             pointeeTypeFor = pointeeTypeFor,
             fieldInitializerLengths = fieldInitializerLengths,
-            macros = macros
+            typedefs = typedefs
           )
         )
       case BitmaskFieldGroup(name, bitfields, storageBits) if bitfields.size == 1 =>
@@ -574,9 +626,11 @@ object DoldecompIrGenerator {
       wordSizeBits: Int,
       reachableStructs: Map[String, IASTCompositeTypeSpecifier],
       buildStruct: String => IrType.MemoryMappedStruct,
+      buildEnum: String => IrType.IntEnum,
+      enums: Map[String, CEnumDefinition],
       pointeeTypeFor: (String, Map[String, IASTCompositeTypeSpecifier]) => IrType,
       fieldInitializerLengths: Map[(String, String), Int],
-      macros: Map[String, String]
+      typedefs: Map[String, String]
   ): IrMember = {
     val normalizedType = CHeaderParser.normalizeTypeName(fieldTypeName).replaceAll("\\s+", "")
     val fieldName = CHeaderParser.fieldName(fieldDeclarator)
@@ -585,7 +639,7 @@ object DoldecompIrGenerator {
     val isPointer = CHeaderParser.pointerDepth(fieldDeclarator) > 0
     val arrayLength =
       CHeaderParser
-        .arrayLength(fieldDeclarator, macros)
+        .arrayLength(fieldDeclarator, typedefs)
         .orElse(fieldInitializerLengths.get((structName, fieldName)))
 
     val funcPointerSig =
@@ -611,7 +665,8 @@ object DoldecompIrGenerator {
     } else {
       arrayLength match {
         case Some(_) =>
-          val elementType = typeForName(normalizedType, reachableStructs, buildStruct)
+          val elementType =
+            typeForName(normalizedType, reachableStructs, buildStruct, buildEnum, enums, typedefs)
           IrType.ListType(
             id = ShapeId.from(s"$namespace#${structName}${toPascalCase(fieldName)}Array"),
             element = elementType,
@@ -619,7 +674,7 @@ object DoldecompIrGenerator {
             bitsAlias = false
           )
         case None =>
-          typeForName(normalizedType, reachableStructs, buildStruct)
+          typeForName(normalizedType, reachableStructs, buildStruct, buildEnum, enums, typedefs)
       }
     }
     val explicitPrimitive = primitiveForType(normalizedType)
@@ -683,12 +738,22 @@ object DoldecompIrGenerator {
   private def typeForName(
       normalizedType: String,
       reachableStructs: Map[String, IASTCompositeTypeSpecifier],
-      buildStruct: String => IrType.MemoryMappedStruct
+      buildStruct: String => IrType.MemoryMappedStruct,
+      buildEnum: String => IrType.IntEnum,
+      enums: Map[String, CEnumDefinition],
+      typedefs: Map[String, String]
   ): IrType = {
+    val resolved = resolveTypedef(normalizedType, typedefs)
     if (reachableStructs.contains(normalizedType)) {
       buildStruct(normalizedType)
+    } else if (reachableStructs.contains(resolved)) {
+      buildStruct(resolved)
+    } else if (enums.contains(normalizedType)) {
+      buildEnum(normalizedType)
+    } else if (enums.contains(resolved)) {
+      buildEnum(resolved)
     } else {
-      IrType.Primitive(primitiveForType(normalizedType).getOrElse(IrPrimitive.LongWord))
+      IrType.Primitive(primitiveForType(resolved).getOrElse(IrPrimitive.LongWord))
     }
   }
 
@@ -772,14 +837,23 @@ object DoldecompIrGenerator {
       symbolName: String,
       typeName: String,
       headerStructs: Map[String, IASTCompositeTypeSpecifier],
-      typedefs: Map[String, String]
+      typedefs: Map[String, String],
+      enums: Map[String, CEnumDefinition]
   ): Option[String] = {
     val normalized = CHeaderParser.normalizeTypeName(typeName).replaceAll("\\s+", "")
-    if (headerStructs.contains(normalized) || primitiveForType(normalized).isDefined) {
+    if (
+      headerStructs.contains(normalized) || enums.contains(normalized) || primitiveForType(
+        normalized
+      ).isDefined
+    ) {
       None
     } else {
       val resolved = resolveTypedef(typeName, typedefs)
-      if (headerStructs.contains(resolved) || primitiveForType(resolved).isDefined) {
+      if (
+        headerStructs.contains(resolved) || enums.contains(resolved) || primitiveForType(
+          resolved
+        ).isDefined
+      ) {
         None
       } else {
         Some(s"$symbolName: Missing struct or primitive definition for resolved type '$typeName'.")
@@ -859,6 +933,7 @@ object DoldecompIrGenerator {
         member.primitiveOverride.flatMap(bitsForPrimitive(_, wordSize)).orElse {
           member.target match {
             case IrType.Primitive(kind)            => bitsForPrimitive(kind, wordSize)
+            case _: IrType.IntEnum                 => bitsForPrimitive(IrPrimitive.S32, wordSize)
             case listType: IrType.ListType         => irListBitWidth(member, listType, wordSize)
             case nested: IrType.MemoryMappedStruct =>
               Some(irStructSizeBytes(nested, wordSize.getOrElse(32)) * 8)
@@ -903,6 +978,8 @@ object DoldecompIrGenerator {
       listType.element match {
         case IrType.Primitive(kind) =>
           bitsForPrimitive(kind, wordSize).map(_ * length)
+        case _: IrType.IntEnum =>
+          bitsForPrimitive(IrPrimitive.S32, wordSize).map(_ * length)
         case nested: IrType.MemoryMappedStruct =>
           Some(irStructSizeBytes(nested, wordSize.getOrElse(32)) * 8 * length)
         case _ => None
@@ -991,6 +1068,17 @@ object DoldecompIrGenerator {
     sourceFiles.flatMap { path =>
       val source = new String(Files.readAllBytes(path))
       CHeaderParser.parseTypedefs(source, macros).toList
+    }.toMap
+  }
+
+  private def loadEnums(
+      headerRoots: List[Path],
+      macros: Map[String, String]
+  ): Map[String, CEnumDefinition] = {
+    val sourceFiles = headerRoots.flatMap(collectSourceFiles).distinct
+    sourceFiles.flatMap { path =>
+      val source = new String(Files.readAllBytes(path))
+      CHeaderParser.parseEnums(source, macros).toList
     }.toMap
   }
 

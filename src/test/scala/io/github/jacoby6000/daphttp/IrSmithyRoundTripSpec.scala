@@ -107,6 +107,45 @@ class IrSmithyRoundTripSpec extends AnyFunSuite {
     )
   }
 
+  test("losslessly round trips int enums") {
+    assertLosslessSmithyRoundTrip(
+      """$version: "2"
+        |
+        |namespace example
+        |
+        |use com.jacoby6000.daphttp#dapStruct
+        |use com.jacoby6000.daphttp#staticAddress
+        |use com.jacoby6000.daphttp#wordSize
+        |
+        |@wordSize(32)
+        |service Api {
+        |    version: "1"
+        |    operations: [GetState]
+        |}
+        |
+        |operation GetState {
+        |    output: GetStateOutput
+        |}
+        |
+        |structure GetStateOutput {
+        |    @staticAddress("0x3000")
+        |    state: StateBlock
+        |}
+        |
+        |@dapStruct
+        |structure StateBlock {
+        |    color: Color
+        |}
+        |
+        |intEnum Color {
+        |    RED = 0
+        |    GREEN = 1
+        |    BLUE = 5
+        |}
+        |""".stripMargin
+    )
+  }
+
   test("losslessly round trips pointer, char, array, and numeric width traits") {
     assertLosslessSmithyRoundTrip(
       """$version: "2"

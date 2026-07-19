@@ -244,6 +244,8 @@ object HttpRouteIrEmitter {
           (Some(listType.element), elemSize)
         case IrType.Primitive(kind) =>
           (Some(member.target), pointeeSizeBytes(member.target, Some(wordSizeBits), errors))
+        case intEnum: IrType.IntEnum =>
+          (Some(intEnum), pointeeSizeBytes(intEnum, Some(wordSizeBits), errors))
         case struct: IrType.Struct =>
           (Some(struct), pointeeSizeBytes(struct, Some(wordSizeBits), errors))
         case _ =>
@@ -289,6 +291,10 @@ object HttpRouteIrEmitter {
     pointeeType match {
       case struct: IrType.Struct =>
         structureSizeBytes(struct, wordSize, errors)
+      case intEnum: IrType.IntEnum =>
+        bitsForPrimitive(intEnum.underlying, wordSize).map(bits =>
+          math.ceil(bits.toDouble / 8d).toInt
+        )
       case IrType.Primitive(kind) =>
         bitsForPrimitive(kind, wordSize).map(bits => math.ceil(bits.toDouble / 8d).toInt)
       case _: IrType.FunctionPointer =>
@@ -402,6 +408,9 @@ object HttpRouteIrEmitter {
       case _: IrType.Primitive =>
         errors += s"$pathPrefix: Primitive outputs are modeled in IR but must be wrapped in a structure."
         Nil
+      case _: IrType.IntEnum =>
+        errors += s"$pathPrefix: Enum outputs are modeled in IR but must be wrapped in a structure."
+        Nil
       case ref: IrType.Ref =>
         errors += s"${ref.id}: Unsupported shape for route planning."
         Nil
@@ -479,6 +488,8 @@ object HttpRouteIrEmitter {
           member.target match {
             case IrType.Primitive(kind) =>
               bitsForPrimitive(kind, wordSize)
+            case intEnum: IrType.IntEnum =>
+              bitsForPrimitive(intEnum.underlying, wordSize)
             case listType: IrType.ListType =>
               listBitWidth(member, listType, wordSize, errors)
             case nestedStruct: IrType.Struct =>
@@ -710,6 +721,7 @@ object HttpRouteIrEmitter {
   private def listElementBitWidth(elementType: IrType, wordSize: Option[Int]): Option[Int] = {
     elementType match {
       case IrType.Primitive(kind)      => bitsForPrimitive(kind, wordSize)
+      case intEnum: IrType.IntEnum     => bitsForPrimitive(intEnum.underlying, wordSize)
       case nestedStruct: IrType.Struct =>
         structureSizeBytes(nestedStruct, wordSize, ListBuffer.empty).map(_ * 8)
       case _ =>
@@ -767,6 +779,8 @@ object HttpRouteIrEmitter {
     irType match {
       case struct: IrType.Struct =>
         compileStructCodec(struct, endian, wordSize, errors, context)
+      case intEnum: IrType.IntEnum =>
+        compileIntEnumCodec(intEnum, endian, wordSize)
       case IrType.Primitive(kind) =>
         compilePrimitiveCodec(kind, endian, wordSize)
       case fp: IrType.FunctionPointer =>
@@ -1109,6 +1123,35 @@ object HttpRouteIrEmitter {
   ): Option[Codec[Json]] = {
     bitsForPrimitive(kind, wordSize).map { bitWidth =>
       primitiveCodec(kind, bitWidth, endian)
+    }
+  }
+
+  private def compileIntEnumCodec(
+      intEnum: IrType.IntEnum,
+      endian: IrEndian,
+      wordSize: Option[Int]
+  ): Option[Codec[Json]] = {
+    bitsForPrimitive(intEnum.underlying, wordSize).map { bitWidth =>
+      val namesByValue = intEnum.values.foldLeft(Map.empty[Int, String]) { (acc, enumValue) =>
+        if (acc.contains(enumValue.value)) acc else acc + (enumValue.value -> enumValue.name)
+      }
+      bits(bitWidth.toLong).xmap[Json](
+        value => {
+          val normalized =
+            if (needsEndian(intEnum.underlying)) applyEndianToBits(value, bitWidth, endian)
+            else value
+          val raw = bitVectorToUnsigned(normalized)
+          val signed = signExtend(raw, bitWidth)
+          namesByValue.get(signed.intValue) match {
+            case Some(name) =>
+              Json.fromString(name)
+            case None =>
+              val mask = (BigInt(1) << bitWidth) - 1
+              Json.fromString(f"0x${(raw & mask).toLong}%x")
+          }
+        },
+        _ => primitiveToBitVector(bitWidth)
+      )
     }
   }
 

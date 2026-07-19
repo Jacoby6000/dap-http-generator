@@ -227,6 +227,52 @@ class DoldecompSmithyGeneratorIntegrationSpec extends AnyFunSuite {
     assert(plans.routes("/api/MeleeApi/intVar").reads.head.sizeBytes == 4)
   }
 
+  test("maps C enums to intEnum IR and named JSON decode") {
+    val fixtureRoot = Paths.get("src/test/resources/doldecomp-fixture-enums")
+    val generation = DoldecompIrGenerator
+      .generateFromPaths(
+        symbolsPath = fixtureRoot.resolve("symbols.txt"),
+        headerRoots = List(fixtureRoot),
+        namespace = "example.doldecomp.enums",
+        serviceName = "EnumApi",
+        wordSizeBits = 32
+      )
+      .toOption
+      .get
+
+    assert(generation.warnings.isEmpty)
+    val operations = generation.services.head.operations.map(op => op.name -> op).toMap
+
+    val modeMember = operations("GetGCurrentMode").output.members.head
+    val modeEnum = modeMember.target.asInstanceOf[IrType.IntEnum]
+    assert(
+      modeEnum.values
+        .map(v => v.name -> v.value) == List("MODE_MENU" -> 0, "MODE_VS" -> 1, "MODE_STORY" -> 2)
+    )
+
+    val stateStruct = operations("GetGGameState").output.members.head.target
+      .asInstanceOf[IrType.MemoryMappedStruct]
+    val nestedMode =
+      stateStruct.members.find(_.name == "mode").get.target.asInstanceOf[IrType.IntEnum]
+    assert(nestedMode.values.map(_.name) == List("MODE_MENU", "MODE_VS", "MODE_STORY"))
+
+    val plans = HttpRouteIrEmitter.emitRoutePlansFromIr(generation.services)
+    assert(plans.errors.isEmpty)
+    val modeRead = plans.routes("/api/EnumApi/gCurrentMode").reads.head
+    val decoded = modeRead.decodeCodec.get
+      .decode(scodec.bits.BitVector(Array[Byte](0x00, 0x00, 0x00, 0x01)))
+      .toOption
+      .get
+      .value
+    assert(decoded == io.circe.Json.fromString("MODE_VS"))
+    val unknown = modeRead.decodeCodec.get
+      .decode(scodec.bits.BitVector(Array[Byte](0x00, 0x00, 0x00, 0x2a)))
+      .toOption
+      .get
+      .value
+    assert(unknown == io.circe.Json.fromString("0x2a"))
+  }
+
   test("maps char arrays and char pointers to string semantics in IR") {
     val fixtureRoot = Paths.get("src/test/resources/doldecomp-fixture-strings")
     val generation = DoldecompIrGenerator

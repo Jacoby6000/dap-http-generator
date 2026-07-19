@@ -380,4 +380,56 @@ class HttpRouteIrEmitterCodecSpec extends AnyFunSuite {
 
     assert(decode(read, bytes) == Json.fromString("pLoadCommonData"))
   }
+
+  test("decodes int enums to enumerator names and hex for unknown values") {
+    val color = IrType.IntEnum(
+      id = id("Color"),
+      values = List(
+        IrEnumValue("RED", 0),
+        IrEnumValue("GREEN", 1),
+        IrEnumValue("BLUE", 5)
+      )
+    )
+    val read = compileSingleRead(color, endian = IrEndian.Big)
+
+    assert(decode(read, Array(0x00, 0x00, 0x00, 0x00)) == Json.fromString("RED"))
+    assert(decode(read, Array(0x00, 0x00, 0x00, 0x01)) == Json.fromString("GREEN"))
+    assert(decode(read, Array(0x00, 0x00, 0x00, 0x05)) == Json.fromString("BLUE"))
+    assert(decode(read, Array(0x00, 0x00, 0x00, 0x2a)) == Json.fromString("0x2a"))
+  }
+
+  test("decodes enum members inside dap structs") {
+    val status = IrType.IntEnum(
+      id = id("Status"),
+      values = List(IrEnumValue("OK", 1), IrEnumValue("ERR", 2))
+    )
+    val dapStruct = IrType.MemoryMappedStruct(
+      id = id("Packet"),
+      members = List(
+        IrMember(
+          id = id("Packet_status"),
+          name = "status",
+          target = status,
+          staticAddress = None,
+          paddingRepeats = None,
+          isPointer = false,
+          isArray = false,
+          arrayLength = None,
+          endianOverride = None,
+          primitiveOverride = None
+        )
+      ),
+      declaredSizeBits = Some(4)
+    )
+    val read = compileSingleRead(dapStruct)
+
+    assert(
+      decode(read, Array(0x00, 0x00, 0x00, 0x01)) == Json.obj("status" -> Json.fromString("OK"))
+    )
+    assert(
+      decode(read, Array(0x00, 0x00, 0x00, 0xff.toByte)) == Json.obj(
+        "status" -> Json.fromString("0xff")
+      )
+    )
+  }
 }

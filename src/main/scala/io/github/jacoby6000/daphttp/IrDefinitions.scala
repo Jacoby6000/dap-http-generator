@@ -64,6 +64,8 @@ object IrPrimitive {
   case object LongWord extends IrPrimitive
 }
 
+final case class IrEnumValue(name: String, value: Int)
+
 sealed trait IrType
 object IrType {
   sealed trait Struct extends IrType {
@@ -90,6 +92,14 @@ object IrType {
   final case class ListType(id: ShapeId, element: IrType, bytesAlias: Boolean, bitsAlias: Boolean)
       extends IrType
   final case class MapType(id: ShapeId, key: IrType, value: IrType) extends IrType
+  // DESNOTE(jbarber, 2026-07-19): C enums and Smithy intEnum shapes are int-backed
+  // (typically s32). Decoded JSON uses the enumerator name when the raw value matches,
+  // otherwise a hex literal `0xN` so unknown/out-of-range values stay readable.
+  final case class IntEnum(
+      id: ShapeId,
+      values: List[IrEnumValue],
+      underlying: IrPrimitive = IrPrimitive.S32
+  ) extends IrType
   final case class Primitive(kind: IrPrimitive) extends IrType
   final case class Ref(id: ShapeId) extends IrType
   final case class FunctionPointer(

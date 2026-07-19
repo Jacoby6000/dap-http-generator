@@ -2,6 +2,7 @@ package io.github.jacoby6000.daphttp
 
 import software.amazon.smithy.model.Model
 import software.amazon.smithy.model.node.Node
+import software.amazon.smithy.model.shapes.IntEnumShape
 import software.amazon.smithy.model.shapes.ListShape
 import software.amazon.smithy.model.shapes.MapShape
 import software.amazon.smithy.model.shapes.MemberShape
@@ -136,6 +137,8 @@ object SmithyIrEmitter {
         visitNamedShape(state, listType.id, listType)
       case mapType: IrType.MapType =>
         visitNamedShape(state, mapType.id, mapType)
+      case intEnum: IrType.IntEnum =>
+        visitNamedShape(state, intEnum.id, intEnum)
       case IrType.Ref(id) if isPreludeShape(id) =>
         state
       case IrType.Ref(id) =>
@@ -219,6 +222,8 @@ object SmithyIrEmitter {
       chain.pointeeType match {
         case struct: IrType.Struct =>
           builder.addTrait(stringTrait("pointeeShape", struct.id.toString))
+        case intEnum: IrType.IntEnum =>
+          builder.addTrait(stringTrait("pointeeShape", intEnum.id.toString))
         case IrType.Primitive(kind) =>
           builder.addTrait(stringTrait("pointeeShape", preludeShapeId(kind).toString))
         case _ =>
@@ -281,9 +286,22 @@ object SmithyIrEmitter {
             .value(targetShapeId(mapType.value))
             .build()
         )
+      case intEnum: IrType.IntEnum =>
+        Some(buildIntEnum(id, intEnum))
       case _ =>
         None
     }
+
+  private def buildIntEnum(id: ShapeId, intEnum: IrType.IntEnum): IntEnumShape = {
+    val builder = IntEnumShape.builder().id(id)
+    val seenValues = scala.collection.mutable.Set.empty[Int]
+    intEnum.values.foreach { enumValue =>
+      if (seenValues.add(enumValue.value)) {
+        val _ = builder.addMember(enumValue.name, enumValue.value)
+      }
+    }
+    builder.build()
+  }
 
   private def buildStructure(
       id: ShapeId,
@@ -348,6 +366,7 @@ object SmithyIrEmitter {
       case listType: IrType.ListType if listType.bitsAlias  => BitsShapeId
       case listType: IrType.ListType                        => listType.id
       case mapType: IrType.MapType                          => mapType.id
+      case intEnum: IrType.IntEnum                          => intEnum.id
       case IrType.Ref(id)                                   => id
       case IrType.Primitive(kind)                           => preludeShapeId(kind)
       case _: IrType.FunctionPointer                        => ShapeId.from("smithy.api#Long")

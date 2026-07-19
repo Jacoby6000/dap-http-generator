@@ -50,6 +50,11 @@ object IrEquivalence extends Assertions {
   final case class NormalizedMap(name: String, key: NormalizedValue, value: NormalizedValue)
       extends NormalizedValue
   final case class NormalizedRef(name: String) extends NormalizedValue
+  final case class NormalizedIntEnum(
+      name: String,
+      values: List[(String, Int)],
+      underlying: IrPrimitive
+  ) extends NormalizedValue
   final case class NormalizedFunctionPointer(
       name: String,
       params: List[(String, String)],
@@ -132,6 +137,12 @@ object IrEquivalence extends Assertions {
               key = normalizeTypeValue(mapType.key),
               value = normalizeTypeValue(mapType.value)
             )
+          case intEnum: IrType.IntEnum =>
+            NormalizedIntEnum(
+              name = intEnum.id.getName,
+              values = intEnum.values.map(v => v.name -> v.value),
+              underlying = intEnum.underlying
+            )
           case IrType.Ref(id) =>
             NormalizedRef(id.getName)
           case _: IrType.FunctionPointer =>
@@ -160,6 +171,12 @@ object IrEquivalence extends Assertions {
           name = mapType.id.getName,
           key = normalizeTypeValue(mapType.key),
           value = normalizeTypeValue(mapType.value)
+        )
+      case intEnum: IrType.IntEnum =>
+        NormalizedIntEnum(
+          name = intEnum.id.getName,
+          values = intEnum.values.map(v => v.name -> v.value),
+          underlying = intEnum.underlying
         )
       case IrType.Ref(id) =>
         NormalizedRef(id.getName)
