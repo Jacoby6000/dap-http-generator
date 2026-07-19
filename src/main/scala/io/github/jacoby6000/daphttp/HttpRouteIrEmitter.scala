@@ -386,7 +386,9 @@ object HttpRouteIrEmitter {
     var currentOffset = 0
     struct.members.map { member =>
       val offset = member.offsetBytes.getOrElse(currentOffset)
-      currentOffset = offset + memberSizeBytes(member, wordSize, errors).getOrElse(0)
+      memberSizeBytes(member, wordSize, errors).foreach { sizeBytes =>
+        currentOffset = offset + sizeBytes
+      }
       member.name -> offset
     }.toMap
   }
