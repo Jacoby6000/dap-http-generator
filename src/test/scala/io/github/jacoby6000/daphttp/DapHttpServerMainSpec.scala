@@ -391,6 +391,13 @@ class DapHttpServerMainSpec extends AnyFunSuite {
     assert(route.reads.head.cStringPointer)
   }
 
+  test("maskToWordSize keeps 32-bit GameCube-style pointer addresses") {
+    val address = 0x80400000L
+    assert(DapHttpServerMain.maskToWordSize(address, Some(32)) == address)
+    assert(DapHttpServerMain.maskToWordSize(address | (1L << 40), Some(32)) == address)
+    assert(DapHttpServerMain.maskToWordSize(address, Some(64)) == address)
+  }
+
   test("POST /resume issues a DAP continue request") {
     import cats.effect.IO
     import cats.effect.Ref

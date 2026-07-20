@@ -118,7 +118,8 @@ flowchart LR
   code sections (`.text`, etc.) and data symbols without `ctype`/C declarations emit per-symbol
   warnings rather than failing silently.
 - Duplicate C globals for one symbol name merge deterministically: prefer non-`static` declarations
-  with array length metadata; take `pointerDepth` from that primary (not `max`). `cheaders-smithy`
-  fails when the service has zero operations.
+  with array length metadata; take `pointerDepth` from that primary (not `max`). Conflicting macros,
+  structs, typedefs, and enums across scanned files keep the first definition and emit a warning.
+  `cheaders-smithy` fails when the service has zero operations.
 - First `sbt` invocation downloads sbt/Scala launchers and Coursier deps; expect a slow cold start.
   Building the server also builds the Scala.js UI via `resourceGenerators`.

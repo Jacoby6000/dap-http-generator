@@ -29,6 +29,11 @@ object DoldecompIrGenerator {
       pointerDepth: Int
   )
 
+  private final case class MergedNamedMap[A](
+      values: Map[String, A],
+      warnings: List[String]
+  )
+
   def generateFromPaths(
       symbolsPath: Path,
       headerRoots: List[Path],
@@ -58,12 +63,15 @@ object DoldecompIrGenerator {
       Integer.valueOf(symbols.size),
       Integer.valueOf(headerRoots.size)
     )
-    val allMacros = loadAllMacros(headerRoots)
-    val headerStructs = loadStructs(headerRoots, allMacros)
+    val macroLoad = loadAllMacros(headerRoots)
+    val allMacros = macroLoad.values
+    val structLoad = loadStructs(headerRoots, allMacros)
+    val headerStructs = structLoad.values
     val structMemberOffsets = loadStructMemberOffsets(headerRoots)
     val globalDeclarations = loadGlobalDeclarations(headerRoots, allMacros)
     val fieldInitializerLengths = loadFieldInitializerLengths(headerRoots, headerStructs, allMacros)
-    val typedefs = loadTypedefs(headerRoots, allMacros)
+    val typedefLoad = loadTypedefs(headerRoots, allMacros)
+    val typedefs = typedefLoad.values
     val enumParse = loadEnums(headerRoots, allMacros)
     val enums = enumParse.enums
     val sectionResult = SectionFilter.filterDataSymbols(symbols, extraDataSections)
@@ -71,8 +79,12 @@ object DoldecompIrGenerator {
     val dataObjectSymbols = sectionResult.dataSymbols
     val warnings = mutable.ListBuffer.empty[String]
     warnings ++= sectionResult.warnings
+    warnings ++= macroLoad.warnings
+    warnings ++= structLoad.warnings
+    warnings ++= typedefLoad.warnings
     warnings ++= enumParse.warnings
-    enumParse.warnings.foreach(w => DapHttpLoggers.irSourceDoldecomp.warn("{}", w))
+    (macroLoad.warnings ++ structLoad.warnings ++ typedefLoad.warnings ++ enumParse.warnings)
+      .foreach(w => DapHttpLoggers.irSourceDoldecomp.warn("{}", w))
 
     val resolvedSymbols = dataObjectSymbols.flatMap { symbol =>
       resolveSymbol(symbol, globalDeclarations) match {
@@ -1112,35 +1124,71 @@ object DoldecompIrGenerator {
       .toMap
   }
 
-  private def loadAllMacros(headerRoots: List[Path]): Map[String, String] = {
+  private def loadAllMacros(headerRoots: List[Path]): MergedNamedMap[String] = {
     val sourceFiles = headerRoots.flatMap(collectSourceFiles).distinct
-    sourceFiles.flatMap { path =>
+    val entries = sourceFiles.flatMap { path =>
       val source = new String(Files.readAllBytes(path))
       CHeaderParser.extractMacros(source).toList
-    }.toMap
+    }
+    mergeNamedEntries(entries, "macro", _ == _)
   }
 
   private def loadStructs(
       headerRoots: List[Path],
       macros: Map[String, String]
-  ): Map[String, IASTCompositeTypeSpecifier] = {
+  ): MergedNamedMap[IASTCompositeTypeSpecifier] = {
     val sourceFiles = headerRoots.flatMap(collectSourceFiles).distinct
-    sourceFiles.flatMap { path =>
+    val entries = sourceFiles.flatMap { path =>
       val source = new String(Files.readAllBytes(path))
-      CHeaderParser.parse(source, macros)
-    }.toMap
+      CHeaderParser.parse(source, macros).toList
+    }
+    mergeNamedEntries(entries, "struct", structDefinitionsEquivalent)
   }
 
   private def loadTypedefs(
       headerRoots: List[Path],
       macros: Map[String, String]
-  ): Map[String, String] = {
+  ): MergedNamedMap[String] = {
     val sourceFiles = headerRoots.flatMap(collectSourceFiles).distinct
-    sourceFiles.flatMap { path =>
+    val entries = sourceFiles.flatMap { path =>
       val source = new String(Files.readAllBytes(path))
       CHeaderParser.parseTypedefs(source, macros).toList
-    }.toMap
+    }
+    mergeNamedEntries(entries, "typedef", _ == _)
   }
+
+  private def mergeNamedEntries[A](
+      entries: List[(String, A)],
+      kind: String,
+      equivalent: (A, A) => Boolean
+  ): MergedNamedMap[A] = {
+    val warnings = mutable.ListBuffer.empty[String]
+    val merged = mutable.LinkedHashMap.empty[String, A]
+    entries.foreach { case (name, value) =>
+      merged.get(name) match {
+        case None =>
+          merged(name) = value
+        case Some(existing) if equivalent(existing, value) =>
+          ()
+        case Some(_) =>
+          warnings += s"$name: Conflicting $kind definitions; keeping first."
+      }
+    }
+    MergedNamedMap(merged.toMap, warnings.toList)
+  }
+
+  private def structDefinitionsEquivalent(
+      left: IASTCompositeTypeSpecifier,
+      right: IASTCompositeTypeSpecifier
+  ): Boolean =
+    structFieldSignature(left) == structFieldSignature(right)
+
+  private def structFieldSignature(composite: IASTCompositeTypeSpecifier): List[String] =
+    CHeaderParser.extractFields(composite).map { field =>
+      val fieldName =
+        Option(field.declarator.getName).map(_.toString).getOrElse("")
+      s"${field.typeName}|$fieldName|${field.bitFieldWidth}|${field.unionGroup}|${field.offsetBytes}"
+    }
 
   private def loadEnums(
       headerRoots: List[Path],

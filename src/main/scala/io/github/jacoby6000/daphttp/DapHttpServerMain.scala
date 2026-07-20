@@ -845,10 +845,15 @@ object DapHttpServerMain extends IOApp {
       }
     }
 
-  private def maskToWordSize(value: Long, wordSizeBits: Option[Int]): Long =
+  // DESNOTE(jbarber, 2026-07-19): Prefer an unsigned right-shift mask over `(1L << bits) - 1`.
+  // JVM `long` shifts already keep the low 6 bits of the count (so `1L << 32` is fine), but
+  // reviewers commonly confuse that with `int` shifts where `1 << 32` collapses to `1`.
+  // `-1L >>> (64 - bits)` makes the 32-bit mask (`0xffffffffL`) obvious without that pitfall.
+  // See https://docs.oracle.com/javase/specs/jls/se21/html/jls-15.html#jls-15.19
+  private[daphttp] def maskToWordSize(value: Long, wordSizeBits: Option[Int]): Long =
     wordSizeBits match {
-      case Some(bits) if bits < 64 => value & ((1L << bits) - 1L)
-      case _                       => value
+      case Some(bits) if bits > 0 && bits < 64 => value & (-1L >>> (64 - bits))
+      case _                                   => value
     }
 
   private def decodeCStringPointerArray(
@@ -1254,7 +1259,6 @@ object DapHttpServerMain extends IOApp {
           )
           readUntilResponse(requestSeq, "initialize").flatMap { body =>
             writeEvent("initialized")
-            initialized = true
             val needsConfigurationDone = body.hcursor
               .downField("supportsConfigurationDoneRequest")
               .as[Boolean]
@@ -1262,8 +1266,14 @@ object DapHttpServerMain extends IOApp {
             if (needsConfigurationDone) {
               val configSeq = nextSeq()
               writeRequest(configSeq, "configurationDone", None)
-              readUntilResponse(configSeq, "configurationDone").map(_ => ())
+              // Mark initialized only after the full handshake succeeds so a failed
+              // configurationDone does not leave a half-ready session that skips setup.
+              readUntilResponse(configSeq, "configurationDone").map { _ =>
+                initialized = true
+                ()
+              }
             } else {
+              initialized = true
               Right(())
             }
           }

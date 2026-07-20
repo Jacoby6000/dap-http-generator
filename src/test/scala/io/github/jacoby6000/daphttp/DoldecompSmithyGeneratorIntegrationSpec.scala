@@ -985,6 +985,47 @@ class DoldecompSmithyGeneratorIntegrationSpec extends AnyFunSuite {
     }
   }
 
+  test("warns on conflicting multi-file macros and keeps the first") {
+    val tmp = java.nio.file.Files.createTempDirectory("dap-macro-merge")
+    try {
+      val first = tmp.resolve("a.h")
+      val second = tmp.resolve("b.h")
+      val source = tmp.resolve("data.c")
+      val symbols = tmp.resolve("symbols.txt")
+      java.nio.file.Files.writeString(first, "#define LEN 2\n")
+      java.nio.file.Files.writeString(second, "#define LEN 4\n")
+      java.nio.file.Files.writeString(
+        source,
+        """
+          |u8 g_bytes[LEN];
+          |""".stripMargin
+      )
+      java.nio.file.Files.writeString(
+        symbols,
+        "g_bytes = .data:0x80000000; // type:object size:0x2 scope:global\n"
+      )
+
+      val generation = DoldecompIrGenerator
+        .generateFromPaths(
+          symbolsPath = symbols,
+          headerRoots = List(tmp),
+          namespace = "example.macro.merge",
+          serviceName = "Api",
+          wordSizeBits = 32
+        )
+        .toOption
+        .get
+
+      assert(generation.warnings.exists(w => w.contains("LEN") && w.contains("Conflicting macro")))
+      val valueMember = generation.services.head.operations.head.output.members.head
+      assert(valueMember.arrayLength.contains(2))
+    } finally {
+      java.nio.file.Files.walk(tmp).sorted(java.util.Comparator.reverseOrder()).forEach { path =>
+        val _ = java.nio.file.Files.deleteIfExists(path)
+      }
+    }
+  }
+
   test("warns when symbol size is inconsistent with C-derived array length") {
     val tmp = java.nio.file.Files.createTempDirectory("dap-size-mismatch")
     try {
