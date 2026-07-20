@@ -42,15 +42,19 @@ object SectionFilter {
     val unknownWarnings = unknownSections.map { section =>
       s"Unknown section '$section' is not recognized as data or code; symbols in it will be skipped. Use --data-sections to include it."
     }
+    // DESNOTE(jbarber, 2026-07-20): Known code sections (.text, .ctors, extab, …) are never data;
+    // do not suggest --data-sections. Summarize counts so Melee-scale skips stay one line.
     val codeWarnings =
       if (codeSectionSymbols.isEmpty) {
         Nil
       } else {
         val bySection = codeSectionSymbols.groupBy(s => normalize(s.section)).toList.sortBy(_._1)
-        bySection.map { case (section, symbols) =>
-          val names = symbols.map(_.name).sorted.mkString(", ")
-          s"Skipping ${symbols.size} object symbol(s) in code section '$section': $names. Use --data-sections to include it."
-        }
+        val summary = bySection
+          .map { case (section, symbols) => s"'$section' (${symbols.size})" }
+          .mkString(", ")
+        List(
+          s"Skipping ${codeSectionSymbols.size} object symbol(s) in known code section(s): $summary."
+        )
       }
 
     SectionFilterResult(dataSymbols, unknownWarnings ++ codeWarnings)

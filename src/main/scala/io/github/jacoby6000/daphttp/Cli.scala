@@ -237,8 +237,9 @@ object Cli
         errors.foreach(error => DapHttpLoggers.irSourceDoldecomp.warn("{}", error))
         RoutePlansLoadResult(Map.empty, errors)
       case Right(generation) =>
+        // DESNOTE(jbarber, 2026-07-20): DoldecompIrGenerator already logs its warnings while
+        // building IR; re-logging here doubled every line on cheaders startup.
         IrSizingWarnings.writeToStderr(generation.services)
-        generation.warnings.foreach(warning => DapHttpLoggers.irSourceDoldecomp.warn("{}", warning))
         val plans = HttpRouteIrEmitter.emitRoutePlansFromIr(generation.services)
         RoutePlansLoadResult(
           routes = plans.routes,

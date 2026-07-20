@@ -128,7 +128,15 @@ flowchart LR
   match any enumerator decode as a hex literal (`0xN`), not a numeric type. Enumerator
   initializers, array bounds, and bitfield widths are evaluated with CDT `ValueFactory` after
   preprocessor expansion — never by hand-parsing `#define` text. Unevaluable explicit enum
-  initializers warn instead of silently inventing sequential values.
+  initializers warn instead of silently inventing sequential values. When scanning multiple
+  headers, `*_Count` / `*_SelfCount` enumerator values are harvested iteratively (parse → inject
+  valid Count sentinels as ScannerInfo macros → reparse, capped) so chains like
+  `ftCo_MS_Count` → `ftMh_MS_Count` → `ftCh_MS_Count` resolve even when defining headers sort after
+  consumers. Only Count sentinels that appear before any failed initializer in their enum are
+  exported during enum reparse (avoids colliding with later redefinitions of the same enum tag).
+  After enums merge, all enumerator values are injected for struct/global parses so array bounds
+  like `jobjs[HUD_PLACE_MAX]` evaluate. Opaque type macros such as melee `UNK_T` (`void*`) are
+  expanded when validating symbol types.
 - Decoded struct JSON includes `"_address": "0x…"` on every struct object (root, nested members,
   and array elements of structs), including pointees from pointer routes. Top-level response
   envelopes no longer carry a separate `address`/`offset` field for the decoded value;
@@ -140,11 +148,17 @@ flowchart LR
   exceeds packed layout/pointer width (padding between elements). Pointer-chain outer indices use
   the same stride. Unsized aggregate arrays require a C declarator bound or initializer count:
   symbol size alone cannot distinguish element count from ABI stride padding. Object symbols in
-  code sections (`.text`, etc.) and data symbols without `ctype`/C declarations emit per-symbol
-  warnings rather than failing silently.
+  known code sections (`.text`, `.ctors`, `extab`, …) are summarized by section count (no
+  `--data-sections` tip). Unknown sections still suggest `--data-sections`. Data symbols without
+  `ctype`/C declarations and symbols whose resolved type is missing from `--headers` are summarized
+  (sample names + count). When `--headers` points at `…/melee/src`, adjacent
+  `…/melee/extern/dolphin/include` is auto-scanned if present so `Vec3`/`GXColor` resolve; a second
+  `--headers` remains valid and overrides ordering.
 - Duplicate C globals for one symbol name merge deterministically: prefer non-`static` declarations
   with array length metadata; take `pointerDepth` from that primary (not `max`). Conflicting macros,
-  structs, typedefs, and enums across scanned files keep the first definition and emit a warning.
-  `cheaders-smithy` fails when the service has zero operations.
+  structs, typedefs, and enums across scanned files keep the first definition and emit one summarized
+  warning per kind. `cheaders-smithy` fails when the service has zero operations.
+- C typedefs of `int`/`float`/… (e.g. melee `enum_t`, `MessageBufferID`) set `primitiveOverride` so
+  `IrSizingWarnings` does not treat them as ambiguous Smithy prelude Integer/Float.
 - First `sbt` invocation downloads sbt/Scala launchers and Coursier deps; expect a slow cold start.
   Building the server also builds the Scala.js UI via `resourceGenerators`.

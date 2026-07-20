@@ -152,6 +152,9 @@ object CHeaderParser {
     "UNK_PARAMS" -> "void"
   )
 
+  /** Opaque / placeholder macros always available during CDT parses and type validation. */
+  private[daphttp] def builtInMacros: Map[String, String] = BuiltInMacros
+
   private def parseTranslationUnit(
       source: String,
       fileName: String,

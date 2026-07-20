@@ -202,26 +202,43 @@ class CHeaderParserSpec extends AnyFunSuite {
     assert(flag.bitFieldWidth.contains(3))
   }
 
-  test("evaluates enum initializers that depend on macros from ScannerInfo") {
+  test("evaluates enumerator initializers that reference injected Count macros") {
     val source =
       """
-        |typedef enum Color {
-        |    CUSTOM = BASE + 5,
-        |    P = PAREN,
-        |    S = SHIFT
-        |} Color;
+        |typedef enum ftMasterhand_MotionState {
+        |    ftMh_MS_Wait = ftCo_MS_Count,
+        |    ftMh_MS_Count,
+        |    ftMh_MS_SelfCount = ftMh_MS_Count - ftCo_MS_Count
+        |} ftMasterhand_MotionState;
         |""".stripMargin
 
-    val parsed = CHeaderParser.parseEnums(
-      source,
-      Map("BASE" -> "10", "PAREN" -> "(10)", "SHIFT" -> "(1 << 3)")
-    )
-    assert(parsed.warnings.isEmpty)
+    val parsed = CHeaderParser.parseEnums(source, Map("ftCo_MS_Count" -> "2"))
+    assert(parsed.warnings.isEmpty, parsed.warnings.mkString("\n"))
     assert(
-      parsed.enums("Color").values == List(
-        IrEnumValue("CUSTOM", 15),
-        IrEnumValue("P", 10),
-        IrEnumValue("S", 8)
+      parsed.enums("ftMasterhand_MotionState").values == List(
+        IrEnumValue("ftMh_MS_Wait", 2),
+        IrEnumValue("ftMh_MS_Count", 3),
+        IrEnumValue("ftMh_MS_SelfCount", 1)
+      )
+    )
+  }
+
+  test("evaluates Crazyhand Count macros that subtract from Masterhand Counts") {
+    val source =
+      """
+        |typedef enum ftCrazyhand_MotionState {
+        |    ftCh_MS_Count = ftMh_MS_Count - 1,
+        |    ftCh_MS_SelfCount = ftMh_MS_SelfCount - 1
+        |} ftCrazyhand_MotionState;
+        |""".stripMargin
+
+    val parsed =
+      CHeaderParser.parseEnums(source, Map("ftMh_MS_Count" -> "3", "ftMh_MS_SelfCount" -> "1"))
+    assert(parsed.warnings.isEmpty, parsed.warnings.mkString("\n"))
+    assert(
+      parsed.enums("ftCrazyhand_MotionState").values == List(
+        IrEnumValue("ftCh_MS_Count", 2),
+        IrEnumValue("ftCh_MS_SelfCount", 0)
       )
     )
   }

@@ -236,7 +236,7 @@ class DoldecompSmithyGeneratorIntegrationSpec extends AnyFunSuite {
       )
     )
     assert(
-      generation.warnings.exists(w => w.contains("textObject") && w.contains(".text"))
+      generation.warnings.exists(w => w.contains("known code section") && w.contains(".text"))
     )
     assert(generation.services.head.operations.map(_.name) == List("GetGPlayerState"))
 
@@ -331,7 +331,8 @@ class DoldecompSmithyGeneratorIntegrationSpec extends AnyFunSuite {
       .toOption
       .get
 
-    assert(generation.warnings.exists(_.contains("Color: Conflicting enum definitions")))
+    assert(generation.warnings.exists(_.contains("Conflicting enum definitions")))
+    assert(generation.warnings.exists(_.contains("Color")))
     val color = generation.services.head.operations.head.output.members.head.target
       .asInstanceOf[IrType.MemoryMappedStruct]
       .members
@@ -343,6 +344,81 @@ class DoldecompSmithyGeneratorIntegrationSpec extends AnyFunSuite {
       color.values.map(_.name) == List("COLOR_RED", "COLOR_BLUE") ||
         color.values.map(_.name) == List("COLOR_RED", "COLOR_GREEN")
     )
+  }
+
+  test("resolves cross-file enumerator initializers via accumulated macros") {
+    val fixtureRoot = Paths.get("src/test/resources/doldecomp-fixture-enum-crossref")
+    val generation = DoldecompIrGenerator
+      .generateFromPaths(
+        symbolsPath = fixtureRoot.resolve("symbols.txt"),
+        headerRoots = List(fixtureRoot),
+        namespace = "example.doldecomp.enumcross",
+        serviceName = "EnumCrossApi",
+        wordSizeBits = 32
+      )
+      .toOption
+      .get
+
+    assert(
+      !generation.warnings.exists(_.contains("Unable to evaluate enumerator initializer")),
+      generation.warnings.mkString("\n")
+    )
+    val holder = generation.services.head.operations.head.output.members.head.target
+      .asInstanceOf[IrType.MemoryMappedStruct]
+    val stateEnum = holder.members.find(_.name == "state").get.target.asInstanceOf[IrType.IntEnum]
+    assert(
+      stateEnum.values == List(
+        IrEnumValue("ftCh_MS_Count", 2),
+        IrEnumValue("ftCh_MS_SelfCount", 0)
+      )
+    )
+  }
+
+  test("sets primitiveOverride for int typedef members like enum_t") {
+    val fixtureRoot = Paths.get("src/test/resources/doldecomp-fixture-typedef-int")
+    val generation = DoldecompIrGenerator
+      .generateFromPaths(
+        symbolsPath = fixtureRoot.resolve("symbols.txt"),
+        headerRoots = List(fixtureRoot),
+        namespace = "example.doldecomp.typedefint",
+        serviceName = "TypedefIntApi",
+        wordSizeBits = 32
+      )
+      .toOption
+      .get
+
+    val holder = generation.services.head.operations.head.output.members.head.target
+      .asInstanceOf[IrType.MemoryMappedStruct]
+    val kind = holder.members.find(_.name == "kind").get
+    val bufferId = holder.members.find(_.name == "bufferId").get
+    val rawInt = holder.members.find(_.name == "rawInt").get
+    assert(kind.primitiveOverride.contains(IrPrimitive.S32))
+    assert(bufferId.primitiveOverride.contains(IrPrimitive.S32))
+    assert(rawInt.primitiveOverride.contains(IrPrimitive.S32))
+    assert(IrSizingWarnings.collect(generation.services).isEmpty)
+  }
+
+  test("resolves UNK_T macro types to pointer-sized primitives") {
+    val fixtureRoot = Paths.get("src/test/resources/doldecomp-fixture-unk-macro")
+    val generation = DoldecompIrGenerator
+      .generateFromPaths(
+        symbolsPath = fixtureRoot.resolve("symbols.txt"),
+        headerRoots = List(fixtureRoot),
+        namespace = "example.doldecomp.unkmacro",
+        serviceName = "UnkMacroApi",
+        wordSizeBits = 32
+      )
+      .toOption
+      .get
+
+    assert(
+      !generation.warnings.exists(_.contains("Missing struct or primitive definition")),
+      generation.warnings.mkString("\n")
+    )
+    assert(generation.services.head.operations.map(_.name) == List("GetGOpaque"))
+    val member = generation.services.head.operations.head.output.members.head
+    // UNK_T expands to void* → word-sized opaque primitive (pointer depth may be on the declarator).
+    assert(member.target == IrType.Primitive(IrPrimitive.LongWord) || member.isPointer)
   }
 
   test("maps char arrays and char pointers to string semantics in IR") {
@@ -1019,6 +1095,64 @@ class DoldecompSmithyGeneratorIntegrationSpec extends AnyFunSuite {
       assert(generation.warnings.exists(w => w.contains("LEN") && w.contains("Conflicting macro")))
       val valueMember = generation.services.head.operations.head.output.members.head
       assert(valueMember.arrayLength.contains(2))
+    } finally {
+      java.nio.file.Files.walk(tmp).sorted(java.util.Comparator.reverseOrder()).forEach { path =>
+        val _ = java.nio.file.Files.deleteIfExists(path)
+      }
+    }
+  }
+
+  test("resolves pointer-array length from enumerator bound across headers") {
+    val tmp = java.nio.file.Files.createTempDirectory("dap-enum-array-bound")
+    try {
+      val forward = tmp.resolve("forward.h")
+      val types = tmp.resolve("types.h")
+      val symbols = tmp.resolve("symbols.txt")
+      java.nio.file.Files.writeString(
+        forward,
+        """
+          |typedef enum Place {
+          |    Hundreds,
+          |    Tens,
+          |    Ones,
+          |    Percent,
+          |    HUD_PLACE_MAX
+          |} Place;
+          |""".stripMargin
+      )
+      java.nio.file.Files.writeString(
+        types,
+        """
+          |typedef struct Hud {
+          |    int* jobjs[HUD_PLACE_MAX];
+          |} Hud;
+          |Hud ifStatus_HudInfo;
+          |""".stripMargin
+      )
+      java.nio.file.Files.writeString(
+        symbols,
+        "ifStatus_HudInfo = .data:0x80000000; // type:object size:0x10 scope:global\n"
+      )
+
+      val generation = DoldecompIrGenerator
+        .generateFromPaths(
+          symbolsPath = symbols,
+          headerRoots = List(tmp),
+          namespace = "example.enum.array",
+          serviceName = "Api",
+          wordSizeBits = 32
+        )
+        .toOption
+        .get
+
+      val plans = HttpRouteIrEmitter.emitRoutePlansFromIr(generation.services)
+      assert(plans.errors.isEmpty, plans.errors.mkString(", "))
+      val hud = generation.services.head.operations.head.output.members.head.target
+        .asInstanceOf[IrType.MemoryMappedStruct]
+      val jobjs = hud.members.find(_.name == "jobjs").get
+      assert(jobjs.isArray)
+      assert(jobjs.isPointer)
+      assert(jobjs.arrayLength.contains(4))
     } finally {
       java.nio.file.Files.walk(tmp).sorted(java.util.Comparator.reverseOrder()).forEach { path =>
         val _ = java.nio.file.Files.deleteIfExists(path)

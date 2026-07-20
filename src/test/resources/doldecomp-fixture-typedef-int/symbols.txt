@@ -1,0 +1,1 @@
+gHolder = .data:0x80000000; // type:object size:0xC scope:global

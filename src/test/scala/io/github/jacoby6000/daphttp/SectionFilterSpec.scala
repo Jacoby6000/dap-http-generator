@@ -28,10 +28,10 @@ class SectionFilterSpec extends AnyFunSuite {
     val result = SectionFilter.filterDataSymbols(symbols)
 
     assert(result.dataSymbols.map(_.name) == List("gData"))
+    assert(result.warnings.exists(_.contains("known code section")))
     assert(result.warnings.exists(_.contains(".text")))
-    assert(result.warnings.exists(_.contains("gCode")))
     assert(result.warnings.exists(_.contains(".init")))
-    assert(result.warnings.exists(_.contains("gInit")))
+    assert(!result.warnings.exists(_.contains("--data-sections")))
   }
 
   test("warns about unknown non-data sections") {

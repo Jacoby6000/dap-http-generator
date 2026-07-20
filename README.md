@@ -159,6 +159,20 @@ sbt "run cheaders \
   --bind-port 8080"
 ```
 
+For Melee/doldecomp, pass game sources under `--headers`. If that path is `…/melee/src` and
+`…/melee/extern/dolphin/include` exists, it is scanned automatically so types like `Vec3` /
+`GXColor` resolve. You can still pass the Dolphin tree explicitly:
+
+```bash
+sbt "run cheaders \
+  --symbols $HOME/projects/ai/yolo/melee/config/GALE01/symbols.txt \
+  --headers $HOME/projects/ai/yolo/melee/src \
+  --headers $HOME/projects/ai/yolo/melee/extern/dolphin/include \
+  --word-size 32 \
+  --bind-port 8080 \
+  --dap-pipe ../dolphin-dap/dap.sock"
+```
+
 Local DAP pipe (client to an existing endpoint):
 
 ```bash
