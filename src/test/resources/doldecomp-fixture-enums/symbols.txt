@@ -1,0 +1,2 @@
+gGameState = .data:0x80460000; // type:object size:0x8 scope:global
+gCurrentMode = .data:0x80460008; // type:object size:0x4 scope:global

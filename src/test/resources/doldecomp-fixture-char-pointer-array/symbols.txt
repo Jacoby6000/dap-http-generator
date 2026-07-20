@@ -1,0 +1,1 @@
+db_PokemonNames = .data:0x803EAA50; // type:object scope:global size:0x7C

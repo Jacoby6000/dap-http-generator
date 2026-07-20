@@ -18,9 +18,22 @@ entrypoint also exists at `io.github.jacoby6000.daphttp.DapHttpServerMain`.
 Server subcommands (`smithy`, `cheaders`) share these flags:
 
 - `--dap-host` / `--dap-port` (default `127.0.0.1:4711`) — DAP debug adapter
+- `--dap-timeout-ms` (default `5000`) — DAP socket read timeout for memory reads
+- `--dap-continue-timeout-ms` (default `30000`) — DAP socket read timeout for `POST /resume`
+- `--dap-connect-timeout-ms` (default `1000`) — TCP connect timeout per DAP attempt
+- `--dap-connect-retry-ms` (default `5000`) — delay between DAP connect attempts at startup
 - `--bind-host` / `--bind-port` (default `0.0.0.0:8080`) — HTTP server bind address
 
 `smithy` also supports `--watch` to reload models when files change.
+
+`cheaders` and `cheaders-smithy` also support:
+
+- `--word-size` (default `32`) — pointer word size in bits (use `64` for 64-bit targets)
+- `--data-sections` (optional) — comma-separated list of additional section names to scan
+  for data symbols (e.g. `--data-sections .mydata,.custom`). The known data sections
+  (`.data`, `.sdata`, `.sdata2`, `.sbss`, `.bss`, `.rodata`) are always included automatically.
+  Unknown sections that don't match known data or code patterns are logged as warnings and
+  skipped; use this flag to include them.
 
 ### Custom C/DAP traits
 
@@ -37,7 +50,7 @@ Traits are defined in `src/main/smithy/dap-http-traits.smithy`:
 - `@staticAddress(<address>)` marks the debugger memory address used for members inside non-`@dapStruct` shapes.
 - `@endian("big" | "little")` sets default service/member byte order (member overrides service default).
 - `@wordSize(<n>)` is required on services and sets pointer/`Long` bit width.
-- Model C strings as `@pointer` members targeting `@char`; decoding follows the pointer and reads ASCII bytes until a null terminator.
+- C `char` arrays (`char name[N]`) decode as null-terminated ASCII strings. C `char*` pointers decode as null-terminated strings by following the pointer. In Smithy models, use `@array @length(N)` with `@char` for inline buffers and `@pointer @char` for pointers.
 - Numeric member traits: `@u8`, `@s8`, `@u16`, `@s16`, `@u32`, `@s32`, `@u64`, `@s64`, `@u128`, `@s128`, `@f8`, `@f16`, `@f32`, `@f64`, `@char`.
 - Convenience list types: `Bytes` (`list<Byte>`) and `Bits` (`list<Boolean>`).
 
@@ -104,14 +117,19 @@ flowchart LR
 The server:
 
 - loads API definitions from Smithy models or C headers,
-- generates read-only GET routes from service operations (`/<ServiceName>/<OperationName>`),
+- generates read-only GET data routes under `/api/<ServiceName>/...`,
+- serves an HTML + Scala.js explorer at `/` that mirrors those routes (collapse/expand + per-node refresh),
 - requires non-DAP output members to use `@staticAddress(...)`,
 - resolves DAP-backed structs (`@dapStruct`/`@bitmask`) and reads memory through a DAP `readMemory` request,
 - watches Smithy sources and reloads routes when model files change (`smithy --watch`).
 
-`/health` and `/routes` work without a debugger attached. Generated **data** routes open a fresh
-TCP socket per read to the DAP adapter; if nothing is listening they return per-read `error`
-fields while the HTTP request still succeeds.
+`/`, `/health`, `/routes`, and `POST /resume` work without a debugger. `/routes` returns both a flat
+`routes` list and a `tree` for the UI. On startup the server immediately tries to connect to the DAP
+adapter (1s TCP timeout per attempt, retrying every 5s until connected). `/resume` reuses the
+persistent DAP TCP session (then sends `continue`). Use it when the target is stopped and
+`readMemory` times out. Generated **data** routes use the same connection for `readMemory`
+(serialized under a lock); if the connection drops the client reconnects. If nothing is listening
+they return per-read `error` fields while the HTTP request still succeeds.
 
 ### Running locally
 
@@ -121,15 +139,29 @@ From Smithy models:
 sbt "run smithy --smithy /absolute/path/to/models --watch --bind-port 8080"
 ```
 
+Resume a stopped debug target before reading memory:
+
+```bash
+curl -X POST localhost:8080/resume
+```
+
 From C headers (direct to server):
 
 ```bash
 sbt "run cheaders \
   --symbols /absolute/path/to/symbols.txt \
-  --headers /absolute/path/to/include \
+  --headers /absolute/path/to/src \
   --word-size 32 \
   --bind-port 8080"
 ```
+
+`cheaders` matches object symbols in data sections (`.data`, `.sdata`, `.sdata2`, `.sbss`,
+`.bss`, `.rodata`) to global variable declarations in `.h` and `.c`
+files under `--headers` (for example `GameScene gm_803DDAC0_Scenes[]` in source paired with
+`gm_803DDAC0_Scenes = .data:0x803DDAC0;` in `symbols.txt`). Unsized array lengths are inferred
+from the number of entries in a matching C initializer when present (for example two `{ ... }`
+elements in a `.c` definition). The optional `ctype:` symbol attribute still overrides inferred
+types when present.
 
 Generate Smithy from C headers, then serve it:
 
@@ -162,4 +194,28 @@ sbt "runMain io.github.jacoby6000.daphttp.DapHttpServerMain \
 sbt fmt
 sbt fix
 sbt test
+```
+
+### Logging
+
+Logging uses SLF4J with Logback. Configure levels in `src/main/resources/logback.xml`:
+
+| Logger | Layer |
+|--------|-------|
+| `io.github.jacoby6000.daphttp.dap` | DAP `readMemory` requests/responses |
+| `io.github.jacoby6000.daphttp.http` | HTTP request/response lines |
+| `io.github.jacoby6000.daphttp.ir.emit` | IR → route plans (`HttpRouteIrEmitter`) |
+| `io.github.jacoby6000.daphttp.ir.source.smithy` | Smithy model → IR |
+| `io.github.jacoby6000.daphttp.ir.source.doldecomp` | C headers/symbols → IR |
+
+Set a logger to `DEBUG` for per-route or per-symbol detail. Example:
+
+```xml
+<logger name="io.github.jacoby6000.daphttp.ir.source.doldecomp" level="DEBUG"/>
+```
+
+Override the config file at runtime with:
+
+```bash
+java -Dlogback.configurationFile=/path/to/logback.xml -jar ...
 ```

@@ -1,0 +1,190 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>dap-http</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com"/>
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin/>
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet"/>
+  <style>
+    :root {
+      --bg: #12151a;
+      --panel: #1a1f27;
+      --panel-2: #222933;
+      --border: #2e3642;
+      --text: #e8edf4;
+      --muted: #8b96a8;
+      --accent: #3d9cf0;
+      --accent-dim: #2a6fa8;
+      --ok: #3ecf8e;
+      --err: #f07178;
+      --hover: #283140;
+    }
+    * { box-sizing: border-box; }
+    html, body {
+      margin: 0;
+      height: 100%;
+      background: var(--bg);
+      color: var(--text);
+      font-family: "IBM Plex Sans", sans-serif;
+    }
+    body {
+      display: grid;
+      grid-template-rows: auto 1fr;
+      min-height: 100%;
+    }
+    header {
+      display: flex;
+      align-items: center;
+      gap: 1rem;
+      padding: 0.85rem 1.25rem;
+      border-bottom: 1px solid var(--border);
+      background: linear-gradient(180deg, #1c222c 0%, var(--bg) 100%);
+    }
+    header h1 {
+      margin: 0;
+      font-size: 1.1rem;
+      font-weight: 600;
+      letter-spacing: 0.02em;
+    }
+    header .meta {
+      color: var(--muted);
+      font-size: 0.85rem;
+      font-family: "IBM Plex Mono", monospace;
+    }
+    header .spacer { flex: 1; }
+    button {
+      font-family: inherit;
+      font-size: 0.8rem;
+      font-weight: 500;
+      border: 1px solid var(--border);
+      background: var(--panel-2);
+      color: var(--text);
+      border-radius: 4px;
+      padding: 0.35rem 0.65rem;
+      cursor: pointer;
+    }
+    button:hover { background: var(--hover); border-color: var(--accent-dim); }
+    button:disabled { opacity: 0.5; cursor: wait; }
+    button.primary {
+      background: var(--accent-dim);
+      border-color: var(--accent);
+    }
+    button.ghost {
+      background: transparent;
+      padding: 0.2rem 0.45rem;
+      font-family: "IBM Plex Mono", monospace;
+      font-size: 0.75rem;
+    }
+    main {
+      display: grid;
+      grid-template-columns: minmax(280px, 42%) 1fr;
+      min-height: 0;
+    }
+    #tree-panel, #detail-panel {
+      min-height: 0;
+      overflow: auto;
+      padding: 0.75rem 1rem 1.5rem;
+    }
+    #tree-panel { border-right: 1px solid var(--border); }
+    #detail-panel {
+      background: var(--panel);
+      font-family: "IBM Plex Mono", monospace;
+      font-size: 0.82rem;
+    }
+    .toolbar {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.5rem;
+      margin-bottom: 0.75rem;
+    }
+    .tree { list-style: none; margin: 0; padding: 0; }
+    .tree ul { list-style: none; margin: 0; padding-left: 1.1rem; border-left: 1px solid var(--border); }
+    .node {
+      display: grid;
+      grid-template-columns: auto 1fr auto;
+      gap: 0.35rem;
+      align-items: center;
+      padding: 0.2rem 0.35rem;
+      border-radius: 4px;
+      margin: 0.1rem 0;
+    }
+    .node:hover { background: var(--hover); }
+    .node.selected { background: #243447; outline: 1px solid var(--accent-dim); }
+    .twist {
+      width: 1.2rem;
+      text-align: center;
+      color: var(--muted);
+      cursor: pointer;
+      user-select: none;
+      font-family: "IBM Plex Mono", monospace;
+    }
+    .twist.empty { visibility: hidden; }
+    .label {
+      cursor: pointer;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      font-family: "IBM Plex Mono", monospace;
+      font-size: 0.8rem;
+    }
+    .kind {
+      color: var(--muted);
+      font-size: 0.7rem;
+      margin-left: 0.4rem;
+    }
+    .status-ok { color: var(--ok); }
+    .status-err { color: var(--err); }
+    .status-loading { color: var(--accent); }
+    pre {
+      margin: 0;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+    .empty {
+      color: var(--muted);
+      padding: 1rem 0;
+    }
+    #error-banner {
+      display: none;
+      margin: 0.5rem 0 0.75rem;
+      padding: 0.6rem 0.75rem;
+      border: 1px solid var(--err);
+      border-radius: 4px;
+      color: var(--err);
+      background: #2a181a;
+      font-size: 0.85rem;
+    }
+    #error-banner.visible { display: block; }
+    @media (max-width: 800px) {
+      main { grid-template-columns: 1fr; }
+      #tree-panel { border-right: none; border-bottom: 1px solid var(--border); max-height: 45vh; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>dap-http</h1>
+    <span class="meta" id="route-count"></span>
+    <span class="spacer"></span>
+    <button type="button" class="primary" id="reload-tree">Reload routes</button>
+  </header>
+  <main>
+    <section id="tree-panel">
+      <div class="toolbar">
+        <button type="button" id="expand-all">Expand all</button>
+        <button type="button" id="collapse-all">Collapse all</button>
+        <button type="button" id="refresh-visible">Refresh expanded</button>
+      </div>
+      <div id="error-banner"></div>
+      <div id="tree-root" class="empty">Loading routes…</div>
+    </section>
+    <section id="detail-panel">
+      <div class="empty" id="detail-empty">Select a route and press Refresh to load memory.</div>
+      <pre id="detail-body" hidden></pre>
+    </section>
+  </main>
+  <script type="text/javascript" src="/assets/main.js"></script>
+</body>
+</html>

@@ -2,6 +2,7 @@ package io.github.jacoby6000.daphttp
 
 import org.scalatest.funsuite.AnyFunSuite
 import software.amazon.smithy.model.Model
+import software.amazon.smithy.model.shapes.ShapeId
 
 import java.nio.file.Paths
 import scala.jdk.CollectionConverters._
@@ -107,6 +108,94 @@ class IrSmithyRoundTripSpec extends AnyFunSuite {
     )
   }
 
+  test("losslessly round trips int enums") {
+    assertLosslessSmithyRoundTrip(
+      """$version: "2"
+        |
+        |namespace example
+        |
+        |use com.jacoby6000.daphttp#dapStruct
+        |use com.jacoby6000.daphttp#staticAddress
+        |use com.jacoby6000.daphttp#wordSize
+        |
+        |@wordSize(32)
+        |service Api {
+        |    version: "1"
+        |    operations: [GetState]
+        |}
+        |
+        |operation GetState {
+        |    output: GetStateOutput
+        |}
+        |
+        |structure GetStateOutput {
+        |    @staticAddress("0x3000")
+        |    state: StateBlock
+        |}
+        |
+        |@dapStruct
+        |structure StateBlock {
+        |    color: Color
+        |}
+        |
+        |intEnum Color {
+        |    RED = 0
+        |    GREEN = 1
+        |    BLUE = 5
+        |}
+        |""".stripMargin
+    )
+  }
+
+  test("emits only the first name when C enum aliases share a value") {
+    val ir = List(
+      IrService(
+        name = "Api",
+        wordSizeBits = Some(32),
+        defaultEndian = IrEndian.Big,
+        operations = List(
+          IrOperation(
+            name = "GetAlias",
+            routePath = "/api/Api/GetAlias",
+            output = IrType.EnclosingStruct(
+              id = ShapeId.from("example#GetAliasOutput"),
+              members = List(
+                IrMember(
+                  id = ShapeId.from("example#GetAliasOutput$value"),
+                  name = "value",
+                  target = IrType.IntEnum(
+                    id = ShapeId.from("example#Alias"),
+                    values = List(
+                      IrEnumValue("PRIMARY", 1),
+                      IrEnumValue("ALIAS", 1),
+                      IrEnumValue("OTHER", 2)
+                    )
+                  ),
+                  staticAddress = Some(0x1000L),
+                  paddingRepeats = None,
+                  isPointer = false,
+                  isArray = false,
+                  arrayLength = None,
+                  endianOverride = None,
+                  primitiveOverride = None
+                )
+              ),
+              declaredSizeBits = None
+            )
+          )
+        )
+      )
+    )
+    val smithy = SmithyIrEmitter.emit(ir).fold(errors => fail(errors.mkString("\n")), identity)
+    assert(smithy.contains("PRIMARY = 1"))
+    assert(smithy.contains("OTHER = 2"))
+    assert(!smithy.contains("ALIAS = 1"))
+    val roundTripped = extractIr(smithy)
+    val enumType = roundTripped.head.operations.head.output.members.head.target
+      .asInstanceOf[IrType.IntEnum]
+    assert(enumType.values.map(v => v.name -> v.value) == List("PRIMARY" -> 1, "OTHER" -> 2))
+  }
+
   test("losslessly round trips pointer, char, array, and numeric width traits") {
     assertLosslessSmithyRoundTrip(
       """$version: "2"
@@ -117,6 +206,7 @@ class IrSmithyRoundTripSpec extends AnyFunSuite {
         |use com.jacoby6000.daphttp#char
         |use com.jacoby6000.daphttp#length
         |use com.jacoby6000.daphttp#pointer
+        |use com.jacoby6000.daphttp#size
         |use com.jacoby6000.daphttp#staticAddress
         |use com.jacoby6000.daphttp#u64
         |use com.jacoby6000.daphttp#wordSize
@@ -133,6 +223,7 @@ class IrSmithyRoundTripSpec extends AnyFunSuite {
         |
         |structure GetInfoOutput {
         |    @staticAddress("0x1000")
+        |    @size(17)
         |    @pointer
         |    @char
         |    label: Byte

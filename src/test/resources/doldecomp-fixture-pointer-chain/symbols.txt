@@ -1,0 +1,2 @@
+event_init_data_level_table = .data:0x804D6900; // type:object scope:global size:0x8
+event_match_selection_index_to_event_match_id_mapping = .data:0x804D68C0; // type:object scope:global size:0x33

@@ -48,7 +48,7 @@ object IrSizingWarnings {
       case mapType: IrType.MapType =>
         val (afterKey, keyWarnings) = walkType(mapType.key, visited, warnings)
         walkType(mapType.value, afterKey, keyWarnings)
-      case IrType.Ref(_) | IrType.Primitive(_) =>
+      case _: IrType.IntEnum | IrType.Ref(_) | IrType.Primitive(_) | _: IrType.FunctionPointer =>
         (visited, warnings)
     }
 
