@@ -130,11 +130,11 @@ class DapHttpServerMainSpec extends AnyFunSuite {
       .assemble()
       .unwrap()
 
-    val plans = DapHttpServerMain.buildRoutePlansFromModel(model).toOption.get
-    val route = plans("/Api/GetInfo")
+    val plans = DapHttpServerMain.buildRoutePlansFromModel(model).routes
+    val route = plans("/api/Api/GetInfo")
 
     assert(route.reads.size == 1)
-    assert(route.reads.head.path == "/Api/GetInfo.info")
+    assert(route.reads.head.path == "/api/Api/GetInfo.info")
     assert(route.reads.head.address == 0x1000L)
     assert(route.reads.head.sizeBytes == 4)
     assert(route.reads.head.decodeType.nonEmpty)
@@ -180,8 +180,8 @@ class DapHttpServerMainSpec extends AnyFunSuite {
       .unwrap()
 
     val result = DapHttpServerMain.buildRoutePlansFromModel(model)
-    assert(result.isLeft)
-    assert(result.left.toOption.get.exists(_.contains("must declare @staticAddress")))
+    assert(result.routes.isEmpty)
+    assert(result.errors.exists(_.contains("must declare @staticAddress")))
   }
 
   test("maps numeric width traits to primitive IR widths") {
@@ -218,11 +218,11 @@ class DapHttpServerMainSpec extends AnyFunSuite {
       .assemble()
       .unwrap()
 
-    val plans = DapHttpServerMain.buildRoutePlansFromModel(model).toOption.get
-    val route = plans("/Api/GetInfo")
+    val plans = DapHttpServerMain.buildRoutePlansFromModel(model).routes
+    val route = plans("/api/Api/GetInfo")
 
     assert(route.reads.size == 1)
-    assert(route.reads.head.path == "/Api/GetInfo.value")
+    assert(route.reads.head.path == "/api/Api/GetInfo.value")
     assert(route.reads.head.address == 0x1000L)
     assert(route.reads.head.sizeBytes == 2)
   }
@@ -258,8 +258,9 @@ class DapHttpServerMainSpec extends AnyFunSuite {
       .unwrap()
 
     val result = DapHttpServerMain.buildRoutePlansFromModel(model)
-    assert(result.isRight)
-    assert(result.toOption.get("/Api/GetInfo").reads.isEmpty)
+    assert(result.routes.contains("/api/Api/GetInfo"))
+    assert(result.routes("/api/Api/GetInfo").reads.isEmpty)
+    assert(result.errors.isEmpty)
   }
 
   test("maps u64 trait to primitive IR widths") {
@@ -296,8 +297,8 @@ class DapHttpServerMainSpec extends AnyFunSuite {
       .assemble()
       .unwrap()
 
-    val plans = DapHttpServerMain.buildRoutePlansFromModel(model).toOption.get
-    val route = plans("/Api/GetInfo")
+    val plans = DapHttpServerMain.buildRoutePlansFromModel(model).routes
+    val route = plans("/api/Api/GetInfo")
 
     assert(route.reads.head.sizeBytes == 8)
   }
@@ -338,8 +339,8 @@ class DapHttpServerMainSpec extends AnyFunSuite {
       .assemble()
       .unwrap()
 
-    val plans = DapHttpServerMain.buildRoutePlansFromModel(model).toOption.get
-    val route = plans("/Api/GetInfo")
+    val plans = DapHttpServerMain.buildRoutePlansFromModel(model).routes
+    val route = plans("/api/Api/GetInfo")
     val codec = route.reads.head.decodeCodec.get
     val decoded =
       codec.decode(scodec.bits.BitVector(Array(0x34.toByte, 0x12.toByte))).toOption.get.value
@@ -383,10 +384,47 @@ class DapHttpServerMainSpec extends AnyFunSuite {
       .assemble()
       .unwrap()
 
-    val plans = DapHttpServerMain.buildRoutePlansFromModel(model).toOption.get
-    val route = plans("/Api/GetInfo")
+    val plans = DapHttpServerMain.buildRoutePlansFromModel(model).routes
+    val route = plans("/api/Api/GetInfo")
 
     assert(route.reads.head.sizeBytes == 4)
     assert(route.reads.head.cStringPointer)
+  }
+
+  test("maskToWordSize keeps 32-bit GameCube-style pointer addresses") {
+    val address = 0x80400000L
+    assert(DapHttpServerMain.maskToWordSize(address, Some(32)) == address)
+    assert(DapHttpServerMain.maskToWordSize(address | (1L << 40), Some(32)) == address)
+    assert(DapHttpServerMain.maskToWordSize(address, Some(64)) == address)
+  }
+
+  test("POST /resume issues a DAP continue request") {
+    import cats.effect.IO
+    import cats.effect.Ref
+    import cats.effect.unsafe.implicits.global
+    import io.circe.Json
+    import org.http4s.Method.POST
+    import org.http4s.Request
+    import org.http4s.Status
+    import org.http4s.implicits._
+
+    val resumed = new java.util.concurrent.atomic.AtomicBoolean(false)
+    val dapClient = new DapHttpServerMain.DapClient {
+      override def readMemory(address: Long, sizeBytes: Int): IO[Either[String, String]] =
+        IO.pure(Right(""))
+
+      override def continueExecution(): IO[Either[String, Json]] =
+        IO {
+          resumed.set(true)
+          Right(Json.obj("allThreadsContinued" -> Json.True))
+        }
+    }
+
+    val plansRef = Ref.unsafe[IO, RoutePlansLoadResult](RoutePlansLoadResult(Map.empty, Nil))
+    val app = HttpLoggingMiddleware(DapHttpServerMain.routes(plansRef, dapClient).orNotFound)
+    val response = app.run(Request[IO](POST, uri"/resume")).unsafeRunSync()
+
+    assert(response.status == Status.Ok)
+    assert(resumed.get())
   }
 }

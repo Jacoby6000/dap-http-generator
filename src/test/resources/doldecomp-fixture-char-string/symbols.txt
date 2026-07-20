@@ -1,0 +1,1 @@
+strPlLoadCommonData = .data:0x803BCDCC; // type:object size:0x11 scope:global

@@ -1,7 +1,14 @@
 target/
 .bsp/
+.bloop/
 .metals/
 .project/
 .classpath/
 .idea/
 *.iml
+.vscode/
+metals.sbt
+
+# Local cheaders-smithy / Melee validation outputs
+generated/
+out.txt

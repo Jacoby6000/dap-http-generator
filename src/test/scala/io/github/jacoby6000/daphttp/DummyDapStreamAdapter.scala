@@ -9,7 +9,7 @@ import java.io.OutputStream
 import java.nio.charset.StandardCharsets
 import java.util.Base64
 
-/** Minimal DAP readMemory peer for stream / pipe / Unix-socket tests. */
+/** Minimal DAP peer for stream / Unix-socket tests (initialize + readMemory). */
 final class DummyDapStreamAdapter(
     in: InputStream,
     out: OutputStream,
@@ -18,53 +18,66 @@ final class DummyDapStreamAdapter(
   private val bufferedIn = new BufferedInputStream(in)
   private val bufferedOut = new BufferedOutputStream(out)
 
-  def serveOne(): Unit = {
-    val body = readBody(bufferedIn)
-    val cursor = io.circe.parser.parse(body).toOption.map(_.hcursor)
-    val memoryReference =
-      cursor.flatMap(_.downField("arguments").downField("memoryReference").as[String].toOption)
-    val count = cursor.flatMap(_.downField("arguments").downField("count").as[Int].toOption)
-    val seq = cursor.flatMap(_.downField("seq").as[Int].toOption).getOrElse(1)
-
-    val address = memoryReference.flatMap(parseAddress)
-    val data = address.flatMap(addr => count.flatMap(c => payloads.get((addr, c))))
-    val responseJson = data match {
-      case Some(bytes) =>
-        Json.obj(
-          "seq" -> Json.fromInt(seq + 1),
-          "type" -> Json.fromString("response"),
-          "request_seq" -> Json.fromInt(seq),
-          "success" -> Json.True,
-          "command" -> Json.fromString("readMemory"),
-          "body" -> Json.obj(
-            "data" -> Json.fromString(Base64.getEncoder.encodeToString(bytes))
-          )
-        )
-      case None =>
-        Json.obj(
-          "seq" -> Json.fromInt(seq + 1),
-          "type" -> Json.fromString("response"),
-          "request_seq" -> Json.fromInt(seq),
-          "success" -> Json.False,
-          "command" -> Json.fromString("readMemory"),
-          "message" -> Json.fromString("missing payload")
-        )
-    }
-    val responseBody = responseJson.noSpaces.getBytes(StandardCharsets.UTF_8)
-    bufferedOut.write(
-      s"Content-Length: ${responseBody.length}\r\n\r\n".getBytes(StandardCharsets.UTF_8)
-    )
-    bufferedOut.write(responseBody)
-    bufferedOut.flush()
-  }
-
   def serveUntilClosed(): Unit = {
     try {
-      while (true) serveOne()
+      var keepReading = true
+      while (keepReading) {
+        val body = readBody(bufferedIn)
+        if (body == null) {
+          keepReading = false
+        } else {
+          val cursor = io.circe.parser.parse(body).toOption.map(_.hcursor)
+          val messageType = cursor.flatMap(_.downField("type").as[String].toOption)
+          val command = cursor.flatMap(_.downField("command").as[String].toOption)
+          val requestSeq = cursor.flatMap(_.downField("seq").as[Int].toOption).getOrElse(1)
+
+          (messageType, command) match {
+            case (Some("request"), Some("initialize")) =>
+              writeResponse(
+                bufferedOut,
+                requestSeq,
+                "initialize",
+                Json.obj("supportsConfigurationDoneRequest" -> Json.False)
+              )
+            case (Some("event"), _) =>
+              ()
+            case (Some("request"), Some("configurationDone")) =>
+              writeResponse(bufferedOut, requestSeq, "configurationDone", Json.obj())
+            case (Some("request"), Some("readMemory")) =>
+              val memoryReference =
+                cursor.flatMap(
+                  _.downField("arguments").downField("memoryReference").as[String].toOption
+                )
+              val count =
+                cursor.flatMap(_.downField("arguments").downField("count").as[Int].toOption)
+              val address = memoryReference.flatMap(parseAddress)
+              val data = address.flatMap(addr => count.flatMap(c => payloads.get((addr, c))))
+              data match {
+                case Some(bytes) =>
+                  writeResponse(
+                    bufferedOut,
+                    requestSeq,
+                    "readMemory",
+                    Json.obj("data" -> Json.fromString(Base64.getEncoder.encodeToString(bytes)))
+                  )
+                  keepReading = false
+                case None =>
+                  writeFailure(bufferedOut, requestSeq, "readMemory", "missing payload")
+                  keepReading = false
+              }
+            case (Some("request"), Some(other)) =>
+              writeFailure(bufferedOut, requestSeq, other, s"unsupported command $other")
+            case _ =>
+              keepReading = false
+          }
+        }
+      }
     } catch {
       case _: Exception => ()
     }
   }
+
+  def serveOne(): Unit = serveUntilClosed()
 
   private def parseAddress(memoryReference: String): Option[Long] = {
     val trimmed = memoryReference.trim
@@ -75,17 +88,56 @@ final class DummyDapStreamAdapter(
     }
   }
 
+  private def writeResponse(
+      out: BufferedOutputStream,
+      requestSeq: Int,
+      command: String,
+      body: Json
+  ): Unit = {
+    val responseJson = Json.obj(
+      "seq" -> Json.fromInt(requestSeq + 1000),
+      "type" -> Json.fromString("response"),
+      "request_seq" -> Json.fromInt(requestSeq),
+      "success" -> Json.True,
+      "command" -> Json.fromString(command),
+      "body" -> body
+    )
+    writeFramed(out, responseJson)
+  }
+
+  private def writeFailure(
+      out: BufferedOutputStream,
+      requestSeq: Int,
+      command: String,
+      message: String
+  ): Unit = {
+    val responseJson = Json.obj(
+      "seq" -> Json.fromInt(requestSeq + 1000),
+      "type" -> Json.fromString("response"),
+      "request_seq" -> Json.fromInt(requestSeq),
+      "success" -> Json.False,
+      "command" -> Json.fromString(command),
+      "message" -> Json.fromString(message)
+    )
+    writeFramed(out, responseJson)
+  }
+
+  private def writeFramed(out: BufferedOutputStream, json: Json): Unit = {
+    val responseBody = json.noSpaces.getBytes(StandardCharsets.UTF_8)
+    out.write(s"Content-Length: ${responseBody.length}\r\n\r\n".getBytes(StandardCharsets.UTF_8))
+    out.write(responseBody)
+    out.flush()
+  }
+
   private def readLine(in: BufferedInputStream): String = {
     val buffer = new StringBuilder
     var current = in.read()
+    if (current == -1) return null
     var previous = -1
     while (current != -1 && !(previous == '\r' && current == '\n')) {
       if (current != '\r') buffer.append(current.toChar)
       previous = current
       current = in.read()
-    }
-    if (current == -1 && buffer.isEmpty) {
-      throw new java.io.EOFException("adapter input closed")
     }
     buffer.toString()
   }
@@ -93,12 +145,14 @@ final class DummyDapStreamAdapter(
   private def readBody(in: BufferedInputStream): String = {
     var contentLength = 0
     var line = readLine(in)
-    while (line.nonEmpty) {
+    if (line == null) return null
+    while (line != null && line.nonEmpty) {
       val lower = line.toLowerCase
       if (lower.startsWith("content-length:")) {
         contentLength = lower.stripPrefix("content-length:").trim.toInt
       }
       line = readLine(in)
+      if (line == null) return null
     }
     val bytes = new Array[Byte](contentLength)
     var offset = 0

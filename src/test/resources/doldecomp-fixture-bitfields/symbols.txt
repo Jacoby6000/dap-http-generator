@@ -1,0 +1,1 @@
+start_event_rules = .data:0x80400000; // type:object scope:global size:0x20

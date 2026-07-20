@@ -52,33 +52,128 @@ class DapHttpIntegrationSpec extends AnyFunSuite {
     private def handle(socket: Socket): Unit = {
       val in = new BufferedInputStream(socket.getInputStream)
       val out = new BufferedOutputStream(socket.getOutputStream)
-      val body = readBody(in)
-      val cursor = io.circe.parser.parse(body).toOption.map(_.hcursor)
-      val memoryReference =
-        cursor.flatMap(_.downField("arguments").downField("memoryReference").as[String].toOption)
-      val count = cursor.flatMap(_.downField("arguments").downField("count").as[Int].toOption)
+      try {
+        var keepReading = true
+        while (keepReading) {
+          val body = readBody(in)
+          if (body.isEmpty) {
+            keepReading = false
+          } else {
+            val cursor = io.circe.parser.parse(body).toOption.map(_.hcursor)
+            val messageType = cursor.flatMap(_.downField("type").as[String].toOption)
+            val command = cursor.flatMap(_.downField("command").as[String].toOption)
+            val event = cursor.flatMap(_.downField("event").as[String].toOption)
+            val requestSeq = cursor.flatMap(_.downField("seq").as[Int].toOption).getOrElse(0)
 
-      val address = memoryReference.flatMap(parseAddress)
-      val data = address.flatMap(addr => count.flatMap(c => payloads.get((addr, c))))
-      val responseJson = data match {
-        case Some(bytes) =>
-          Json.obj(
-            "success" -> Json.True,
-            "body" -> Json.obj(
-              "data" -> Json.fromString(Base64.getEncoder.encodeToString(bytes))
-            )
-          )
-        case None =>
-          Json.obj(
-            "success" -> Json.False,
-            "message" -> Json.fromString("missing payload")
-          )
+            messageType match {
+              case Some("event") if event.contains("initialized") =>
+                ()
+              case Some("request") if command.contains("initialize") =>
+                writeResponse(
+                  out,
+                  requestSeq,
+                  "initialize",
+                  Json.obj("supportsConfigurationDoneRequest" -> Json.False)
+                )
+              case Some("request") if command.contains("configurationDone") =>
+                writeResponse(out, requestSeq, "configurationDone", Json.obj())
+              case Some("request") if command.contains("readMemory") =>
+                val memoryReference =
+                  cursor.flatMap(
+                    _.downField("arguments").downField("memoryReference").as[String].toOption
+                  )
+                val count =
+                  cursor.flatMap(_.downField("arguments").downField("count").as[Int].toOption)
+                val address = memoryReference.flatMap(parseAddress)
+                val data = address.flatMap { addr =>
+                  count.flatMap { requestedCount =>
+                    payloads.get((addr, requestedCount)).orElse {
+                      val assembled =
+                        (0 until requestedCount)
+                          .takeWhile(offset => payloads.contains((addr + offset, 1)))
+                          .flatMap(offset => payloads.get((addr + offset, 1)).map(_.head))
+                      Option.when(assembled.nonEmpty)(assembled.toArray)
+                    }
+                  }
+                }
+                data match {
+                  case Some(bytes) =>
+                    writeResponse(
+                      out,
+                      requestSeq,
+                      "readMemory",
+                      Json.obj("data" -> Json.fromString(Base64.getEncoder.encodeToString(bytes)))
+                    )
+                  case None =>
+                    writeFailure(out, requestSeq, "readMemory", "missing payload")
+                }
+              case Some("request") if command.contains("threads") =>
+                writeResponse(
+                  out,
+                  requestSeq,
+                  "threads",
+                  Json.obj(
+                    "threads" -> Json.arr(
+                      Json.obj("id" -> Json.fromInt(1), "name" -> Json.fromString("main"))
+                    )
+                  )
+                )
+              case Some("request") if command.contains("continue") =>
+                writeResponse(
+                  out,
+                  requestSeq,
+                  "continue",
+                  Json.obj("allThreadsContinued" -> Json.True)
+                )
+              case _ =>
+                keepReading = false
+            }
+          }
+        }
+      } finally {
+        socket.close()
       }
-      val responseBody = responseJson.noSpaces.getBytes(StandardCharsets.UTF_8)
+    }
+
+    private def writeResponse(
+        out: BufferedOutputStream,
+        requestSeq: Int,
+        command: String,
+        body: Json
+    ): Unit = {
+      val responseJson = Json.obj(
+        "seq" -> Json.fromInt(requestSeq + 1000),
+        "type" -> Json.fromString("response"),
+        "request_seq" -> Json.fromInt(requestSeq),
+        "success" -> Json.True,
+        "command" -> Json.fromString(command),
+        "body" -> body
+      )
+      writeFramed(out, responseJson)
+    }
+
+    private def writeFailure(
+        out: BufferedOutputStream,
+        requestSeq: Int,
+        command: String,
+        message: String
+    ): Unit = {
+      val responseJson = Json.obj(
+        "seq" -> Json.fromInt(requestSeq + 1000),
+        "type" -> Json.fromString("response"),
+        "request_seq" -> Json.fromInt(requestSeq),
+        "success" -> Json.False,
+        "command" -> Json.fromString(command),
+        "message" -> Json.fromString(message)
+      )
+      writeFramed(out, responseJson)
+    }
+
+    private def writeFramed(out: BufferedOutputStream, json: Json): Unit = {
+      val responseBody = json.noSpaces.getBytes(StandardCharsets.UTF_8)
       out.write(s"Content-Length: ${responseBody.length}\r\n\r\n".getBytes(StandardCharsets.UTF_8))
       out.write(responseBody)
       out.flush()
-      socket.close()
     }
 
     private def parseAddress(memoryReference: String): Option[Long] = {
@@ -93,6 +188,7 @@ class DapHttpIntegrationSpec extends AnyFunSuite {
     private def readLine(in: BufferedInputStream): String = {
       val buffer = new StringBuilder
       var current = in.read()
+      if (current == -1) return null
       var previous = -1
       while (current != -1 && !(previous == '\r' && current == '\n')) {
         if (current != '\r') buffer.append(current.toChar)
@@ -105,19 +201,21 @@ class DapHttpIntegrationSpec extends AnyFunSuite {
     private def readBody(in: BufferedInputStream): String = {
       var contentLength = 0
       var line = readLine(in)
+      if (line == null) return ""
       while (line.nonEmpty) {
         val lower = line.toLowerCase
         if (lower.startsWith("content-length:")) {
           contentLength = lower.stripPrefix("content-length:").trim.toInt
         }
         line = readLine(in)
+        if (line == null) return ""
       }
+      if (contentLength == 0) return ""
       val bytes = new Array[Byte](contentLength)
       var offset = 0
       while (offset < contentLength) {
         val read = in.read(bytes, offset, contentLength - offset)
-        if (read == -1)
-          throw new IllegalStateException("Unexpected EOF while reading request body.")
+        if (read == -1) return ""
         offset += read
       }
       new String(bytes, StandardCharsets.UTF_8)
@@ -193,7 +291,7 @@ class DapHttpIntegrationSpec extends AnyFunSuite {
       .assemble()
       .unwrap()
 
-    val routePlans = DapHttpServerMain.buildRoutePlansFromModel(model).toOption.get
+    val routePlans = DapHttpServerMain.buildRoutePlansFromModel(model).routes
     val dummyDap = new DummyDapServer(
       Map(
         (0x1000L, 2) -> Array(0x34.toByte, 0x12.toByte),
@@ -208,7 +306,7 @@ class DapHttpIntegrationSpec extends AnyFunSuite {
     try {
       val result = (for {
         plansRef <- cats.effect.Resource.eval(
-          Ref.of[IO, Either[List[String], Map[String, RoutePlan]]](Right(routePlans))
+          Ref.of[IO, RoutePlansLoadResult](RoutePlansLoadResult(routePlans, Nil))
         )
         server <- EmberServerBuilder
           .default[IO]
@@ -216,16 +314,16 @@ class DapHttpIntegrationSpec extends AnyFunSuite {
           .withPort(Port.fromInt(0).get)
           .withHttpApp(
             DapHttpServerMain
-              .routes(plansRef, new SocketDapClient("127.0.0.1", dummyDap.port))
+              .routes(plansRef, new DapHttpServerMain.SocketDapClient("127.0.0.1", dummyDap.port))
               .orNotFound
           )
           .build
       } yield {
         val port = server.address.getPort
         val client = HttpClient.newHttpClient()
-        val little16 = getResponse(client, s"http://127.0.0.1:$port/Api/GetLittle16")
-        val regs = getResponse(client, s"http://127.0.0.1:$port/Api/GetRegs")
-        val name = getResponse(client, s"http://127.0.0.1:$port/Api/GetName")
+        val little16 = getResponse(client, s"http://127.0.0.1:$port/api/Api/GetLittle16")
+        val regs = getResponse(client, s"http://127.0.0.1:$port/api/Api/GetRegs")
+        val name = getResponse(client, s"http://127.0.0.1:$port/api/Api/GetName")
 
         val littleDecoded = little16.hcursor
           .downField("reads")
@@ -241,12 +339,63 @@ class DapHttpIntegrationSpec extends AnyFunSuite {
 
         assert(littleDecoded == Json.fromLong(0x1234L))
         assert(
-          regsDecoded == Json.obj("lo" -> Json.fromLong(0x5678L), "hi" -> Json.fromLong(0x9abcL))
+          regsDecoded == Json.obj(
+            "_address" -> Json.fromString("0x2000"),
+            "lo" -> Json.fromLong(0x5678L),
+            "hi" -> Json.fromLong(0x9abcL)
+          )
         )
         assert(nameDecoded == Json.fromString("OK"))
       }).use(IO.pure(_))
 
       result.unsafeRunSync()(cats.effect.unsafe.IORuntime.global)
+    } finally {
+      dummyDap.close()
+    }
+  }
+
+  test("connects to DAP on startup via background connection manager") {
+    val dummyDap = new DummyDapServer(Map.empty)
+    try {
+      val client = new DapHttpServerMain.SocketDapClient(
+        "127.0.0.1",
+        dummyDap.port,
+        dapConnectRetryMs = 50
+      )
+      client.startConnectionManager().unsafeRunSync()(cats.effect.unsafe.IORuntime.global)
+      eventuallyConnected(client)
+    } finally {
+      dummyDap.close()
+    }
+  }
+
+  private def eventuallyConnected(
+      client: DapHttpServerMain.SocketDapClient,
+      timeoutMs: Long = 5000L
+  ): Unit = {
+    val deadline = System.nanoTime() + timeoutMs * 1000000L
+    while (!client.isConnected && System.nanoTime() < deadline) {
+      Thread.sleep(25L)
+    }
+    if (!client.isConnected) {
+      fail("DAP client did not connect before timeout")
+    }
+  }
+
+  test("reuses one DAP connection across continue and readMemory") {
+    val dummyDap = new DummyDapServer(Map((0x1000L, 4) -> Array(0x01, 0x02, 0x03, 0x04)))
+    try {
+      val client = new DapHttpServerMain.SocketDapClient("127.0.0.1", dummyDap.port)
+      val resumeResult =
+        client.continueExecution().unsafeRunSync()(cats.effect.unsafe.IORuntime.global)
+      val readResult =
+        client.readMemory(0x1000L, 4).unsafeRunSync()(cats.effect.unsafe.IORuntime.global)
+
+      assert(resumeResult.isRight)
+      assert(readResult.isRight)
+      assert(
+        readResult.toOption.get == Base64.getEncoder.encodeToString(Array(0x01, 0x02, 0x03, 0x04))
+      )
     } finally {
       dummyDap.close()
     }

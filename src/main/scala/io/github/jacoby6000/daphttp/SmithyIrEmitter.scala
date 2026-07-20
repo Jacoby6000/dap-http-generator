@@ -2,6 +2,7 @@ package io.github.jacoby6000.daphttp
 
 import software.amazon.smithy.model.Model
 import software.amazon.smithy.model.node.Node
+import software.amazon.smithy.model.shapes.IntEnumShape
 import software.amazon.smithy.model.shapes.ListShape
 import software.amazon.smithy.model.shapes.MapShape
 import software.amazon.smithy.model.shapes.MemberShape
@@ -84,6 +85,9 @@ object SmithyIrEmitter {
   private lazy val traitsModel: Model =
     Model.assembler().addImport(TraitsPath.toString).assemble().unwrap()
 
+  def dapHttpTraitsModel: Model = traitsModel
+  def dapHttpTraitsPath: Path = TraitsPath
+
   private def validateModel(model: Model): Either[List[String], Model] = {
     val result = Model.assembler().addModel(model).assemble()
     if (result.isBroken) {
@@ -133,12 +137,16 @@ object SmithyIrEmitter {
         visitNamedShape(state, listType.id, listType)
       case mapType: IrType.MapType =>
         visitNamedShape(state, mapType.id, mapType)
+      case intEnum: IrType.IntEnum =>
+        visitNamedShape(state, intEnum.id, intEnum)
       case IrType.Ref(id) if isPreludeShape(id) =>
         state
       case IrType.Ref(id) =>
-        if (state.shapeIds.contains(id)) state
+        if (state.shapeIds.contains(id) || state.visiting.contains(id)) state
         else state.withError(s"Unresolved shape reference '${id.toString}'.")
       case IrType.Primitive(_) =>
+        state
+      case _: IrType.FunctionPointer =>
         state
     }
 
@@ -200,13 +208,29 @@ object SmithyIrEmitter {
 
   private def buildOperation(operation: IrOperation): Option[OperationShape] = {
     val namespace = operation.output.id.getNamespace
-    Some(
-      OperationShape
-        .builder()
-        .id(ShapeId.from(s"$namespace#${operation.name}"))
-        .output(operation.output.id)
-        .build()
-    )
+    val builder = OperationShape
+      .builder()
+      .id(ShapeId.from(s"$namespace#${operation.name}"))
+      .output(operation.output.id)
+
+    builder.addTrait(httpGetTrait(ApiRoutes.normalize(operation.routePath)))
+
+    operation.pointerChain.foreach { chain =>
+      builder.addTrait(intTrait("pointerDepth", chain.pointerDepth))
+      chain.outerArrayLength.foreach(len => builder.addTrait(intTrait("outerArrayLength", len)))
+      if (chain.followCString) builder.addTrait(booleanTrait("followCString", true))
+      chain.pointeeType match {
+        case struct: IrType.Struct =>
+          builder.addTrait(stringTrait("pointeeShape", struct.id.toString))
+        case intEnum: IrType.IntEnum =>
+          builder.addTrait(stringTrait("pointeeShape", intEnum.id.toString))
+        case IrType.Primitive(kind) =>
+          builder.addTrait(stringTrait("pointeeShape", preludeShapeId(kind).toString))
+        case _ =>
+      }
+    }
+
+    Some(builder.build())
   }
 
   private def buildShape(id: ShapeId, irType: IrType): Option[Shape] =
@@ -262,9 +286,26 @@ object SmithyIrEmitter {
             .value(targetShapeId(mapType.value))
             .build()
         )
+      case intEnum: IrType.IntEnum =>
+        Some(buildIntEnum(id, intEnum))
       case _ =>
         None
     }
+
+  private def buildIntEnum(id: ShapeId, intEnum: IrType.IntEnum): IntEnumShape = {
+    val builder = IntEnumShape.builder().id(id)
+    val seenValues = scala.collection.mutable.Set.empty[Int]
+    // DESNOTE(jbarber, 2026-07-19): Smithy intEnum member values must be unique, while C allows
+    // aliases (A = 1, B = 1). Keep the first name for each value on emit; decode still maps the
+    // shared numeric value to that first name via IrType.IntEnum.values order.
+    // See https://smithy.io/2.0/spec/simple-types.html#intenum
+    intEnum.values.foreach { enumValue =>
+      if (seenValues.add(enumValue.value)) {
+        val _ = builder.addMember(enumValue.name, enumValue.value)
+      }
+    }
+    builder.build()
+  }
 
   private def buildStructure(
       id: ShapeId,
@@ -315,7 +356,7 @@ object SmithyIrEmitter {
     (update: MemberShape.Builder) => memberSmithyTraits(member).foreach(update.addTrait)
 
   private def memberTargetShapeId(member: IrMember): ShapeId =
-    if (member.isPointer) {
+    if (member.isPointer && !member.isArray) {
       ShapeId.from("smithy.api#Long")
     } else {
       targetShapeId(member.target)
@@ -329,14 +370,17 @@ object SmithyIrEmitter {
       case listType: IrType.ListType if listType.bitsAlias  => BitsShapeId
       case listType: IrType.ListType                        => listType.id
       case mapType: IrType.MapType                          => mapType.id
+      case intEnum: IrType.IntEnum                          => intEnum.id
       case IrType.Ref(id)                                   => id
       case IrType.Primitive(kind)                           => preludeShapeId(kind)
+      case _: IrType.FunctionPointer                        => ShapeId.from("smithy.api#Long")
     }
 
   private def memberSmithyTraits(member: IrMember): List[Trait] =
     List(
       member.staticAddress.map(address => stringTrait("staticAddress", formatAddress(address))),
       member.paddingRepeats.map(repeats => intTrait("padding", repeats)),
+      member.readSizeBytes.map(size => intTrait("size", size)),
       Option.when(member.isPointer)(annotationTrait("pointer")),
       Option.when(member.isArray)(annotationTrait("array")),
       member.arrayLength.map(length => intTrait("length", length)),
@@ -344,7 +388,11 @@ object SmithyIrEmitter {
         case IrEndian.Big    => stringTrait("endian", "big")
         case IrEndian.Little => stringTrait("endian", "little")
       }
-    ).flatten ++ memberTraitNames(member).map(annotationTrait)
+    ).flatten ++ memberTraitNames(member).map(annotationTrait) ++
+      (member.target match {
+        case fp: IrType.FunctionPointer => List(functionPointerTrait(fp))
+        case _                          => Nil
+      })
 
   private def memberTraitNames(member: IrMember): List[String] =
     member.primitiveOverride match {
@@ -414,6 +462,30 @@ object SmithyIrEmitter {
 
   private def intTrait(name: String, value: Int): Trait =
     new DynamicTrait(traitId(name), Node.from(value))
+
+  private def booleanTrait(name: String, value: Boolean): Trait =
+    new DynamicTrait(traitId(name), Node.from(value))
+
+  private def functionPointerTrait(fp: IrType.FunctionPointer): Trait = {
+    val paramsStr = fp.params.map(p => s"${p.typeName}|${p.name}").mkString(";")
+    val node = Node
+      .objectNodeBuilder()
+      .withMember("name", Node.from(fp.name))
+      .withMember("output", Node.from(fp.returnType))
+      .withMember("params", Node.from(paramsStr))
+      .build()
+    new DynamicTrait(traitId("functionPointer"), node)
+  }
+
+  private def httpGetTrait(uri: String): Trait = {
+    val node = Node
+      .objectNodeBuilder()
+      .withMember("method", Node.from("GET"))
+      .withMember("uri", Node.from(uri))
+      .withMember("code", Node.from(200))
+      .build()
+    new DynamicTrait(ShapeId.from("smithy.api#http"), node)
+  }
 
   private def formatAddress(address: Long): String =
     if (address >= 0) {

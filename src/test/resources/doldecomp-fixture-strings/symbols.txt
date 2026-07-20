@@ -1,0 +1,1 @@
+g_string_fields = .data:0x80001000; // type:object size:0xC ctype:StringFields

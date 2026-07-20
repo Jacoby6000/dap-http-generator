@@ -1,6 +1,7 @@
 package io.github.jacoby6000.daphttp
 
 import software.amazon.smithy.model.Model
+import software.amazon.smithy.model.shapes.IntEnumShape
 import software.amazon.smithy.model.shapes.ListShape
 import software.amazon.smithy.model.shapes.MapShape
 import software.amazon.smithy.model.shapes.MemberShape
@@ -28,6 +29,12 @@ object SmithyIrGenerator {
   private val EndianTrait = ShapeId.from("com.jacoby6000.daphttp#endian")
   private val WordSizeTrait = ShapeId.from("com.jacoby6000.daphttp#wordSize")
   private val StaticAddressTrait = ShapeId.from("com.jacoby6000.daphttp#staticAddress")
+  private val PointerDepthTrait = ShapeId.from("com.jacoby6000.daphttp#pointerDepth")
+  private val OuterArrayLengthTrait = ShapeId.from("com.jacoby6000.daphttp#outerArrayLength")
+  private val FollowCStringTrait = ShapeId.from("com.jacoby6000.daphttp#followCString")
+  private val PointeeShapeTrait = ShapeId.from("com.jacoby6000.daphttp#pointeeShape")
+  private val FunctionPointerTrait = ShapeId.from("com.jacoby6000.daphttp#functionPointer")
+  private val HttpTrait = ShapeId.from("smithy.api#http")
   sealed trait PrimitiveTrait {
     def traitId: ShapeId
     def primitive: IrPrimitive
@@ -165,6 +172,22 @@ object SmithyIrGenerator {
               key = buildIrType(mapShape.getKey.getTarget, stack + shapeId),
               value = buildIrType(mapShape.getValue.getTarget, stack + shapeId)
             )
+          case ShapeType.INT_ENUM =>
+            val intEnum = shape.asInstanceOf[IntEnumShape]
+            val values = intEnum
+              .members()
+              .asScala
+              .toList
+              .flatMap { member =>
+                intEnum.getEnumValues.asScala
+                  .get(member.getMemberName)
+                  .map(value => IrEnumValue(member.getMemberName, value.intValue()))
+              }
+            IrType.IntEnum(
+              id = intEnum.getId,
+              values = values,
+              underlying = IrPrimitive.S32
+            )
           case primitiveType =>
             primitiveForShapeType(primitiveType)
               .map(IrType.Primitive.apply)
@@ -184,8 +207,42 @@ object SmithyIrGenerator {
         operation.getOutput.toScala.flatMap { outputId =>
           buildIrType(outputId, Set.empty) match {
             case outputStruct: IrType.Struct =>
-              val routePath = s"/${service.getId.getName}/${operation.getId.getName}"
-              Some(IrOperation(operation.getId.getName, routePath, outputStruct))
+              val routePath = ApiRoutes.normalize(
+                operation
+                  .findTrait(HttpTrait)
+                  .toScala
+                  .flatMap { rawTrait =>
+                    val node = rawTrait.toNode
+                    if (node.isObjectNode) {
+                      node.expectObjectNode.getStringMember("uri").toScala.map(_.getValue)
+                    } else None
+                  }
+                  .getOrElse(s"/${service.getId.getName}/${operation.getId.getName}")
+              )
+              val pointerChain = intTraitValue(operation, PointerDepthTrait).map { depth =>
+                val pointeeType = operation
+                  .findTrait(PointeeShapeTrait)
+                  .toScala
+                  .flatMap { rawTrait =>
+                    val node = rawTrait.toNode
+                    if (node.isStringNode) {
+                      val shapeIdStr = node.expectStringNode.getValue
+                      ShapeId.from(shapeIdStr) match {
+                        case sid if model.getShape(sid).isPresent =>
+                          Some(buildIrType(sid, Set.empty))
+                        case _ => None
+                      }
+                    } else None
+                  }
+                  .getOrElse(IrType.Primitive(IrPrimitive.LongWord))
+                IrPointerChain(
+                  pointeeType = pointeeType,
+                  pointerDepth = depth,
+                  outerArrayLength = intTraitValue(operation, OuterArrayLengthTrait),
+                  followCString = booleanTraitValue(operation, FollowCStringTrait).getOrElse(false)
+                )
+              }
+              Some(IrOperation(operation.getId.getName, routePath, outputStruct, pointerChain))
             case _ =>
               errors += s"${operation.getId}: Operation output must be a structure."
               None
@@ -195,22 +252,79 @@ object SmithyIrGenerator {
       IrService(service.getId.getName, wordSize, defaultEndian, operations)
     }
 
-    if (errors.nonEmpty) Left(errors.toList.distinct) else Right(irServices)
+    if (errors.nonEmpty) {
+      errors.foreach(error => DapHttpLoggers.irSourceSmithy.warn("{}", error))
+      DapHttpLoggers.irSourceSmithy.info(
+        "Smithy IR generation failed with {} error(s)",
+        Integer.valueOf(errors.distinct.size)
+      )
+      Left(errors.toList.distinct)
+    } else {
+      val operationCount = irServices.map(_.operations.size).sum
+      DapHttpLoggers.irSourceSmithy.info(
+        "Generated IR for {} service(s) and {} operation(s)",
+        Integer.valueOf(irServices.size),
+        Integer.valueOf(operationCount)
+      )
+      irServices.foreach { service =>
+        DapHttpLoggers.irSourceSmithy.debug(
+          "Service {} has {} operation(s)",
+          service.name,
+          Integer.valueOf(service.operations.size)
+        )
+      }
+      Right(irServices)
+    }
   }
 
-  private def buildIrMember(member: MemberShape, target: IrType): IrMember =
+  private def buildIrMember(member: MemberShape, target: IrType): IrMember = {
+    val resolvedTarget = functionPointerFromTrait(member).getOrElse(target)
+    val isFuncPointer = resolvedTarget.isInstanceOf[IrType.FunctionPointer]
     IrMember(
       id = member.getId,
       name = member.getMemberName,
-      target = target,
+      target = resolvedTarget,
       staticAddress = staticAddress(member),
       paddingRepeats = intTraitValue(member, PaddingTrait),
-      isPointer = member.hasTrait(PointerTrait),
+      isPointer = member.hasTrait(PointerTrait) || isFuncPointer,
       isArray = member.hasTrait(ArrayTrait),
       arrayLength = intTraitValue(member, LengthTrait),
       endianOverride = endianValue(member, EndianTrait),
-      primitiveOverride = memberPrimitiveOverride(member)
+      primitiveOverride =
+        if (isFuncPointer) None
+        else memberPrimitiveOverride(member),
+      readSizeBytes = intTraitValue(member, SizeTrait)
     )
+  }
+
+  private def functionPointerFromTrait(member: MemberShape): Option[IrType.FunctionPointer] = {
+    member.findTrait(FunctionPointerTrait).toScala.flatMap { rawTrait =>
+      val node = rawTrait.toNode
+      if (node.isObjectNode) {
+        val obj = node.expectObjectNode
+        val name = obj.getStringMember("name").toScala.map(_.getValue)
+        val output = obj.getStringMember("output").toScala.map(_.getValue)
+        val paramsStr = obj.getStringMember("params").toScala.map(_.getValue)
+        val params = paramsStr
+          .getOrElse("")
+          .split(";")
+          .filter(_.nonEmpty)
+          .zipWithIndex
+          .map { case (entry, idx) =>
+            val parts = entry.split("\\|", 2)
+            if (parts.length == 2) FunctionPointerParam(parts(0), parts(1))
+            else FunctionPointerParam(parts(0), s"arg$idx")
+          }
+          .toList
+        for {
+          n <- name
+          out <- output
+        } yield IrType.FunctionPointer(n, params, out)
+      } else {
+        None
+      }
+    }
+  }
 
   private def primitiveForShapeType(shapeType: ShapeType): Option[IrPrimitive] = {
     shapeType match {
@@ -251,6 +365,17 @@ object SmithyIrGenerator {
       val node = rawTrait.toNode
       if (node.isNumberNode) {
         Some(node.expectNumberNode.getValue.intValue())
+      } else {
+        None
+      }
+    }
+  }
+
+  private def booleanTraitValue(shape: Shape, traitId: ShapeId): Option[Boolean] = {
+    shape.findTrait(traitId).toScala.flatMap { rawTrait =>
+      val node = rawTrait.toNode
+      if (node.isBooleanNode) {
+        Some(node.expectBooleanNode.getValue)
       } else {
         None
       }
