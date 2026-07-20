@@ -26,19 +26,39 @@ object Cli
     ) {
 
   private final case class ServerConfig(
-      dapHost: String,
-      dapPort: Int,
+      dapTransport: DapTransportConfig,
       bindHost: String,
       bindPort: Int
   )
 
-  private val serverConfigOpts: Opts[ServerConfig] = (
+  private val dapTransportOpts: Opts[DapTransportConfig] = (
     Opts
-      .option[String]("dap-host", "DAP debug adapter host", metavar = "host")
+      .option[Path](
+        "dap-pipe",
+        "Existing local DAP path: Unix domain socket, or \\\\.\\pipe\\Name on Windows",
+        metavar = "path"
+      )
+      .orNone,
+    Opts
+      .option[String]("dap-host", "DAP debug adapter host (TCP transport)", metavar = "host")
       .withDefault("127.0.0.1"),
     Opts
-      .option[Int]("dap-port", "DAP debug adapter port", metavar = "port")
-      .withDefault(4711),
+      .option[Int]("dap-port", "DAP debug adapter port (TCP transport)", metavar = "port")
+      .withDefault(4711)
+  ).mapN(resolveDapTransport)
+
+  private def resolveDapTransport(
+      pipe: Option[Path],
+      host: String,
+      port: Int
+  ): DapTransportConfig =
+    pipe match {
+      case Some(path) => DapTransportConfig.LocalPipe(path)
+      case None       => DapTransportConfig.Tcp(host, port)
+    }
+
+  private val serverConfigOpts: Opts[ServerConfig] = (
+    dapTransportOpts,
     Opts
       .option[String]("bind-host", "HTTP server bind host", metavar = "host")
       .withDefault("0.0.0.0"),
@@ -220,16 +240,17 @@ object Cli
       _ <-
         if (watch && watchPaths.nonEmpty) startSmithyWatcher(watchPaths, plansRef)
         else IO.unit
-      dapClient = new DapHttpServerMain.SocketDapClient(config.dapHost, config.dapPort)
-      app = DapHttpServerMain.routes(plansRef, dapClient).orNotFound
-      exit <- EmberServerBuilder
-        .default[IO]
-        .withHost(Host.fromString(config.bindHost).getOrElse(Host.fromString("0.0.0.0").get))
-        .withPort(Port.fromInt(config.bindPort).getOrElse(Port.fromInt(8080).get))
-        .withHttpApp(app)
-        .build
-        .use(_ => IO.never)
-        .as(ExitCode.Success)
+      exit <- DapTransportConfig.resource(config.dapTransport).use { dapClient =>
+        val app = DapHttpServerMain.routes(plansRef, dapClient).orNotFound
+        EmberServerBuilder
+          .default[IO]
+          .withHost(Host.fromString(config.bindHost).getOrElse(Host.fromString("0.0.0.0").get))
+          .withPort(Port.fromInt(config.bindPort).getOrElse(Port.fromInt(8080).get))
+          .withHttpApp(app)
+          .build
+          .use(_ => IO.never)
+          .as(ExitCode.Success)
+      }
     } yield exit
 
   private def startSmithyWatcher(

@@ -17,9 +17,6 @@ import org.http4s.implicits._
 import scodec.bits.BitVector
 import software.amazon.smithy.model.Model
 
-import java.io.BufferedInputStream
-import java.io.BufferedOutputStream
-import java.net.Socket
 import java.nio.charset.StandardCharsets
 import java.nio.file.Files
 import java.nio.file.Path
@@ -32,8 +29,7 @@ import scala.util.Try
 object DapHttpServerMain extends IOApp {
   private final case class Config(
       smithyPaths: List[Path],
-      dapHost: String,
-      dapPort: Int,
+      dapTransport: DapTransportConfig,
       bindHost: String,
       bindPort: Int,
       watch: Boolean
@@ -49,16 +45,17 @@ object DapHttpServerMain extends IOApp {
             loadPlans(config.smithyPaths)
           )
           _ <- watchSmithySources(config, plansRef)
-          dapClient = new SocketDapClient(config.dapHost, config.dapPort)
-          app = routes(plansRef, dapClient).orNotFound
-          exit <- EmberServerBuilder
-            .default[IO]
-            .withHost(Host.fromString(config.bindHost).getOrElse(Host.fromString("0.0.0.0").get))
-            .withPort(Port.fromInt(config.bindPort).getOrElse(Port.fromInt(8080).get))
-            .withHttpApp(app)
-            .build
-            .use(_ => IO.never)
-            .as(ExitCode.Success)
+          exit <- DapTransportConfig.resource(config.dapTransport).use { dapClient =>
+            val app = routes(plansRef, dapClient).orNotFound
+            EmberServerBuilder
+              .default[IO]
+              .withHost(Host.fromString(config.bindHost).getOrElse(Host.fromString("0.0.0.0").get))
+              .withPort(Port.fromInt(config.bindPort).getOrElse(Port.fromInt(8080).get))
+              .withHttpApp(app)
+              .build
+              .use(_ => IO.never)
+              .as(ExitCode.Success)
+          }
         } yield exit
     }
   }
@@ -76,21 +73,38 @@ object DapHttpServerMain extends IOApp {
       .map(_.split(",").toList.filter(_.nonEmpty).map(Paths.get(_)))
       .getOrElse(Nil)
 
+    val dapPipe = values.get("dapPipe").map(Paths.get(_))
+
     if (smithyPaths.isEmpty) {
       Left("Missing required --smithy=/path/a,/path/b argument.")
     } else {
-      Right(
+      resolveLegacyDapTransport(dapPipe, values).map { dapTransport =>
         Config(
           smithyPaths = smithyPaths,
-          dapHost = values.getOrElse("dapHost", "127.0.0.1"),
-          dapPort = values.get("dapPort").flatMap(v => Try(v.toInt).toOption).getOrElse(4711),
+          dapTransport = dapTransport,
           bindHost = values.getOrElse("bindHost", "0.0.0.0"),
           bindPort = values.get("bindPort").flatMap(v => Try(v.toInt).toOption).getOrElse(8080),
           watch = values.get("watch").forall(_.toBooleanOption.getOrElse(true))
         )
-      )
+      }
     }
   }
+
+  private def resolveLegacyDapTransport(
+      dapPipe: Option[Path],
+      values: Map[String, String]
+  ): Either[String, DapTransportConfig] =
+    dapPipe match {
+      case Some(path) =>
+        Right(DapTransportConfig.LocalPipe(path))
+      case None =>
+        Right(
+          DapTransportConfig.Tcp(
+            host = values.getOrElse("dapHost", "127.0.0.1"),
+            port = values.get("dapPort").flatMap(v => Try(v.toInt).toOption).getOrElse(4711)
+          )
+        )
+    }
 
   private[daphttp] def routes(
       plansRef: Ref[IO, Either[List[String], Map[String, RoutePlan]]],
@@ -293,101 +307,6 @@ object DapHttpServerMain extends IOApp {
           }
         }
       IO.blocking(newestTimestamp(config.smithyPaths)).flatMap(ts => loop(ts).start.void)
-    }
-  }
-
-  private[daphttp] trait DapClient {
-    def readMemory(address: Long, sizeBytes: Int): IO[Either[String, String]]
-  }
-
-  private[daphttp] final class SocketDapClient(host: String, port: Int) extends DapClient {
-    override def readMemory(address: Long, sizeBytes: Int): IO[Either[String, String]] =
-      IO.blocking {
-        val socket = new Socket(host, port)
-        socket.setSoTimeout(5000)
-        val out = new BufferedOutputStream(socket.getOutputStream)
-        val in = new BufferedInputStream(socket.getInputStream)
-
-        val request =
-          Json
-            .obj(
-              "seq" -> Json.fromInt(1),
-              "type" -> Json.fromString("request"),
-              "command" -> Json.fromString("readMemory"),
-              "arguments" -> Json.obj(
-                "memoryReference" -> Json.fromString(f"0x$address%x"),
-                "count" -> Json.fromInt(sizeBytes)
-              )
-            )
-            .noSpaces
-
-        val payload = request.getBytes(StandardCharsets.UTF_8)
-        out.write(s"Content-Length: ${payload.length}\r\n\r\n".getBytes(StandardCharsets.UTF_8))
-        out.write(payload)
-        out.flush()
-
-        val contentLength = readContentLength(in)
-        val body = readBody(in, contentLength)
-
-        socket.close()
-
-        io.circe.parser.parse(body).toOption match {
-          case Some(json) if json.hcursor.downField("success").as[Boolean].getOrElse(false) =>
-            val value = json.hcursor
-              .downField("body")
-              .downField("data")
-              .as[String]
-              .toOption
-              .getOrElse(Base64.getEncoder.encodeToString(body.getBytes(StandardCharsets.UTF_8)))
-            Right(value)
-          case Some(json) =>
-            Left(
-              json.hcursor
-                .downField("message")
-                .as[String]
-                .toOption
-                .getOrElse("DAP readMemory failed")
-            )
-          case None =>
-            Left("Failed to parse DAP response payload.")
-        }
-      }.handleError(error => Left(error.getMessage))
-
-    private def readContentLength(in: BufferedInputStream): Int = {
-      var contentLength = 0
-      var line = readLine(in)
-      while (line.nonEmpty) {
-        val lower = line.toLowerCase
-        if (lower.startsWith("content-length:")) {
-          contentLength = lower.stripPrefix("content-length:").trim.toInt
-        }
-        line = readLine(in)
-      }
-      contentLength
-    }
-
-    private def readBody(in: BufferedInputStream, length: Int): String = {
-      val buffer = new Array[Byte](length)
-      var read = 0
-      while (read < length) {
-        val bytesRead = in.read(buffer, read, length - read)
-        if (bytesRead == -1)
-          throw new IllegalStateException("Unexpected EOF while reading DAP response body.")
-        read += bytesRead
-      }
-      new String(buffer, StandardCharsets.UTF_8)
-    }
-
-    private def readLine(in: BufferedInputStream): String = {
-      val buffer = new StringBuilder
-      var current = in.read()
-      var previous = -1
-      while (current != -1 && !(previous == '\r' && current == '\n')) {
-        if (current != '\r') buffer.append(current.toChar)
-        previous = current
-        current = in.read()
-      }
-      buffer.toString()
     }
   }
 }

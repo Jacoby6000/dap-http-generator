@@ -17,7 +17,11 @@ entrypoint also exists at `io.github.jacoby6000.daphttp.DapHttpServerMain`.
 
 Server subcommands (`smithy`, `cheaders`) share these flags:
 
-- `--dap-host` / `--dap-port` (default `127.0.0.1:4711`) — DAP debug adapter
+- DAP transport (choose one):
+  - TCP (default): `--dap-host` / `--dap-port` (default `127.0.0.1:4711`)
+  - Local pipe path (client only): `--dap-pipe <path>` — Unix domain socket
+    (e.g. dolphin-dap `DAPSocket=/tmp/dolphin-dap.sock`) or Windows named pipe
+    (`\\.\pipe\Name`)
 - `--bind-host` / `--bind-port` (default `0.0.0.0:8080`) — HTTP server bind address
 
 `smithy` also supports `--watch` to reload models when files change.
@@ -109,9 +113,11 @@ The server:
 - resolves DAP-backed structs (`@dapStruct`/`@bitmask`) and reads memory through a DAP `readMemory` request,
 - watches Smithy sources and reloads routes when model files change (`smithy --watch`).
 
-`/health` and `/routes` work without a debugger attached. Generated **data** routes open a fresh
-TCP socket per read to the DAP adapter; if nothing is listening they return per-read `error`
-fields while the HTTP request still succeeds.
+`/health` and `/routes` work without a debugger attached. Generated **data** routes talk to the
+configured DAP transport (`readMemory`). TCP opens a fresh socket per read; `--dap-pipe`
+keeps a persistent Unix-socket or Windows named-pipe session for the lifetime of the HTTP
+server. If the adapter is unreachable they return per-read `error` fields while the HTTP
+request still succeeds.
 
 ### Running locally
 
@@ -128,6 +134,29 @@ sbt "run cheaders \
   --symbols /absolute/path/to/symbols.txt \
   --headers /absolute/path/to/include \
   --word-size 32 \
+  --bind-port 8080"
+```
+
+Local DAP pipe (client to an existing endpoint):
+
+```bash
+# Linux: Unix domain socket (dolphin-dap Dolphin.General.DAPSocket)
+sbt "run smithy --smithy /absolute/path/to/models \
+  --dap-pipe /tmp/dolphin-dap.sock \
+  --bind-port 8080"
+
+# Windows: named pipe created by the adapter
+sbt "run smithy --smithy /absolute/path/to/models \
+  --dap-pipe \\\\.\\pipe\\MyDapAdapter \
+  --bind-port 8080"
+```
+
+TCP attach (dolphin-dap `Dolphin.General.DAPPort`):
+
+```bash
+sbt "run smithy --smithy /absolute/path/to/models \
+  --dap-host 127.0.0.1 \
+  --dap-port 5678 \
   --bind-port 8080"
 ```
 

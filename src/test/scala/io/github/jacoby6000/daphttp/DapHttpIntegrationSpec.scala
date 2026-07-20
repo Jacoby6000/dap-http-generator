@@ -216,7 +216,7 @@ class DapHttpIntegrationSpec extends AnyFunSuite {
           .withPort(Port.fromInt(0).get)
           .withHttpApp(
             DapHttpServerMain
-              .routes(plansRef, new DapHttpServerMain.SocketDapClient("127.0.0.1", dummyDap.port))
+              .routes(plansRef, new SocketDapClient("127.0.0.1", dummyDap.port))
               .orNotFound
           )
           .build
