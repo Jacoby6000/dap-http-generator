@@ -76,7 +76,8 @@ final case class RoutePlan(
 )
 final case class RoutePlansLoadResult(
     routes: Map[String, RoutePlan],
-    errors: List[String]
+    errors: List[String],
+    services: List[IrService] = Nil
 )
 final case class IrGenerationResult(
     warnings: List[String],

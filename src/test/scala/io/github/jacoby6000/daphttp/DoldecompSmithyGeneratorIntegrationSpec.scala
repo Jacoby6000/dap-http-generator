@@ -3,6 +3,7 @@ package io.github.jacoby6000.daphttp
 import io.circe.Json
 import org.scalatest.funsuite.AnyFunSuite
 import software.amazon.smithy.model.Model
+import software.amazon.smithy.model.shapes.ShapeId
 
 import java.nio.file.Paths
 
@@ -29,16 +30,25 @@ class DoldecompSmithyGeneratorIntegrationSpec extends AnyFunSuite {
 
     assert(route.reads.size == 1)
     assert(route.reads.head.address == 0x80453100L)
-    assert(route.reads.head.sizeBytes == 32)
+    // u32 + pad + u128 + Vec3f, with PPC32 max-align 8 → sizeof 0x28
+    assert(route.reads.head.sizeBytes == 40)
     assert(route.reads.head.decodeCodec.nonEmpty)
     assert(!scoreMember.isPointer)
     assert(scoreMember.target == IrType.Primitive(IrPrimitive.U128))
+    assert(scoreMember.offsetBytes.contains(8))
 
     val payload = Array[Byte](
+      // health @0
       0x00,
       0x00,
       0x00,
       0x2a,
+      // pad to score @8
+      0x00,
+      0x00,
+      0x00,
+      0x00,
+      // score u128 @8
       0x00,
       0x00,
       0x00,
@@ -55,6 +65,7 @@ class DoldecompSmithyGeneratorIntegrationSpec extends AnyFunSuite {
       0x00,
       0x00,
       0x05,
+      // position @24
       0x3f,
       0x80.toByte,
       0x00,
@@ -65,6 +76,11 @@ class DoldecompSmithyGeneratorIntegrationSpec extends AnyFunSuite {
       0x00,
       0x40,
       0x40,
+      0x00,
+      0x00,
+      // trailing sizeof pad
+      0x00,
+      0x00,
       0x00,
       0x00
     )
@@ -179,7 +195,8 @@ class DoldecompSmithyGeneratorIntegrationSpec extends AnyFunSuite {
     val route = plans("/api/MeleeApi/gm_803DDAC0_Scenes")
 
     assert(route.reads.head.address == 0x803ddac0L)
-    assert(route.reads.head.sizeBytes == 42)
+    // GameScene packs to 24 bytes (fnptrs + nested GameSceneInfo); array length 2 → 48
+    assert(route.reads.head.sizeBytes == 48)
     assert(route.reads.head.decodeCodec.nonEmpty)
   }
 
@@ -209,11 +226,11 @@ class DoldecompSmithyGeneratorIntegrationSpec extends AnyFunSuite {
       .generateFromModel(model)
       .fold(errors => fail(errors.mkString("\n")), identity)
 
-    assert(original.head.operations.head.output.members.head.readSizeBytes.contains(0x0c))
-    assert(roundTripped.head.operations.head.output.members.head.readSizeBytes.contains(0x0c))
+    assert(original.head.operations.head.output.members.head.readSizeBytes.contains(0x08))
+    assert(roundTripped.head.operations.head.output.members.head.readSizeBytes.contains(0x08))
 
     val plans = HttpRouteIrEmitter.emitRoutePlansFromIr(roundTripped)
-    assert(plans.routes("/api/DolDecompApi/padded_struct").reads.head.sizeBytes == 0x0c)
+    assert(plans.routes("/api/DolDecompApi/padded_struct").reads.head.sizeBytes == 0x08)
   }
 
   test("returns successful routes when some symbol derivations fail") {
@@ -665,7 +682,7 @@ class DoldecompSmithyGeneratorIntegrationSpec extends AnyFunSuite {
     assert(plans.routes("/api/DolDecompApi/start_event_rules").reads.head.decodeCodec.nonEmpty)
   }
 
-  test("honors doldecomp member offset comments in struct layout") {
+  test("packs structs from member types; offset comments are documentation") {
     val fixtureRoot = Paths.get("src/test/resources/doldecomp-fixture-offsets")
     val generation = DoldecompIrGenerator
       .generateFromPaths(
@@ -686,24 +703,63 @@ class DoldecompSmithyGeneratorIntegrationSpec extends AnyFunSuite {
     val bMember = struct.members.find(_.name == "b").get
 
     assert(aMember.offsetBytes.contains(0x00))
-    assert(bMember.offsetBytes.contains(0x08))
+    assert(bMember.offsetBytes.contains(0x04))
+    assert(struct.declaredSizeBits.contains(8))
 
     val outputMember = generation.services.head.operations.head.output.members.head
-    assert(outputMember.readSizeBytes.contains(0x0c))
+    assert(outputMember.readSizeBytes.contains(0x08))
 
     val plans = HttpRouteIrEmitter.emitRoutePlansFromIr(generation.services)
     val route = plans.routes("/api/DolDecompApi/padded_struct")
-    assert(route.reads.head.sizeBytes == 0x0c)
+    assert(route.reads.head.sizeBytes == 0x08)
 
-    val payload = Array.fill[Byte](12)(0)
-    payload(0) = 0x2a
-    payload(10) = 0x12
-    payload(11) = 0x34
+    val payload = Array[Byte](0x2a, 0, 0, 0, 0x00, 0x00, 0x12, 0x34)
     val decoded =
       route.reads.head.decodeCodec.get.decode(scodec.bits.BitVector(payload)).toOption.get.value
 
     assert(decoded.hcursor.downField("a").as[Long].toOption.contains(0x2aL))
     assert(decoded.hcursor.downField("b").as[Long].toOption.contains(0x1234L))
+  }
+
+  test("warns when offset comments disagree with type-packed layout") {
+    val packed = List(
+      IrMember(
+        id = ShapeId.from("example#Padded_a"),
+        name = "a",
+        target = IrType.Primitive(IrPrimitive.U8),
+        staticAddress = None,
+        paddingRepeats = None,
+        isPointer = false,
+        isArray = false,
+        arrayLength = None,
+        endianOverride = None,
+        primitiveOverride = Some(IrPrimitive.U8),
+        offsetBytes = Some(0)
+      ),
+      IrMember(
+        id = ShapeId.from("example#Padded_b"),
+        name = "b",
+        target = IrType.Primitive(IrPrimitive.U32),
+        staticAddress = None,
+        paddingRepeats = None,
+        isPointer = false,
+        isArray = false,
+        arrayLength = None,
+        endianOverride = None,
+        primitiveOverride = Some(IrPrimitive.U32),
+        offsetBytes = Some(4)
+      )
+    )
+    val warnings = DoldecompIrGenerator.commentOffsetWarnings(
+      "PaddedStruct",
+      List("a", "b"),
+      packed,
+      Map(("PaddedStruct", "a") -> 0, ("PaddedStruct", "b") -> 0x08)
+    )
+    assert(warnings.size == 1)
+    assert(warnings.head.contains("PaddedStruct.b"))
+    assert(warnings.head.contains("0x8"))
+    assert(warnings.head.contains("0x4"))
   }
 
   test("decodes struct char pointer array members as arrays of C strings") {

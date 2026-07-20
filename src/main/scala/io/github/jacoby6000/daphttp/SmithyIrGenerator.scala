@@ -112,7 +112,7 @@ object SmithyIrGenerator {
     val errors = ListBuffer.empty[String]
     val services = model.shapes(classOf[ServiceShape]).iterator().asScala.toList
 
-    def buildIrType(shapeId: ShapeId, stack: Set[ShapeId]): IrType = {
+    def buildIrType(shapeId: ShapeId, stack: Set[ShapeId], wordSize: Option[Int]): IrType = {
       if (stack.contains(shapeId)) {
         IrType.Ref(shapeId)
       } else {
@@ -124,7 +124,12 @@ object SmithyIrGenerator {
               .members()
               .asScala
               .toList
-              .map(member => buildIrMember(member, buildIrType(member.getTarget, stack + shapeId)))
+              .map(member =>
+                buildIrMember(
+                  member,
+                  buildIrType(member.getTarget, stack + shapeId, wordSize)
+                )
+              )
             val declaredSizeBits = intTraitValue(structure, SizeTrait)
             if (structure.hasTrait(BitmaskTrait)) {
               IrType.Bitmask(
@@ -133,11 +138,26 @@ object SmithyIrGenerator {
                 declaredSizeBits = declaredSizeBits
               )
             } else if (structure.hasTrait(DapStructTrait)) {
-              IrType.MemoryMappedStruct(
+              val unpacked = IrType.MemoryMappedStruct(
                 id = structure.getId,
                 members = members,
                 declaredSizeBits = declaredSizeBits
               )
+              // DESNOTE(jbarber, 2026-07-20): Pack from member types so Smithy round-trips
+              // (which omit C offset comments) keep ABI layout. Explicit @size on the structure
+              // wins over the packed sizeof when present.
+              wordSize
+                .map(ws => IrLayout.packStruct(unpacked, Some(ws)))
+                .getOrElse(Right(unpacked)) match {
+                case Right(packed) =>
+                  declaredSizeBits match {
+                    case Some(size) => packed.copy(declaredSizeBits = Some(size))
+                    case None       => packed
+                  }
+                case Left(errs) =>
+                  errors ++= errs
+                  unpacked
+              }
             } else {
               IrType.EnclosingStruct(
                 id = structure.getId,
@@ -154,14 +174,17 @@ object SmithyIrGenerator {
                 .asScala
                 .toList
                 .map(member =>
-                  buildIrMember(member, buildIrType(member.getTarget, stack + shapeId))
+                  buildIrMember(
+                    member,
+                    buildIrType(member.getTarget, stack + shapeId, wordSize)
+                  )
                 )
             )
           case ShapeType.LIST =>
             val list = shape.asInstanceOf[ListShape]
             IrType.ListType(
               id = list.getId,
-              element = buildIrType(list.getMember.getTarget, stack + shapeId),
+              element = buildIrType(list.getMember.getTarget, stack + shapeId, wordSize),
               bytesAlias = list.getId == BytesShape,
               bitsAlias = list.getId == BitsShape
             )
@@ -169,8 +192,8 @@ object SmithyIrGenerator {
             val mapShape = shape.asInstanceOf[MapShape]
             IrType.MapType(
               id = mapShape.getId,
-              key = buildIrType(mapShape.getKey.getTarget, stack + shapeId),
-              value = buildIrType(mapShape.getValue.getTarget, stack + shapeId)
+              key = buildIrType(mapShape.getKey.getTarget, stack + shapeId, wordSize),
+              value = buildIrType(mapShape.getValue.getTarget, stack + shapeId, wordSize)
             )
           case ShapeType.INT_ENUM =>
             val intEnum = shape.asInstanceOf[IntEnumShape]
@@ -205,7 +228,7 @@ object SmithyIrGenerator {
       val operations = service.getOperations.asScala.toList.flatMap { operationId =>
         val operation = model.expectShape(operationId, classOf[OperationShape])
         operation.getOutput.toScala.flatMap { outputId =>
-          buildIrType(outputId, Set.empty) match {
+          buildIrType(outputId, Set.empty, wordSize) match {
             case outputStruct: IrType.Struct =>
               val routePath = ApiRoutes.normalize(
                 operation
@@ -229,7 +252,7 @@ object SmithyIrGenerator {
                       val shapeIdStr = node.expectStringNode.getValue
                       ShapeId.from(shapeIdStr) match {
                         case sid if model.getShape(sid).isPresent =>
-                          Some(buildIrType(sid, Set.empty))
+                          Some(buildIrType(sid, Set.empty, wordSize))
                         case _ => None
                       }
                     } else None

@@ -17,7 +17,8 @@ The entrypoint is `io.github.jacoby6000.daphttp.Cli` (a Decline CLI) with three 
   `--namespace`, `--service`, `--word-size`, `--data-sections`, `--report`, `--output`).
 
 `smithy` and `cheaders` share DAP transport flags and `--bind-host/--bind-port`
-(default `0.0.0.0:8080`). DAP transport is one of:
+(default `0.0.0.0:8080`), plus optional `--overlays <path>` (JSON file for client type
+reinterpretation overlays; loaded at startup and rewritten on `PUT /overlays`). DAP transport is one of:
 
 - TCP (default): `--dap-host/--dap-port` (default `127.0.0.1:4711`) — persistent TCP session
 - Local pipe (client only): `--dap-pipe` — Unix domain socket (Linux/macOS) or Windows named
@@ -95,18 +96,24 @@ flowchart LR
 
 - **root (JVM)** — CLI, IR pipeline, http4s server (`io.github.jacoby6000.daphttp.Cli`).
 - **ui (Scala.js)** — browser explorer under `ui/`; `Compile / resourceGenerators` copies
-  `fastOptJS` + `index.html` into `web/` resources served at `/` and `/assets/main.js`.
+  `fastOptJS` + `index.html` into `web/` resources served at `/` and `/assets/main.js`. The
+  explorer keeps the full `/routes` catalog in memory but only renders search results in the left
+  panel (name/struct/field substring, or `0x…` address match against tree node addresses).
 
 ### HTTP surface
 
 | Path | Purpose |
 |------|---------|
-| `GET /` | HTML + Scala.js route explorer |
+| `GET /` | HTML + Scala.js route explorer (search-driven; left panel shows matches only) |
 | `GET /assets/main.js` | Packaged Scala.js bundle |
 | `GET /health` | Liveness |
-| `GET /routes` | Flat `routes` list + `tree` (for the UI) + `errors` |
+| `GET /routes` | Flat `routes` list + `tree` (nodes include optional `address`) + `errors` |
+| `GET /types` | Searchable type catalog (primitives + IR structs/enums + overlay `newStructs`; no per-struct `fields`) |
+| `GET /types/fields?id=` | Full field descriptors for one struct (editor pre-population) |
+| `GET /overlays` | Current type-overlay document (`structs` + `newStructs`) |
+| `PUT /overlays` | Replace overlays (validate; persist when `--overlays` was set) |
 | `POST /resume` | DAP `continue` |
-| `GET /api/...` | Generated memory / data routes |
+| `GET /api/...` | Generated memory / data routes (`decoded` plus optional `overlayDecoded`) |
 
 ### Non-obvious caveats
 
@@ -134,7 +141,9 @@ flowchart LR
   `ftCo_MS_Count` → `ftMh_MS_Count` → `ftCh_MS_Count` resolve even when defining headers sort after
   consumers. Only Count sentinels that appear before any failed initializer in their enum are
   exported during enum reparse (avoids colliding with later redefinitions of the same enum tag).
-  After enums merge, enumerator values are kept in a constant table for array-bound lookup
+  Count-macro reparse can expand a Count identifier away in its defining enum; all passes are
+  merged and richer enum bodies win so sentinels like `StatsAttack_Count` stay in the constant
+  table. After enums merge, enumerator values are kept in that table for array-bound lookup
   (e.g. `jobjs[HUD_PLACE_MAX]`) — they are not injected into CDT ScannerInfo (that OOM'd on
   Melee-scale corpora). Opaque type macros such as melee `UNK_T` (`void*`) are expanded when
   validating symbol types. Header sources are read once into a corpus; `.c` files have top-level
@@ -168,3 +177,25 @@ flowchart LR
   `IrSizingWarnings` does not treat them as ambiguous Smithy prelude Integer/Float.
 - First `sbt` invocation downloads sbt/Scala launchers and Coursier deps; expect a slow cold start.
   Building the server also builds the Scala.js UI via `resourceGenerators`.
+- UI route explorer: paths with `{index}` (arrays / pointer chains) show an index bar — enter
+  indices and Fetch, or use Prev/Next to walk the first index until decode fails (error / null
+  `decoded`). Concrete indexed children still fetch with ↻ as before. Source/overlay decode panels
+  render JSON as an expandable tree (objects/arrays collapse behind `{N}` / `[N]` summaries).
+  Fields that map to a fetchable member/array-element route show a per-field ↻; each successful
+  refresh bumps a global refresh count and stamps that subtree as fresh. Older stamps gray out via
+  a background gradient (fully muted after 10 refreshes of lag). Collapsed JSON nodes are not built
+  into the DOM until expanded; fetchable route paths are cached when `/routes` loads.
+- Memory-mapped struct layouts are **type-packed** via `IrLayout` (natural C/PowerPC-style
+  alignment; on 32-bit word size, fundamental alignment is capped at 8 per PPC EABI.
+  `#pragma pack` / packed attributes are not honored yet). Doldecomp `/* 0xN */` / `/* +N */`
+  member offset comments are documentation only: they never stamp IR offsets. When a comment
+  disagrees with the packed layout, `irSourceDoldecomp` logs a warning. When an array bound
+  (e.g. `StatsAttack_Count`) does not resolve from the enumerator table, length may be inferred
+  from the gap between adjacent offset comments (with a warning). The same packer is used for
+  Smithy `@dapStruct` shapes, overlays, and the emitter fallback when offsets are missing.
+- Type overlays (`--overlays`, UI editor): only structs the client changed are stored. Overlay
+  layouts rebuild through `IrLayout` (same rules as C/Smithy IR). Widening a prior field still
+  absorbs following pad when the new types pack without an alignment gap. Data routes keep source
+  `decoded` and add `overlayDecoded` when an overlay touches the read type. Client-created structs
+  live under `newStructs` (namespace `overlay#…` when unqualified). Overlays apply globally by
+  struct shape id, not per-route.

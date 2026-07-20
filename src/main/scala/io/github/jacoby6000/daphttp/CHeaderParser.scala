@@ -793,6 +793,17 @@ object CHeaderParser {
     })
   }
 
+  /** Raw array-bound expression text (e.g. `StatsAttack_Count`), when present. */
+  def arrayBoundExpression(declarator: IASTDeclarator): Option[String] =
+    declaratorChain(declarator).collectFirst(Function.unlift {
+      case arrayDeclarator: IASTArrayDeclarator =>
+        arrayDeclarator.getArrayModifiers.toList.collectFirst(Function.unlift { modifier =>
+          Option(modifier.getConstantExpression).map(_.getRawSignature.trim)
+        })
+      case _ =>
+        None
+    })
+
   def initializerElementCount(declarator: IASTDeclarator): Option[Int] =
     Option(declarator.getInitializer).flatMap(initializerElementCount)
 

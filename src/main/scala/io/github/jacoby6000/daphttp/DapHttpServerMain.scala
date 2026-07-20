@@ -13,6 +13,7 @@ import org.http4s.HttpRoutes
 import org.http4s.MediaType
 import org.http4s.Method.GET
 import org.http4s.Method.POST
+import org.http4s.Method.PUT
 import org.http4s.Request
 import org.http4s.Response
 import org.http4s.StaticFile
@@ -23,6 +24,7 @@ import org.http4s.headers.`Content-Type`
 import org.http4s.implicits._
 import scodec.bits.BitVector
 import software.amazon.smithy.model.Model
+import software.amazon.smithy.model.shapes.ShapeId
 
 import java.io.BufferedInputStream
 import java.io.BufferedOutputStream
@@ -33,9 +35,12 @@ import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.Paths
 import java.util.Base64
+import scala.collection.mutable.ListBuffer
 import scala.concurrent.duration._
 import scala.jdk.CollectionConverters._
 import scala.util.Try
+
+import TypeOverlayDocument._
 
 object DapHttpServerMain extends IOApp {
   private final case class Config(
@@ -129,6 +134,19 @@ object DapHttpServerMain extends IOApp {
       plansRef: Ref[IO, RoutePlansLoadResult],
       dapClient: DapClient
   ): HttpRoutes[IO] =
+    routes(
+      plansRef,
+      dapClient,
+      Ref.unsafe[IO, OverlayEngine](OverlayEngine.empty),
+      overlayPersistPath = None
+    )
+
+  private[daphttp] def routes(
+      plansRef: Ref[IO, RoutePlansLoadResult],
+      dapClient: DapClient,
+      overlaysRef: Ref[IO, OverlayEngine],
+      overlayPersistPath: Option[Path]
+  ): HttpRoutes[IO] =
     HttpRoutes.of[IO] {
       case GET -> Root / "health" =>
         Ok(Json.obj("status" -> Json.fromString("ok")))
@@ -142,6 +160,76 @@ object DapHttpServerMain extends IOApp {
               "errors" -> result.errors.asJson
             )
           )
+        }
+
+      case GET -> Root / "types" =>
+        for {
+          plans <- plansRef.get
+          engine <- overlaysRef.get
+          // DESNOTE(jbarber, 2026-07-20): Omit per-struct `fields` from the catalog payload.
+          // Melee-scale IR makes full field lists enormous; the editor fetches fields for one
+          // struct via /types/fields when needed.
+          response <- Ok(
+            Json.obj("types" -> TypeOverlay.catalog(plans.services, engine.document).asJson)
+          )
+        } yield response
+
+      case request @ GET -> Root / "types" / "fields" =>
+        request.uri.query.params.get("id") match {
+          case None | Some("") =>
+            BadRequest(Json.obj("error" -> Json.fromString("Query parameter id is required")))
+          case Some(typeId) =>
+            for {
+              plans <- plansRef.get
+              engine <- overlaysRef.get
+              response <- TypeOverlay.fieldsFor(plans.services, engine.document, typeId) match {
+                case None =>
+                  NotFound(Json.obj("error" -> Json.fromString(s"Unknown type id: $typeId")))
+                case Some(fields) =>
+                  Ok(
+                    Json.obj(
+                      "id" -> Json.fromString(typeId),
+                      "fields" -> Json.fromValues(
+                        fields.map(TypeOverlayDocument.overlayMemberEncoder.apply)
+                      )
+                    )
+                  )
+              }
+            } yield response
+        }
+
+      case GET -> Root / "overlays" =>
+        overlaysRef.get.flatMap(engine => Ok(engine.document.asJson))
+
+      case request @ PUT -> Root / "overlays" =>
+        request.as[Json].flatMap { json =>
+          json.as[TypeOverlayDocument] match {
+            case Left(err) =>
+              BadRequest(Json.obj("error" -> Json.fromString(err.getMessage)))
+            case Right(raw) =>
+              TypeOverlay.validate(raw) match {
+                case Left(errors) =>
+                  BadRequest(Json.obj("errors" -> errors.asJson))
+                case Right(document) =>
+                  for {
+                    plans <- plansRef.get
+                    typeIndex = TypeOverlay.buildTypeIndex(plans.services)
+                    normalized = normalizeOverlayKeys(document, typeIndex)
+                    validationErrors = validateOverlayTypes(normalized, typeIndex)
+                    response <-
+                      if (validationErrors.nonEmpty)
+                        BadRequest(Json.obj("errors" -> validationErrors.asJson))
+                      else {
+                        val engine = OverlayEngine.fromServices(normalized, plans.services)
+                        overlaysRef.set(engine) *>
+                          IO.blocking {
+                            overlayPersistPath.foreach(TypeOverlayDocument.save(_, normalized))
+                          } *>
+                          Ok(normalized.asJson)
+                      }
+                  } yield response
+              }
+          }
         }
 
       case POST -> Root / "resume" =>
@@ -163,25 +251,50 @@ object DapHttpServerMain extends IOApp {
         if (!ApiRoutes.isDataPath(routePath)) {
           NotFound(Json.obj("error" -> Json.fromString(s"No route generated for $routePath")))
         } else {
-          plansRef.get.flatMap { result =>
-            matchRoute(routePath, result.routes) match {
+          for {
+            result <- plansRef.get
+            response <- matchRoute(routePath, result.routes) match {
               case Some((routePlan, chainSegments)) if chainSegments.nonEmpty =>
-                servePointerChainRoute(routePlan, chainSegments, dapClient)
+                servePointerChainRoute(routePlan, chainSegments, dapClient, overlaysRef)
               case Some((routePlan, _)) =>
-                serveRoutePlan(routePlan, dapClient)
+                serveRoutePlan(routePlan, dapClient, overlaysRef)
               case None =>
                 matchMemberSubRoute(routePath, result.routes) match {
                   case Some((_, subRoute, index)) =>
-                    serveMemberSubRoute(routePath, subRoute, index, dapClient)
+                    serveMemberSubRoute(routePath, subRoute, index, dapClient, overlaysRef)
                   case None =>
                     NotFound(
                       Json.obj("error" -> Json.fromString(s"No route generated for $routePath"))
                     )
                 }
             }
-          }
+          } yield response
         }
     }
+
+  /** Prefer canonical `namespace#name` keys so overlay lookup matches IR shape ids. */
+  private def normalizeOverlayKeys(
+      document: TypeOverlayDocument,
+      typeIndex: Map[ShapeId, IrType]
+  ): TypeOverlayDocument = {
+    val normalizedStructs = document.structs.map { case (key, defn) =>
+      val canonical =
+        try {
+          val shapeId =
+            if (key.contains("#")) ShapeId.from(key)
+            else
+              typeIndex
+                .collectFirst { case (id, _) if id.getName == key => id }
+                .getOrElse(TypeOverlay.normalizeShapeId(key))
+          shapeId.toString
+        } catch {
+          case _: IllegalArgumentException =>
+            TypeOverlay.normalizeShapeId(key).toString
+        }
+      canonical -> defn
+    }
+    document.copy(structs = normalizedStructs)
+  }
 
   private def serveWebAsset(request: Request[IO], fileName: String): IO[Response[IO]] = {
     val safeName = Paths.get(fileName).getFileName.toString
@@ -268,25 +381,102 @@ object DapHttpServerMain extends IOApp {
       }
     })
 
-  private def serveRoutePlan(routePlan: RoutePlan, dapClient: DapClient): IO[Response[IO]] =
+  private def validateOverlayTypes(
+      document: TypeOverlayDocument,
+      typeIndex: Map[ShapeId, IrType]
+  ): List[String] = {
+    val errors = ListBuffer.empty[String]
+    def checkMembers(context: String, members: List[OverlayMember]): Unit =
+      members.foreach { member =>
+        TypeOverlay.resolveTypeId(member.typeId, document, typeIndex) match {
+          case Left(err) => errors += s"$context.${member.name}: $err"
+          case Right(_)  => ()
+        }
+      }
+    document.structs.foreach { case (id, defn) =>
+      checkMembers(s"structs[$id]", defn.members)
+    }
+    document.newStructs.foreach { ns =>
+      checkMembers(s"newStructs[${ns.id}]", ns.members)
+    }
+    errors.toList.distinct
+  }
+
+  private def takeOverlayPrep(
+      overlaysRef: Ref[IO, OverlayEngine],
+      decodeType: Option[IrType],
+      endian: IrEndian,
+      wordSizeBits: Option[Int]
+  ): IO[Option[OverlayEngine.PreparedCodec]] =
+    decodeType match {
+      case None =>
+        IO.pure(None)
+      case Some(irType) =>
+        overlaysRef.modify { engine =>
+          engine.prepare(irType, endian, wordSizeBits)
+        }
+    }
+
+  private def serveRoutePlan(
+      routePlan: RoutePlan,
+      dapClient: DapClient,
+      overlaysRef: Ref[IO, OverlayEngine]
+  ): IO[Response[IO]] =
     routePlan.reads
       .foldLeft(IO.pure(List.empty[Json])) { (accIO, readPlan) =>
         for {
           acc <- accIO
-          read <- dapClient.readMemory(readPlan.address, readPlan.sizeBytes)
+          overlayPrep <- takeOverlayPrep(
+            overlaysRef,
+            readPlan.decodeType,
+            readPlan.endian,
+            readPlan.wordSizeBits
+          )
+          readSize =
+            overlayPrep
+              .map(o => math.max(readPlan.sizeBytes, o.sizeBytes))
+              .getOrElse(readPlan.sizeBytes)
+          read <- dapClient.readMemory(readPlan.address, readSize)
           decoded <- read match {
-            case Right(data) => decodeReadResult(readPlan, data, dapClient)
-            case Left(_)     => IO.pure(Json.Null)
+            case Right(data) =>
+              val sourceData = truncateBase64ToBytes(data, readPlan.sizeBytes)
+              decodeReadResult(readPlan, sourceData, dapClient)
+            case Left(_) => IO.pure(Json.Null)
+          }
+          overlayDecoded <- (read, overlayPrep) match {
+            case (Right(data), Some(prep)) =>
+              decodeWithOverlayCodec(
+                prep,
+                data,
+                readPlan.address,
+                readPlan.wordSizeBits,
+                dapClient
+              ).map(Some(_))
+            case _ =>
+              IO.pure(None)
           }
         } yield {
           val readJson = read match {
             case Right(data) =>
-              Json.obj(
-                "path" -> Json.fromString(readPlan.path),
-                "bytes" -> Json.fromInt(readPlan.sizeBytes),
-                "data" -> Json.fromString(data),
-                "decoded" -> decoded
-              )
+              Json
+                .obj(
+                  "path" -> Json.fromString(readPlan.path),
+                  "bytes" -> Json.fromInt(readSize),
+                  "data" -> Json.fromString(data),
+                  "decoded" -> decoded
+                )
+                .deepMerge(
+                  readPlan.decodeType
+                    .collect { case s: IrType.Struct =>
+                      Json.obj("decodeType" -> Json.fromString(s.id.toString))
+                    }
+                    .getOrElse(Json.obj())
+                )
+                .deepMerge(
+                  overlayDecoded
+                    .map(od => Json.obj("overlayDecoded" -> od))
+                    .getOrElse(Json.obj())
+                )
             case Left(error) =>
               Json.obj(
                 "path" -> Json.fromString(readPlan.path),
@@ -306,10 +496,41 @@ object DapHttpServerMain extends IOApp {
         )
       }
 
+  private def decodeWithOverlayCodec(
+      prep: OverlayEngine.PreparedCodec,
+      base64Data: String,
+      address: Long,
+      wordSizeBits: Option[Int],
+      dapClient: DapClient
+  ): IO[Json] = {
+    val decoded = Try(Base64.getDecoder.decode(base64Data)).toOption
+      .flatMap(bytes => prep.codec.decode(BitVector(bytes)).toOption.map(_.value))
+      .getOrElse(Json.Null)
+    resolveDecodedCStringPointers(prep.irType, decoded, dapClient, wordSizeBits).map { resolved =>
+      HttpRouteIrEmitter.annotateDecodedAddresses(
+        prep.irType,
+        resolved,
+        address,
+        wordSizeBits
+      )
+    }
+  }
+
+  private def truncateBase64ToBytes(base64Data: String, sizeBytes: Int): String =
+    Try(Base64.getDecoder.decode(base64Data)).toOption
+      .map { bytes =>
+        val truncated =
+          if (bytes.length <= sizeBytes) bytes
+          else java.util.Arrays.copyOf(bytes, sizeBytes)
+        Base64.getEncoder.encodeToString(truncated)
+      }
+      .getOrElse(base64Data)
+
   private def servePointerChainRoute(
       routePlan: RoutePlan,
       chainSegments: List[Int],
-      dapClient: DapClient
+      dapClient: DapClient,
+      overlaysRef: Ref[IO, OverlayEngine]
   ): IO[Response[IO]] =
     routePlan.pointerChain match {
       case None =>
@@ -332,59 +553,91 @@ object DapHttpServerMain extends IOApp {
                 )
               }
             } else {
-              dapClient.readMemory(structAddress, chain.pointeeSizeBytes).flatMap {
-                case Left(error) =>
-                  Ok(
-                    Json.obj(
-                      "route" -> Json.fromString(routePlan.path),
-                      "segments" -> chainSegments.asJson,
-                      "error" -> Json.fromString(error)
-                    )
-                  )
-                case Right(data) =>
-                  val decoded = chain.pointeeDecodeCodec match {
-                    case None        => Json.Null
-                    case Some(codec) =>
-                      Try(Base64.getDecoder.decode(data)).toOption
-                        .flatMap(bytes => codec.decode(BitVector(bytes)).toOption.map(_.value))
-                        .getOrElse(Json.Null)
-                  }
-                  val resolvedDecoded = chain.pointeeType match {
-                    case struct: IrType.Struct =>
-                      resolveStructCStringPointers(
-                        struct,
-                        decoded,
-                        dapClient,
-                        Some(chain.wordSizeBits)
-                      ).map { resolved =>
-                        HttpRouteIrEmitter.annotateDecodedAddresses(
-                          struct,
-                          resolved,
-                          structAddress,
-                          Some(chain.wordSizeBits)
-                        )
-                      }
-                    case other =>
-                      IO.pure(
-                        HttpRouteIrEmitter.annotateDecodedAddresses(
-                          other,
-                          decoded,
-                          structAddress,
-                          Some(chain.wordSizeBits)
-                        )
-                      )
-                  }
-                  resolvedDecoded.flatMap { finalDecoded =>
+              takeOverlayPrep(
+                overlaysRef,
+                Some(chain.pointeeType),
+                chain.endian,
+                Some(chain.wordSizeBits)
+              ).flatMap { overlayPrep =>
+                val readSize =
+                  overlayPrep
+                    .map(o => math.max(chain.pointeeSizeBytes, o.sizeBytes))
+                    .getOrElse(chain.pointeeSizeBytes)
+                dapClient.readMemory(structAddress, readSize).flatMap {
+                  case Left(error) =>
                     Ok(
                       Json.obj(
                         "route" -> Json.fromString(routePlan.path),
                         "segments" -> chainSegments.asJson,
-                        "bytes" -> Json.fromInt(chain.pointeeSizeBytes),
-                        "data" -> Json.fromString(data),
-                        "decoded" -> finalDecoded
+                        "error" -> Json.fromString(error)
                       )
                     )
-                  }
+                  case Right(data) =>
+                    val sourceData = truncateBase64ToBytes(data, chain.pointeeSizeBytes)
+                    val decoded = chain.pointeeDecodeCodec match {
+                      case None        => Json.Null
+                      case Some(codec) =>
+                        Try(Base64.getDecoder.decode(sourceData)).toOption
+                          .flatMap(bytes => codec.decode(BitVector(bytes)).toOption.map(_.value))
+                          .getOrElse(Json.Null)
+                    }
+                    val resolvedDecoded = chain.pointeeType match {
+                      case struct: IrType.Struct =>
+                        resolveStructCStringPointers(
+                          struct,
+                          decoded,
+                          dapClient,
+                          Some(chain.wordSizeBits)
+                        ).map { resolved =>
+                          HttpRouteIrEmitter.annotateDecodedAddresses(
+                            struct,
+                            resolved,
+                            structAddress,
+                            Some(chain.wordSizeBits)
+                          )
+                        }
+                      case other =>
+                        IO.pure(
+                          HttpRouteIrEmitter.annotateDecodedAddresses(
+                            other,
+                            decoded,
+                            structAddress,
+                            Some(chain.wordSizeBits)
+                          )
+                        )
+                    }
+                    val overlayDecodedIO = overlayPrep match {
+                      case Some(prep) =>
+                        decodeWithOverlayCodec(
+                          prep,
+                          data,
+                          structAddress,
+                          Some(chain.wordSizeBits),
+                          dapClient
+                        ).map(Some(_))
+                      case None =>
+                        IO.pure(None)
+                    }
+                    for {
+                      finalDecoded <- resolvedDecoded
+                      overlayDecoded <- overlayDecodedIO
+                      response <- Ok(
+                        Json
+                          .obj(
+                            "route" -> Json.fromString(routePlan.path),
+                            "segments" -> chainSegments.asJson,
+                            "bytes" -> Json.fromInt(readSize),
+                            "data" -> Json.fromString(data),
+                            "decoded" -> finalDecoded
+                          )
+                          .deepMerge(
+                            overlayDecoded
+                              .map(od => Json.obj("overlayDecoded" -> od))
+                              .getOrElse(Json.obj())
+                          )
+                      )
+                    } yield response
+                }
               }
             }
         }
@@ -394,20 +647,22 @@ object DapHttpServerMain extends IOApp {
       routePath: String,
       sub: MemberSubRoute,
       index: Option[Int],
-      dapClient: DapClient
+      dapClient: DapClient,
+      overlaysRef: Ref[IO, OverlayEngine]
   ): IO[Response[IO]] =
     sub match {
       case v: MemberSubRoute.ValueSubRoute =>
-        serveValueSubRoute(routePath, v, index, dapClient)
+        serveValueSubRoute(routePath, v, index, dapClient, overlaysRef)
       case p: MemberSubRoute.PointerSubRoute =>
-        servePointerSubRoute(routePath, p, index, dapClient)
+        servePointerSubRoute(routePath, p, index, dapClient, overlaysRef)
     }
 
   private def serveValueSubRoute(
       routePath: String,
       sub: MemberSubRoute.ValueSubRoute,
       index: Option[Int],
-      dapClient: DapClient
+      dapClient: DapClient,
+      overlaysRef: Ref[IO, OverlayEngine]
   ): IO[Response[IO]] = {
     val elementSize = sub.elementSizeBytes.getOrElse(0)
     val elementStride = sub.elementStrideBytes.getOrElse(elementSize)
@@ -424,62 +679,92 @@ object DapHttpServerMain extends IOApp {
           )
         )
       case Some(sizeBytes) =>
-        dapClient.readMemory(readAddress, sizeBytes).flatMap {
-          case Left(error) =>
-            Ok(
-              Json.obj(
-                "route" -> Json.fromString(routePath),
-                "member" -> Json.fromString(sub.memberName),
-                "index" -> index.map(Json.fromInt).getOrElse(Json.Null),
-                "error" -> Json.fromString(error)
-              )
-            )
-          case Right(data) =>
-            val decoded = sub.decodeCodec match {
-              case None        => Json.Null
-              case Some(codec) =>
-                Try(Base64.getDecoder.decode(data)).toOption
-                  .flatMap(bytes => codec.decode(BitVector(bytes)).toOption.map(_.value))
-                  .getOrElse(Json.Null)
-            }
-            val resolvedDecoded = sub.valueType match {
-              case Some(struct: IrType.Struct) =>
-                resolveStructCStringPointers(
-                  struct,
-                  decoded,
-                  dapClient,
-                  Some(sub.wordSizeBits)
-                ).map { resolved =>
-                  HttpRouteIrEmitter.annotateDecodedAddresses(
-                    struct,
-                    resolved,
-                    readAddress,
-                    Some(sub.wordSizeBits)
-                  )
-                }
-              case Some(other) =>
-                IO.pure(
-                  HttpRouteIrEmitter.annotateDecodedAddresses(
-                    other,
-                    decoded,
-                    readAddress,
-                    Some(sub.wordSizeBits)
-                  )
-                )
-              case None =>
-                IO.pure(decoded)
-            }
-            resolvedDecoded.flatMap { finalDecoded =>
+        takeOverlayPrep(
+          overlaysRef,
+          sub.valueType,
+          sub.endian,
+          Some(sub.wordSizeBits)
+        ).flatMap { overlayPrep =>
+          val readSize =
+            overlayPrep.map(o => math.max(sizeBytes, o.sizeBytes)).getOrElse(sizeBytes)
+          dapClient.readMemory(readAddress, readSize).flatMap {
+            case Left(error) =>
               Ok(
                 Json.obj(
                   "route" -> Json.fromString(routePath),
                   "member" -> Json.fromString(sub.memberName),
                   "index" -> index.map(Json.fromInt).getOrElse(Json.Null),
-                  "bytes" -> Json.fromInt(sizeBytes),
-                  "decoded" -> finalDecoded
+                  "error" -> Json.fromString(error)
                 )
               )
-            }
+            case Right(data) =>
+              val sourceData = truncateBase64ToBytes(data, sizeBytes)
+              val decoded = sub.decodeCodec match {
+                case None        => Json.Null
+                case Some(codec) =>
+                  Try(Base64.getDecoder.decode(sourceData)).toOption
+                    .flatMap(bytes => codec.decode(BitVector(bytes)).toOption.map(_.value))
+                    .getOrElse(Json.Null)
+              }
+              val resolvedDecoded = sub.valueType match {
+                case Some(struct: IrType.Struct) =>
+                  resolveStructCStringPointers(
+                    struct,
+                    decoded,
+                    dapClient,
+                    Some(sub.wordSizeBits)
+                  ).map { resolved =>
+                    HttpRouteIrEmitter.annotateDecodedAddresses(
+                      struct,
+                      resolved,
+                      readAddress,
+                      Some(sub.wordSizeBits)
+                    )
+                  }
+                case Some(other) =>
+                  IO.pure(
+                    HttpRouteIrEmitter.annotateDecodedAddresses(
+                      other,
+                      decoded,
+                      readAddress,
+                      Some(sub.wordSizeBits)
+                    )
+                  )
+                case None =>
+                  IO.pure(decoded)
+              }
+              val overlayDecodedIO = overlayPrep match {
+                case Some(prep) =>
+                  decodeWithOverlayCodec(
+                    prep,
+                    data,
+                    readAddress,
+                    Some(sub.wordSizeBits),
+                    dapClient
+                  ).map(Some(_))
+                case None =>
+                  IO.pure(None)
+              }
+              for {
+                finalDecoded <- resolvedDecoded
+                overlayDecoded <- overlayDecodedIO
+                response <- Ok(
+                  Json
+                    .obj(
+                      "route" -> Json.fromString(routePath),
+                      "member" -> Json.fromString(sub.memberName),
+                      "index" -> index.map(Json.fromInt).getOrElse(Json.Null),
+                      "bytes" -> Json.fromInt(readSize),
+                      "decoded" -> finalDecoded
+                    )
+                    .deepMerge(
+                      overlayDecoded
+                        .map(od => Json.obj("overlayDecoded" -> od))
+                        .getOrElse(Json.obj())
+                    )
+                )
+              } yield response
+          }
         }
     }
   }
@@ -488,7 +773,8 @@ object DapHttpServerMain extends IOApp {
       routePath: String,
       sub: MemberSubRoute.PointerSubRoute,
       index: Option[Int],
-      dapClient: DapClient
+      dapClient: DapClient,
+      overlaysRef: Ref[IO, OverlayEngine]
   ): IO[Response[IO]] = {
     val wordBytes = sub.wordSizeBits / 8
     val pointerAddress = sub.baseAddress + sub.memberOffsetBytes.toLong + index
@@ -543,64 +829,94 @@ object DapHttpServerMain extends IOApp {
                 )
               )
             case Some(sizeBytes) =>
-              dapClient.readMemory(masked, sizeBytes).flatMap {
-                case Left(error) =>
-                  Ok(
-                    Json.obj(
-                      "route" -> Json.fromString(routePath),
-                      "member" -> Json.fromString(sub.memberName),
-                      "index" -> index.map(Json.fromInt).getOrElse(Json.Null),
-                      "pointerAddress" -> Json.fromString(f"0x$pointerAddress%x"),
-                      "error" -> Json.fromString(error)
-                    )
-                  )
-                case Right(data) =>
-                  val decoded = sub.pointeeDecodeCodec match {
-                    case None        => Json.Null
-                    case Some(codec) =>
-                      Try(Base64.getDecoder.decode(data)).toOption
-                        .flatMap(bytes => codec.decode(BitVector(bytes)).toOption.map(_.value))
-                        .getOrElse(Json.Null)
-                  }
-                  val resolvedDecoded = sub.pointeeType match {
-                    case Some(struct: IrType.Struct) =>
-                      resolveStructCStringPointers(
-                        struct,
-                        decoded,
-                        dapClient,
-                        Some(sub.wordSizeBits)
-                      ).map { resolved =>
-                        HttpRouteIrEmitter.annotateDecodedAddresses(
-                          struct,
-                          resolved,
-                          masked,
-                          Some(sub.wordSizeBits)
-                        )
-                      }
-                    case Some(other) =>
-                      IO.pure(
-                        HttpRouteIrEmitter.annotateDecodedAddresses(
-                          other,
-                          decoded,
-                          masked,
-                          Some(sub.wordSizeBits)
-                        )
-                      )
-                    case None =>
-                      IO.pure(decoded)
-                  }
-                  resolvedDecoded.flatMap { finalDecoded =>
+              takeOverlayPrep(
+                overlaysRef,
+                sub.pointeeType,
+                sub.endian,
+                Some(sub.wordSizeBits)
+              ).flatMap { overlayPrep =>
+                val readSize =
+                  overlayPrep.map(o => math.max(sizeBytes, o.sizeBytes)).getOrElse(sizeBytes)
+                dapClient.readMemory(masked, readSize).flatMap {
+                  case Left(error) =>
                     Ok(
                       Json.obj(
                         "route" -> Json.fromString(routePath),
                         "member" -> Json.fromString(sub.memberName),
                         "index" -> index.map(Json.fromInt).getOrElse(Json.Null),
                         "pointerAddress" -> Json.fromString(f"0x$pointerAddress%x"),
-                        "bytes" -> Json.fromInt(sizeBytes),
-                        "decoded" -> finalDecoded
+                        "error" -> Json.fromString(error)
                       )
                     )
-                  }
+                  case Right(data) =>
+                    val sourceData = truncateBase64ToBytes(data, sizeBytes)
+                    val decoded = sub.pointeeDecodeCodec match {
+                      case None        => Json.Null
+                      case Some(codec) =>
+                        Try(Base64.getDecoder.decode(sourceData)).toOption
+                          .flatMap(bytes => codec.decode(BitVector(bytes)).toOption.map(_.value))
+                          .getOrElse(Json.Null)
+                    }
+                    val resolvedDecoded = sub.pointeeType match {
+                      case Some(struct: IrType.Struct) =>
+                        resolveStructCStringPointers(
+                          struct,
+                          decoded,
+                          dapClient,
+                          Some(sub.wordSizeBits)
+                        ).map { resolved =>
+                          HttpRouteIrEmitter.annotateDecodedAddresses(
+                            struct,
+                            resolved,
+                            masked,
+                            Some(sub.wordSizeBits)
+                          )
+                        }
+                      case Some(other) =>
+                        IO.pure(
+                          HttpRouteIrEmitter.annotateDecodedAddresses(
+                            other,
+                            decoded,
+                            masked,
+                            Some(sub.wordSizeBits)
+                          )
+                        )
+                      case None =>
+                        IO.pure(decoded)
+                    }
+                    val overlayDecodedIO = overlayPrep match {
+                      case Some(prep) =>
+                        decodeWithOverlayCodec(
+                          prep,
+                          data,
+                          masked,
+                          Some(sub.wordSizeBits),
+                          dapClient
+                        ).map(Some(_))
+                      case None =>
+                        IO.pure(None)
+                    }
+                    for {
+                      finalDecoded <- resolvedDecoded
+                      overlayDecoded <- overlayDecodedIO
+                      response <- Ok(
+                        Json
+                          .obj(
+                            "route" -> Json.fromString(routePath),
+                            "member" -> Json.fromString(sub.memberName),
+                            "index" -> index.map(Json.fromInt).getOrElse(Json.Null),
+                            "pointerAddress" -> Json.fromString(f"0x$pointerAddress%x"),
+                            "bytes" -> Json.fromInt(readSize),
+                            "decoded" -> finalDecoded
+                          )
+                          .deepMerge(
+                            overlayDecoded
+                              .map(od => Json.obj("overlayDecoded" -> od))
+                              .getOrElse(Json.obj())
+                          )
+                      )
+                    } yield response
+                }
               }
           }
         }
@@ -716,7 +1032,8 @@ object DapHttpServerMain extends IOApp {
       services: List[IrService]
   ): RoutePlansLoadResult = {
     IrSizingWarnings.writeToStderr(services)
-    HttpRouteIrEmitter.emitRoutePlansFromIr(services)
+    val plans = HttpRouteIrEmitter.emitRoutePlansFromIr(services)
+    plans.copy(services = services)
   }
 
   private def decodeReadResult(

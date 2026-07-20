@@ -11,6 +11,7 @@ final case class RouteTreeNode(
     member: Option[String] = None,
     index: Option[Int] = None,
     arrayLength: Option[Int] = None,
+    address: Option[Long] = None,
     children: List[RouteTreeNode] = Nil
 )
 
@@ -23,6 +24,9 @@ object RouteTreeNode {
       "member" -> node.member.map(Json.fromString).getOrElse(Json.Null),
       "index" -> node.index.map(Json.fromInt).getOrElse(Json.Null),
       "arrayLength" -> node.arrayLength.map(Json.fromInt).getOrElse(Json.Null),
+      "address" -> node.address
+        .map(addr => Json.fromString(f"0x$addr%x"))
+        .getOrElse(Json.Null),
       "children" -> Json.fromValues(node.children.map(encoder(_)))
     )
   }
@@ -31,7 +35,9 @@ object RouteTreeNode {
 object RouteTree {
   def fromPlans(routes: Map[String, RoutePlan]): List[RouteTreeNode] =
     routes.toList.sortBy(_._1).map { case (basePath, plan) =>
+      val rootAddress = plan.reads.headOption.map(_.address)
       val memberChildren = plan.memberSubRoutes.sortBy(_.memberName).flatMap { sub =>
+        val memberAddress = Some(sub.baseAddress + sub.memberOffsetBytes.toLong)
         if (sub.isArray) {
           val length = sub.arrayLength.getOrElse(0)
           val elements =
@@ -42,7 +48,8 @@ object RouteTree {
                   kind = "arrayElement",
                   fetchable = true,
                   member = Some(sub.memberName),
-                  index = Some(i)
+                  index = Some(i),
+                  address = memberAddress.map(_ + i.toLong * elementStride(sub))
                 )
               }.toList
             else Nil
@@ -53,6 +60,7 @@ object RouteTree {
               fetchable = false,
               member = Some(sub.memberName),
               arrayLength = sub.arrayLength,
+              address = memberAddress,
               children = elements
             )
           )
@@ -62,7 +70,8 @@ object RouteTree {
               path = s"$basePath/${sub.memberName}",
               kind = memberKind(sub),
               fetchable = true,
-              member = Some(sub.memberName)
+              member = Some(sub.memberName),
+              address = memberAddress
             )
           )
         }
@@ -75,7 +84,8 @@ object RouteTree {
                 path = s"$basePath/$i",
                 kind = "pointerChainElement",
                 fetchable = true,
-                index = Some(i)
+                index = Some(i),
+                address = Some(chain.baseAddress + i.toLong * chainOuterStride(chain))
               )
             }.toList
           case _ =>
@@ -86,7 +96,8 @@ object RouteTree {
               RouteTreeNode(
                 path = s"$basePath/$suffix",
                 kind = "pointerChainTemplate",
-                fetchable = false
+                fetchable = false,
+                address = Some(chain.baseAddress)
               )
             )
         }
@@ -95,6 +106,7 @@ object RouteTree {
         path = basePath,
         kind = if (plan.pointerChain.isDefined) "pointerChainRoot" else "root",
         fetchable = true,
+        address = rootAddress.orElse(plan.pointerChain.map(_.baseAddress)),
         children = memberChildren ++ chainChildren
       )
     }
@@ -122,4 +134,18 @@ object RouteTree {
       case _: MemberSubRoute.PointerSubRoute => "pointer"
       case _: MemberSubRoute.ValueSubRoute   => "value"
     }
+
+  private def elementStride(sub: MemberSubRoute): Long =
+    sub match {
+      case v: MemberSubRoute.ValueSubRoute =>
+        v.elementStrideBytes
+          .orElse(v.elementSizeBytes)
+          .getOrElse(v.wordSizeBits / 8)
+          .toLong
+      case p: MemberSubRoute.PointerSubRoute =>
+        (p.wordSizeBits / 8).toLong
+    }
+
+  private def chainOuterStride(chain: PointerChainPlan): Long =
+    chain.outerElementStrideBytes.getOrElse(chain.wordSizeBits / 8).toLong
 }

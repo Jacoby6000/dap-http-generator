@@ -1,0 +1,725 @@
+package io.github.jacoby6000.daphttp
+
+import io.circe.Decoder
+import io.circe.Encoder
+import io.circe.Json
+import io.circe.parser
+import io.circe.syntax._
+import scodec.Codec
+import software.amazon.smithy.model.shapes.ShapeId
+
+import java.nio.charset.StandardCharsets
+import java.nio.file.Files
+import java.nio.file.Path
+import scala.collection.mutable
+import scala.collection.mutable.ListBuffer
+
+/** Client-driven struct reinterpretation overlays (persisted JSON). */
+final case class OverlayMember(
+    name: String,
+    typeId: String,
+    isArray: Boolean = false,
+    arrayLength: Option[Int] = None,
+    isPointer: Boolean = false
+)
+
+final case class OverlayStructDef(members: List[OverlayMember])
+
+final case class OverlayNewStruct(id: String, members: List[OverlayMember])
+
+final case class TypeOverlayDocument(
+    structs: Map[String, OverlayStructDef] = Map.empty,
+    newStructs: List[OverlayNewStruct] = Nil
+)
+
+object TypeOverlayDocument {
+  val empty: TypeOverlayDocument = TypeOverlayDocument()
+
+  implicit val overlayMemberDecoder: Decoder[OverlayMember] = Decoder.instance { c =>
+    for {
+      name <- c.get[String]("name")
+      typeId <- c.get[String]("typeId")
+      isArray <- c.getOrElse[Boolean]("isArray")(false)
+      arrayLength <- c.get[Option[Int]]("arrayLength")
+      isPointer <- c.getOrElse[Boolean]("isPointer")(false)
+    } yield OverlayMember(name, typeId, isArray, arrayLength, isPointer)
+  }
+
+  implicit val overlayMemberEncoder: Encoder[OverlayMember] = Encoder.instance { m =>
+    Json.obj(
+      "name" -> Json.fromString(m.name),
+      "typeId" -> Json.fromString(m.typeId),
+      "isArray" -> Json.fromBoolean(m.isArray),
+      "arrayLength" -> m.arrayLength.fold(Json.Null)(Json.fromInt),
+      "isPointer" -> Json.fromBoolean(m.isPointer)
+    )
+  }
+
+  implicit val overlayStructDefDecoder: Decoder[OverlayStructDef] =
+    Decoder.instance(_.get[List[OverlayMember]]("members").map(OverlayStructDef.apply))
+
+  implicit val overlayStructDefEncoder: Encoder[OverlayStructDef] =
+    Encoder.instance(d => Json.obj("members" -> d.members.asJson))
+
+  implicit val overlayNewStructDecoder: Decoder[OverlayNewStruct] = Decoder.instance { c =>
+    for {
+      id <- c.get[String]("id")
+      members <- c.get[List[OverlayMember]]("members")
+    } yield OverlayNewStruct(id, members)
+  }
+
+  implicit val overlayNewStructEncoder: Encoder[OverlayNewStruct] = Encoder.instance { s =>
+    Json.obj("id" -> Json.fromString(s.id), "members" -> s.members.asJson)
+  }
+
+  implicit val documentDecoder: Decoder[TypeOverlayDocument] = Decoder.instance { c =>
+    for {
+      structs <- c.getOrElse[Map[String, OverlayStructDef]]("structs")(Map.empty)
+      newStructs <- c.getOrElse[List[OverlayNewStruct]]("newStructs")(Nil)
+    } yield TypeOverlayDocument(structs, newStructs)
+  }
+
+  implicit val documentEncoder: Encoder[TypeOverlayDocument] = Encoder.instance { d =>
+    Json.obj(
+      "structs" -> d.structs.asJson,
+      "newStructs" -> d.newStructs.asJson
+    )
+  }
+
+  def load(path: Path): Either[String, TypeOverlayDocument] =
+    if (!Files.exists(path)) Right(empty)
+    else {
+      val text = new String(Files.readAllBytes(path), StandardCharsets.UTF_8).trim
+      if (text.isEmpty) Right(empty)
+      else
+        parser.decode[TypeOverlayDocument](text).left.map(_.getMessage)
+    }
+
+  def save(path: Path, document: TypeOverlayDocument): Unit = {
+    Option(path.getParent).foreach { parent =>
+      if (!Files.exists(parent)) Files.createDirectories(parent)
+    }
+    Files.write(path, document.asJson.spaces2.getBytes(StandardCharsets.UTF_8))
+    ()
+  }
+}
+
+final case class TypeCatalogEntry(
+    id: String,
+    kind: String,
+    /** Member names (legacy summary). Prefer `fields` for full editor pre-population. */
+    members: Option[List[String]] = None,
+    fields: Option[List[OverlayMember]] = None
+)
+
+object TypeCatalogEntry {
+  implicit val encoder: Encoder[TypeCatalogEntry] = Encoder.instance { e =>
+    implicit val memberEncoder: Encoder[OverlayMember] =
+      TypeOverlayDocument.overlayMemberEncoder
+    Json.obj(
+      Seq(
+        Some("id" -> Json.fromString(e.id)),
+        Some("kind" -> Json.fromString(e.kind)),
+        e.members.map(ms => "members" -> ms.asJson),
+        e.fields.map(fs => "fields" -> fs.asJson)
+      ).flatten: _*
+    )
+  }
+}
+
+object TypeOverlay {
+  private val OverlayNamespace = "overlay"
+
+  private val PrimitiveByAlias: Map[String, IrPrimitive] = {
+    import IrPrimitive._
+    Map(
+      "u8" -> U8,
+      "uint8" -> U8,
+      "s8" -> S8,
+      "int8" -> S8,
+      "u16" -> U16,
+      "uint16" -> U16,
+      "s16" -> S16,
+      "int16" -> S16,
+      "u32" -> U32,
+      "uint32" -> U32,
+      "s32" -> S32,
+      "int32" -> S32,
+      "u64" -> U64,
+      "uint64" -> U64,
+      "s64" -> S64,
+      "int64" -> S64,
+      "u128" -> U128,
+      "s128" -> S128,
+      "f8" -> F8,
+      "f16" -> F16,
+      "f32" -> F32,
+      "float" -> F32,
+      "f64" -> F64,
+      "double" -> F64,
+      "char" -> Char,
+      "bool" -> Bool,
+      "boolean" -> Bool,
+      "longword" -> LongWord,
+      "pointer" -> LongWord
+    )
+  }
+
+  def isPrimitiveAlias(raw: String): Boolean =
+    PrimitiveByAlias.contains(raw.trim.toLowerCase)
+
+  def resolveTypeId(
+      typeId: String,
+      document: TypeOverlayDocument,
+      typeIndex: Map[ShapeId, IrType]
+  ): Either[String, IrType] = {
+    val raw = typeId.trim
+    if (raw.isEmpty) Left("typeId must be non-empty.")
+    else
+      PrimitiveByAlias.get(raw.toLowerCase) match {
+        case Some(primitive) =>
+          Right(IrType.Primitive(primitive))
+        case None =>
+          val shapeId =
+            try normalizeShapeId(raw)
+            catch {
+              case _: IllegalArgumentException =>
+                return Left(s"Invalid typeId '$typeId'.")
+            }
+          structDefFor(document, shapeId) match {
+            case Some(_) =>
+              Right(IrType.Ref(shapeId))
+            case None =>
+              typeIndex.get(shapeId) match {
+                case Some(found) => Right(found)
+                case None        =>
+                  typeIndex.collectFirst {
+                    case (id, tpe) if id.getName == raw => tpe
+                  } match {
+                    case Some(found) => Right(found)
+                    case None        => Left(s"Unknown typeId '$typeId'.")
+                  }
+              }
+          }
+      }
+  }
+
+  def normalizeShapeId(raw: String): ShapeId = {
+    val trimmed = raw.trim
+    if (trimmed.contains("#")) ShapeId.from(trimmed)
+    else ShapeId.from(s"$OverlayNamespace#$trimmed")
+  }
+
+  def validate(document: TypeOverlayDocument): Either[List[String], TypeOverlayDocument] = {
+    val errors = ListBuffer.empty[String]
+    document.structs.foreach { case (id, defn) =>
+      if (id.trim.isEmpty) errors += "Overlay struct key must be non-empty."
+      validateMembers(s"structs[$id]", defn.members, errors)
+    }
+    document.newStructs.zipWithIndex.foreach { case (ns, index) =>
+      if (ns.id.trim.isEmpty) errors += s"newStructs[$index].id must be non-empty."
+      validateMembers(s"newStructs[${ns.id}]", ns.members, errors)
+    }
+    val newIds = document.newStructs.map(_.id.trim).filter(_.nonEmpty)
+    if (newIds.distinct.size != newIds.size)
+      errors += "newStructs ids must be unique."
+    if (errors.nonEmpty) Left(errors.toList) else Right(document)
+  }
+
+  private def validateMembers(
+      context: String,
+      members: List[OverlayMember],
+      errors: ListBuffer[String]
+  ): Unit = {
+    if (members.isEmpty) errors += s"$context: must declare at least one member."
+    members.zipWithIndex.foreach { case (member, index) =>
+      if (member.name.trim.isEmpty)
+        errors += s"$context.members[$index].name must be non-empty."
+      if (member.typeId.trim.isEmpty)
+        errors += s"$context.members[$index].typeId must be non-empty."
+      if (member.isArray && member.arrayLength.forall(_ <= 0))
+        errors += s"$context.members[$index]: arrays require a positive arrayLength."
+    }
+    val names = members.map(_.name.trim).filter(_.nonEmpty)
+    if (names.distinct.size != names.size)
+      errors += s"$context: member names must be unique."
+  }
+
+  def buildTypeIndex(services: List[IrService]): Map[ShapeId, IrType] = {
+    val index = mutable.Map.empty[ShapeId, IrType]
+    def visit(tpe: IrType): Unit =
+      tpe match {
+        case s: IrType.Struct =>
+          if (!index.contains(s.id)) {
+            index(s.id) = s
+            s.members.foreach(m => visit(m.target))
+          }
+        case e: IrType.IntEnum =>
+          index(e.id) = e
+        case list: IrType.ListType =>
+          index(list.id) = list
+          visit(list.element)
+        case union: IrType.Union =>
+          index(union.id) = union
+          union.members.foreach(m => visit(m.target))
+        case mapType: IrType.MapType =>
+          index(mapType.id) = mapType
+          visit(mapType.key)
+          visit(mapType.value)
+        case IrType.Ref(id) =>
+          ()
+        case _ =>
+          ()
+      }
+    services.foreach { service =>
+      service.operations.foreach { op =>
+        visit(op.output)
+        op.pointerChain.foreach(pc => visit(pc.pointeeType))
+      }
+    }
+    index.toMap
+  }
+
+  def catalog(
+      services: List[IrService],
+      document: TypeOverlayDocument,
+      includeFields: Boolean = false
+  ): List[TypeCatalogEntry] = {
+    val index = buildTypeIndex(services)
+    val primitives =
+      PrimitiveByAlias.keys.toList.sorted.distinct.map(alias =>
+        TypeCatalogEntry(alias, "primitive")
+      )
+    val fromIndex = index.toList
+      .sortBy(_._1.toString)
+      .flatMap {
+        case (id, s: IrType.Struct) =>
+          val fields = s.members.map(catalogField)
+          Some(
+            TypeCatalogEntry(
+              id.toString,
+              "struct",
+              members = Some(fields.map(_.name)),
+              fields = if (includeFields) Some(fields) else None
+            )
+          )
+        case (id, _: IrType.IntEnum) =>
+          Some(TypeCatalogEntry(id.toString, "enum"))
+        case _ =>
+          None
+      }
+    val fromNew = document.newStructs.map { ns =>
+      TypeCatalogEntry(
+        normalizeShapeId(ns.id).toString,
+        "struct",
+        members = Some(ns.members.map(_.name)),
+        fields = if (includeFields) Some(ns.members) else None
+      )
+    }
+    primitives ++ fromIndex ++ fromNew
+  }
+
+  /** Full field list for one struct (source IR, overlay override, or newStruct). */
+  def fieldsFor(
+      services: List[IrService],
+      document: TypeOverlayDocument,
+      typeId: String
+  ): Option[List[OverlayMember]] = {
+    val trimmed = typeId.trim
+    if (trimmed.isEmpty) None
+    else {
+      val shapeIdOpt =
+        try
+          Some(
+            if (trimmed.contains("#")) ShapeId.from(trimmed)
+            else normalizeShapeId(trimmed)
+          )
+        catch {
+          case _: IllegalArgumentException => None
+        }
+      shapeIdOpt.flatMap { shapeId =>
+        structDefFor(document, shapeId)
+          .map(_.members)
+          .orElse {
+            val index = buildTypeIndex(services)
+            resolveIndexedStruct(trimmed, index).map(_.members.map(catalogField))
+          }
+      }
+    }
+  }
+
+  def rootTypeKey(irType: IrType): String =
+    irType match {
+      case s: IrType.Struct       => s.id.toString
+      case e: IrType.IntEnum      => e.id.toString
+      case list: IrType.ListType  => s"list:${rootTypeKey(list.element)}"
+      case IrType.Ref(id)         => id.toString
+      case IrType.Primitive(kind) => primitiveAlias(kind)
+      case other                  => other.toString
+    }
+
+  private def resolveIndexedStruct(
+      raw: String,
+      index: Map[ShapeId, IrType]
+  ): Option[IrType.Struct] = {
+    val byFull =
+      try index.get(ShapeId.from(raw)).collect { case s: IrType.Struct => s }
+      catch { case _: IllegalArgumentException => None }
+    byFull
+      .orElse {
+        val normalized = normalizeShapeId(raw)
+        index.get(normalized).collect { case s: IrType.Struct => s }
+      }
+      .orElse {
+        index.collectFirst {
+          case (id, s: IrType.Struct) if id.getName == raw => s
+        }
+      }
+  }
+
+  private def catalogField(member: IrMember): OverlayMember = {
+    val (typeId, elementIsArray) = typeIdForTarget(member)
+    OverlayMember(
+      name = member.name,
+      typeId = typeId,
+      isArray = member.isArray || elementIsArray,
+      arrayLength = member.arrayLength,
+      isPointer = member.isPointer
+    )
+  }
+
+  /** Returns (typeId, alreadyCountedAsArrayFromListType). */
+  private def typeIdForTarget(member: IrMember): (String, Boolean) = {
+    member.primitiveOverride
+      .map(p => (primitiveAlias(p), false))
+      .getOrElse {
+        member.target match {
+          case IrType.Primitive(kind) =>
+            (primitiveAlias(kind), false)
+          case e: IrType.IntEnum =>
+            (e.id.toString, false)
+          case s: IrType.Struct =>
+            (s.id.toString, false)
+          case IrType.Ref(id) =>
+            (id.toString, false)
+          case list: IrType.ListType =>
+            val elementId = list.element match {
+              case IrType.Primitive(kind) => primitiveAlias(kind)
+              case e: IrType.IntEnum      => e.id.toString
+              case s: IrType.Struct       => s.id.toString
+              case IrType.Ref(id)         => id.toString
+              case other                  => other.toString
+            }
+            (elementId, true)
+          case fp: IrType.FunctionPointer =>
+            (s"fn:${fp.name}", false)
+          case other =>
+            (other.toString, false)
+        }
+      }
+  }
+
+  private def primitiveAlias(kind: IrPrimitive): String = {
+    import IrPrimitive._
+    kind match {
+      case U8       => "u8"
+      case S8       => "s8"
+      case U16      => "u16"
+      case S16      => "s16"
+      case U32      => "u32"
+      case S32      => "s32"
+      case U64      => "u64"
+      case S64      => "s64"
+      case U128     => "u128"
+      case S128     => "s128"
+      case F8       => "f8"
+      case F16      => "f16"
+      case F32      => "f32"
+      case F64      => "f64"
+      case Char     => "char"
+      case Bool     => "bool"
+      case LongWord => "longWord"
+    }
+  }
+
+  def affectsDecode(
+      irType: IrType,
+      document: TypeOverlayDocument,
+      typeIndex: Map[ShapeId, IrType]
+  ): Boolean =
+    document.structs.nonEmpty &&
+      collectStructIds(irType, typeIndex).exists(id => document.structs.contains(id.toString))
+
+  def rewriteType(
+      irType: IrType,
+      document: TypeOverlayDocument,
+      typeIndex: Map[ShapeId, IrType],
+      wordSize: Option[Int] = None
+  ): Either[List[String], IrType] = {
+    val errors = ListBuffer.empty[String]
+    val rewritten =
+      rewriteTypeInner(irType, document, typeIndex, Set.empty, errors, wordSize)
+    if (errors.nonEmpty) Left(errors.toList.distinct) else Right(rewritten)
+  }
+
+  def compileOverlayCodec(
+      irType: IrType,
+      document: TypeOverlayDocument,
+      typeIndex: Map[ShapeId, IrType],
+      endian: IrEndian,
+      wordSize: Option[Int]
+  ): Either[List[String], (IrType, Codec[Json], Int)] =
+    for {
+      rewritten <- rewriteType(irType, document, typeIndex, wordSize)
+      codec <- HttpRouteIrEmitter.compileCodec(rewritten, endian, wordSize)
+      sizeBytes <- HttpRouteIrEmitter.sizeBytesForType(rewritten, wordSize)
+    } yield (rewritten, codec, sizeBytes)
+
+  def structDefFor(
+      document: TypeOverlayDocument,
+      shapeId: ShapeId
+  ): Option[OverlayStructDef] =
+    document.structs
+      .get(shapeId.toString)
+      .orElse(document.structs.get(shapeId.getName))
+      .orElse {
+        document.newStructs
+          .find { ns =>
+            val nid = normalizeShapeId(ns.id)
+            nid == shapeId || ns.id == shapeId.toString || ns.id == shapeId.getName
+          }
+          .map(ns => OverlayStructDef(ns.members))
+      }
+
+  private def collectStructIds(
+      irType: IrType,
+      typeIndex: Map[ShapeId, IrType],
+      seen: Set[ShapeId] = Set.empty
+  ): Set[ShapeId] =
+    irType match {
+      case s: IrType.Struct if seen.contains(s.id) =>
+        seen
+      case s: IrType.Struct =>
+        s.members.foldLeft(seen + s.id) { (acc, member) =>
+          collectStructIds(member.target, typeIndex, acc)
+        }
+      case IrType.Ref(id) if seen.contains(id) =>
+        seen
+      case IrType.Ref(id) =>
+        typeIndex.get(id) match {
+          case Some(resolved) => collectStructIds(resolved, typeIndex, seen + id)
+          case None           => seen + id
+        }
+      case list: IrType.ListType =>
+        collectStructIds(list.element, typeIndex, seen)
+      case _ =>
+        seen
+    }
+
+  private def rewriteTypeInner(
+      irType: IrType,
+      document: TypeOverlayDocument,
+      typeIndex: Map[ShapeId, IrType],
+      resolving: Set[ShapeId],
+      errors: ListBuffer[String],
+      wordSize: Option[Int]
+  ): IrType =
+    irType match {
+      case IrType.Ref(id) =>
+        if (resolving.contains(id)) IrType.Ref(id)
+        else
+          typeIndex.get(id) match {
+            case Some(resolved) =>
+              rewriteTypeInner(resolved, document, typeIndex, resolving, errors, wordSize)
+            case None =>
+              structDefFor(document, id) match {
+                case Some(defn) =>
+                  buildOverlayStruct(id, defn, document, typeIndex, resolving, errors, wordSize)
+                case None =>
+                  errors += s"Unresolved type reference: $id"
+                  IrType.Ref(id)
+              }
+          }
+      case s: IrType.Struct =>
+        if (resolving.contains(s.id)) IrType.Ref(s.id)
+        else
+          structDefFor(document, s.id) match {
+            case Some(defn) =>
+              buildOverlayStruct(s.id, defn, document, typeIndex, resolving, errors, wordSize)
+            case None =>
+              val rewrittenMembers = s.members.map { member =>
+                member.copy(
+                  target = rewriteTypeInner(
+                    member.target,
+                    document,
+                    typeIndex,
+                    resolving + s.id,
+                    errors,
+                    wordSize
+                  )
+                )
+              }
+              copyStruct(s, rewrittenMembers)
+          }
+      case list: IrType.ListType =>
+        list.copy(
+          element = rewriteTypeInner(list.element, document, typeIndex, resolving, errors, wordSize)
+        )
+      case other =>
+        other
+    }
+
+  private def buildOverlayStruct(
+      id: ShapeId,
+      defn: OverlayStructDef,
+      document: TypeOverlayDocument,
+      typeIndex: Map[ShapeId, IrType],
+      resolving: Set[ShapeId],
+      errors: ListBuffer[String],
+      wordSize: Option[Int]
+  ): IrType.MemoryMappedStruct = {
+    val nextResolving = resolving + id
+    val unresolved = defn.members.flatMap { overlayMember =>
+      resolveMemberType(overlayMember, document, typeIndex, nextResolving, errors, wordSize).map {
+        case (target, primitiveOverride) =>
+          val listTarget =
+            if (overlayMember.isArray && !overlayMember.isPointer) {
+              IrType.ListType(
+                id = ShapeId.from(s"${id.getNamespace}#${id.getName}_${overlayMember.name}_list"),
+                element = target,
+                bytesAlias = false,
+                bitsAlias = false
+              )
+            } else target
+          IrMember(
+            id = ShapeId.from(s"${id.getNamespace}#${id.getName}_${overlayMember.name}"),
+            name = overlayMember.name,
+            target = listTarget,
+            staticAddress = None,
+            paddingRepeats = None,
+            isPointer = overlayMember.isPointer,
+            isArray = overlayMember.isArray,
+            arrayLength = overlayMember.arrayLength,
+            endianOverride = None,
+            primitiveOverride = primitiveOverride,
+            readSizeBytes = None,
+            unionGroup = None,
+            layoutBitWidth = None,
+            offsetBytes = None
+          )
+      }
+    }
+    if (unresolved.size != defn.members.size && errors.isEmpty)
+      errors += s"$id: failed to resolve one or more overlay members (index may help)."
+    // DESNOTE(jbarber, 2026-07-20): Overlay layouts drop source offsets/declared sizes and
+    // rebuild via IrLayout (shared with C/Smithy IR). A u8 at 0x18 followed by a pointer still
+    // leaves the ABI gap before 0x1C. Removing an explicit pad field still lets a widened prior
+    // field absorb those bytes when the new types pack without an alignment gap.
+    // See https://refspecs.linuxfoundation.org/elf/ppc-elf-psABI-1.7.pdf
+    IrLayout.packMembers(unresolved, wordSize) match {
+      case Left(errs) =>
+        errors ++= errs
+        IrType.MemoryMappedStruct(id = id, members = unresolved, declaredSizeBits = None)
+      case Right((members, sizeof)) =>
+        IrType.MemoryMappedStruct(
+          id = id,
+          members = members,
+          declaredSizeBits = Some(sizeof)
+        )
+    }
+  }
+
+  private def resolveMemberType(
+      member: OverlayMember,
+      document: TypeOverlayDocument,
+      typeIndex: Map[ShapeId, IrType],
+      resolving: Set[ShapeId],
+      errors: ListBuffer[String],
+      wordSize: Option[Int]
+  ): Option[(IrType, Option[IrPrimitive])] = {
+    val raw = member.typeId.trim
+    PrimitiveByAlias.get(raw.toLowerCase) match {
+      case Some(primitive) =>
+        Some((IrType.Primitive(primitive), None))
+      case None =>
+        val shapeIdOpt =
+          try Some(normalizeShapeId(raw))
+          catch {
+            case _: IllegalArgumentException =>
+              errors += s"Invalid typeId '${member.typeId}'."
+              None
+          }
+        shapeIdOpt.flatMap { shapeId =>
+          if (resolving.contains(shapeId)) {
+            Some((IrType.Ref(shapeId), None))
+          } else
+            structDefFor(document, shapeId) match {
+              case Some(defn) =>
+                Some(
+                  (
+                    buildOverlayStruct(
+                      shapeId,
+                      defn,
+                      document,
+                      typeIndex,
+                      resolving,
+                      errors,
+                      wordSize
+                    ),
+                    None
+                  )
+                )
+              case None =>
+                typeIndex.get(shapeId) match {
+                  case Some(found) =>
+                    Some(
+                      (
+                        rewriteTypeInner(
+                          found,
+                          document,
+                          typeIndex,
+                          resolving,
+                          errors,
+                          wordSize
+                        ),
+                        None
+                      )
+                    )
+                  case None =>
+                    typeIndex.collectFirst {
+                      case (id, tpe) if id.getName == raw => tpe
+                    } match {
+                      case Some(found) =>
+                        Some(
+                          (
+                            rewriteTypeInner(
+                              found,
+                              document,
+                              typeIndex,
+                              resolving,
+                              errors,
+                              wordSize
+                            ),
+                            None
+                          )
+                        )
+                      case None =>
+                        errors += s"Unknown typeId '${member.typeId}'."
+                        None
+                    }
+                }
+            }
+        }
+    }
+  }
+
+  private def copyStruct(struct: IrType.Struct, members: List[IrMember]): IrType.Struct =
+    struct match {
+      case b: IrType.Bitmask =>
+        b.copy(members = members)
+      case m: IrType.MemoryMappedStruct =>
+        m.copy(members = members)
+      case e: IrType.EnclosingStruct =>
+        e.copy(members = members)
+    }
+}

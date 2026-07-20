@@ -27,6 +27,8 @@ Server subcommands (`smithy`, `cheaders`) share these flags:
 - `--dap-connect-timeout-ms` (default `1000`) — TCP connect timeout per DAP attempt
 - `--dap-connect-retry-ms` (default `5000`) — delay between DAP connect attempts at startup
 - `--bind-host` / `--bind-port` (default `0.0.0.0:8080`) — HTTP server bind address
+- `--overlays <path>` (optional) — load/save client type reinterpretation overlays (JSON).
+  The UI editor `PUT`s overlays here so reinterpretations survive restarts.
 
 `smithy` also supports `--watch` to reload models when files change.
 
