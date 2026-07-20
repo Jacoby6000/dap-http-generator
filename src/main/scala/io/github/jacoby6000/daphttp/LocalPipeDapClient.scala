@@ -2,6 +2,7 @@ package io.github.jacoby6000.daphttp
 
 import cats.effect.IO
 import cats.effect.Resource
+import cats.effect.std.Mutex
 import io.circe.Json
 
 import java.io.BufferedInputStream
@@ -32,6 +33,16 @@ private[daphttp] final class LocalPipeDapClient(
   private val connectionLock = new AnyRef
   private var ownedSession: Option[OwnedSession] = None
 
+  // DESNOTE(jbarber, 2026-07-19): Serialize all DAP framing I/O on this client. Unlike
+  // SocketDapClient (which holds a JVM monitor across the request), pipe sessions are driven by
+  // cats-effect IO; Mutex.lock is cancelation-safe and matches TCP's one-in-flight request rule.
+  // See https://typelevel.org/cats-effect/docs/std/mutex
+  private val sessionMutex: Mutex[IO] =
+    Mutex[IO].unsafeRunSync()(cats.effect.unsafe.IORuntime.global)
+
+  private def withSessionLock[A](fa: IO[A]): IO[A] =
+    sessionMutex.lock.surround(fa)
+
   private[daphttp] def isConnected: Boolean =
     connectionLock.synchronized(ownedSession.exists(_.session.isOpen))
 
@@ -41,7 +52,7 @@ private[daphttp] final class LocalPipeDapClient(
         case true =>
           IO.sleep(dapConnectRetryMs.millis) *> maintainConnection
         case false =>
-          tryEstablishSession.flatMap {
+          withSessionLock(tryEstablishSessionUnlocked).flatMap {
             case Right(_) =>
               DapHttpLoggers.dap.info("DAP session ready pipe={}", path)
               IO.sleep(dapConnectRetryMs.millis) *> maintainConnection
@@ -59,44 +70,46 @@ private[daphttp] final class LocalPipeDapClient(
   }
 
   override def readMemory(address: Long, sizeBytes: Int): IO[Either[String, String]] =
-    withPersistentSession(dapTimeoutMs) { activeSession =>
-      DapHttpLoggers.dap.debug(
-        "readMemory pipe={} address=0x{} bytes={}",
-        path,
-        java.lang.Long.toHexString(address),
-        Integer.valueOf(sizeBytes)
-      )
-      activeSession
-        .sendRequest(
-          command = "readMemory",
-          arguments = Some(
-            Json.obj(
-              "memoryReference" -> Json.fromString(f"0x$address%x"),
-              "count" -> Json.fromInt(sizeBytes)
+    withSessionLock {
+      withPersistentSession(dapTimeoutMs) { activeSession =>
+        DapHttpLoggers.dap.debug(
+          "readMemory pipe={} address=0x{} bytes={}",
+          path,
+          java.lang.Long.toHexString(address),
+          Integer.valueOf(sizeBytes)
+        )
+        activeSession
+          .sendRequest(
+            command = "readMemory",
+            arguments = Some(
+              Json.obj(
+                "memoryReference" -> Json.fromString(f"0x$address%x"),
+                "count" -> Json.fromInt(sizeBytes)
+              )
             )
           )
-        )
-        .flatMap { body =>
-          body.hcursor
-            .downField("data")
-            .as[String]
-            .toOption
-            .toRight("DAP readMemory response did not include body.data.")
-        } match {
-        case Right(value) =>
-          DapHttpLoggers.dap.debug(
-            "readMemory address=0x{} succeeded bytes={}",
-            java.lang.Long.toHexString(address),
-            Integer.valueOf(sizeBytes)
-          )
-          Right(value)
-        case Left(error) =>
-          DapHttpLoggers.dap.warn(
-            "readMemory address=0x{} failed: {}",
-            java.lang.Long.toHexString(address),
-            error
-          )
-          Left(error)
+          .flatMap { body =>
+            body.hcursor
+              .downField("data")
+              .as[String]
+              .toOption
+              .toRight("DAP readMemory response did not include body.data.")
+          } match {
+          case Right(value) =>
+            DapHttpLoggers.dap.debug(
+              "readMemory address=0x{} succeeded bytes={}",
+              java.lang.Long.toHexString(address),
+              Integer.valueOf(sizeBytes)
+            )
+            Right(value)
+          case Left(error) =>
+            DapHttpLoggers.dap.warn(
+              "readMemory address=0x{} failed: {}",
+              java.lang.Long.toHexString(address),
+              error
+            )
+            Left(error)
+        }
       }
     }.handleError { error =>
       DapHttpLoggers.dap.warn(
@@ -108,8 +121,8 @@ private[daphttp] final class LocalPipeDapClient(
     }
 
   override def continueExecution(): IO[Either[String, Json]] =
-    ensureSession
-      .flatMap { activeSession =>
+    withSessionLock {
+      ensureSession.flatMap { activeSession =>
         val threadIdIO =
           IO.interruptible(activeSession.sendRequest(command = "threads", arguments = None))
             .timeout(math.min(dapTimeoutMs, 2000).millis)
@@ -143,10 +156,10 @@ private[daphttp] final class LocalPipeDapClient(
           }.timeout(dapContinueTimeoutMs.millis)
         }
       }
-      .handleErrorWith { error =>
-        DapHttpLoggers.dap.warn("continue failed: {}", error.getMessage)
-        invalidateSession.as(Left(error.getMessage))
-      }
+    }.handleErrorWith { error =>
+      DapHttpLoggers.dap.warn("continue failed: {}", error.getMessage)
+      withSessionLock(invalidateSession).as(Left(error.getMessage))
+    }
 
   private def withPersistentSession[A](timeoutMs: Int)(f: DapStreamSession => A): IO[A] = {
     def run(retrying: Boolean): IO[A] =
@@ -188,7 +201,7 @@ private[daphttp] final class LocalPipeDapClient(
         }
     }
 
-  private def tryEstablishSession: IO[Either[String, Unit]] =
+  private def tryEstablishSessionUnlocked: IO[Either[String, Unit]] =
     IO.delay {
       connectionLock.synchronized(ownedSession.exists(_.session.isOpen))
     }.flatMap {

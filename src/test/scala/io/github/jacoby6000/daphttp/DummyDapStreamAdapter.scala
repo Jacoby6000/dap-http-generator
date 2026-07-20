@@ -13,7 +13,8 @@ import java.util.Base64
 final class DummyDapStreamAdapter(
     in: InputStream,
     out: OutputStream,
-    payloads: Map[(Long, Int), Array[Byte]]
+    payloads: Map[(Long, Int), Array[Byte]],
+    closeAfterReadMemory: Boolean = true
 ) {
   private val bufferedIn = new BufferedInputStream(in)
   private val bufferedOut = new BufferedOutputStream(out)
@@ -54,13 +55,15 @@ final class DummyDapStreamAdapter(
               val data = address.flatMap(addr => count.flatMap(c => payloads.get((addr, c))))
               data match {
                 case Some(bytes) =>
+                  // Small delay so concurrent clients can overlap without serialization.
+                  Thread.sleep(30L)
                   writeResponse(
                     bufferedOut,
                     requestSeq,
                     "readMemory",
                     Json.obj("data" -> Json.fromString(Base64.getEncoder.encodeToString(bytes)))
                   )
-                  keepReading = false
+                  if (closeAfterReadMemory) keepReading = false
                 case None =>
                   writeFailure(bufferedOut, requestSeq, "readMemory", "missing payload")
                   keepReading = false

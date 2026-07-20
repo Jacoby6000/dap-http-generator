@@ -1,5 +1,6 @@
 package io.github.jacoby6000.daphttp
 
+import cats.syntax.all._
 import org.scalatest.funsuite.AnyFunSuite
 
 import java.net.StandardProtocolFamily
@@ -13,7 +14,10 @@ import java.util.concurrent.TimeUnit
 
 class DapTransportSpec extends AnyFunSuite {
   private val payloads: Map[(Long, Int), Array[Byte]] =
-    Map((0x1000L, 2) -> Array(0x34.toByte, 0x12.toByte))
+    Map(
+      (0x1000L, 2) -> Array(0x34.toByte, 0x12.toByte),
+      (0x2000L, 2) -> Array(0x78.toByte, 0x56.toByte)
+    )
 
   test("LocalPipeDapClient speaks DAP over a Unix domain socket path") {
     val dir = Files.createTempDirectory("dap-unix")
@@ -100,6 +104,58 @@ class DapTransportSpec extends AnyFunSuite {
     server.close()
     val _ = Files.deleteIfExists(sockPath)
     val _ = Files.deleteIfExists(dir)
+  }
+
+  test("LocalPipeDapClient serializes concurrent DAP requests") {
+    val dir = Files.createTempDirectory("dap-unix-serial")
+    val sockPath = dir.resolve("dap.sock")
+    val server = ServerSocketChannel.open(StandardProtocolFamily.UNIX)
+    server.bind(UnixDomainSocketAddress.of(sockPath))
+
+    val started = new CountDownLatch(1)
+    val adapterThread = new Thread(
+      () => {
+        started.countDown()
+        val peer = server.accept()
+        try {
+          new DummyDapStreamAdapter(
+            Channels.newInputStream(peer),
+            Channels.newOutputStream(peer),
+            payloads,
+            closeAfterReadMemory = false
+          ).serveUntilClosed()
+        } finally {
+          peer.close()
+        }
+      },
+      "dummy-unix-serial-adapter"
+    )
+    adapterThread.setDaemon(true)
+    adapterThread.start()
+
+    assert(started.await(5, TimeUnit.SECONDS))
+    val client = new LocalPipeDapClient(sockPath, dapConnectRetryMs = 100)
+    try {
+      client.startConnectionManager().unsafeRunSync()(cats.effect.unsafe.IORuntime.global)
+      eventuallyConnected(client)
+
+      val results = (client.readMemory(0x1000L, 2), client.readMemory(0x2000L, 2)).parTupled
+        .unsafeRunSync()(cats.effect.unsafe.IORuntime.global)
+
+      assert(results._1.isRight, results._1)
+      assert(results._2.isRight, results._2)
+      assert(
+        Base64.getDecoder.decode(results._1.toOption.get).toSeq == Seq(0x34.toByte, 0x12.toByte)
+      )
+      assert(
+        Base64.getDecoder.decode(results._2.toOption.get).toSeq == Seq(0x78.toByte, 0x56.toByte)
+      )
+    } finally {
+      server.close()
+      adapterThread.join(2000L)
+      val _ = Files.deleteIfExists(sockPath)
+      val _ = Files.deleteIfExists(dir)
+    }
   }
 
   test("DapClients.create selects LocalPipeDapClient for --dap-pipe paths") {
