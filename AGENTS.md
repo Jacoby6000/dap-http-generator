@@ -39,6 +39,8 @@ Run with `sbt "run <subcommand> ..."`. Standard build/lint/test commands are doc
 - TCP client: `DapHttpServerMain.SocketDapClient`. Pipe/socket client: `LocalPipeDapClient`.
 - Sessions are persistent, handshake with DAP `initialize`, serialize concurrent requests, and
   skip non-matching DAP events until the matching `response` arrives.
+- `LocalPipeDapClient` opens the pipe/socket under cats-effect `Resource` so failed handshakes
+  always close the connection; read/continue/connect use `IO.interruptible` + `IO.timeout`.
 - We are always a **client** to an adapter-owned endpoint (never create the pipe/socket).
   `--dap-pipe` matches VS Code's "named pipe" path convention: AF_UNIX connect on Unix
   (dolphin-dap `DAPSocket`), `RandomAccessFile(..., "rw")` for Windows `\\.\pipe\Name`.

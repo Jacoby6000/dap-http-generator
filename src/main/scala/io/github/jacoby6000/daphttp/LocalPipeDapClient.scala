@@ -1,6 +1,7 @@
 package io.github.jacoby6000.daphttp
 
 import cats.effect.IO
+import cats.effect.Resource
 import io.circe.Json
 
 import java.io.BufferedInputStream
@@ -15,6 +16,7 @@ import java.nio.channels.Channels
 import java.nio.channels.SocketChannel
 import java.nio.charset.StandardCharsets
 import java.nio.file.Path
+import java.util.concurrent.atomic.AtomicBoolean
 import scala.concurrent.duration._
 
 /** Client for an existing local DAP endpoint: Windows named pipe or Unix domain socket. */
@@ -22,22 +24,24 @@ private[daphttp] final class LocalPipeDapClient(
     path: Path,
     dapTimeoutMs: Int = 5000,
     dapContinueTimeoutMs: Int = 30000,
+    dapConnectTimeoutMs: Int = 1000,
     dapConnectRetryMs: Int = 5000
 ) extends DapHttpServerMain.DapClient {
+  private final class OwnedSession(val session: DapStreamSession, val release: IO[Unit])
+
   private val connectionLock = new AnyRef
-  private var session: Option[DapStreamSession] = None
-  private var closeables: List[Closeable] = Nil
+  private var ownedSession: Option[OwnedSession] = None
 
   private[daphttp] def isConnected: Boolean =
-    connectionLock.synchronized(session.exists(_.isOpen))
+    connectionLock.synchronized(ownedSession.exists(_.session.isOpen))
 
   override def startConnectionManager(): IO[Unit] = {
     def maintainConnection: IO[Unit] =
-      IO.blocking(isConnected).flatMap {
+      IO.delay(isConnected).flatMap {
         case true =>
           IO.sleep(dapConnectRetryMs.millis) *> maintainConnection
         case false =>
-          IO.blocking(tryEstablishSession()) flatMap {
+          tryEstablishSession.flatMap {
             case Right(_) =>
               DapHttpLoggers.dap.info("DAP session ready pipe={}", path)
               IO.sleep(dapConnectRetryMs.millis) *> maintainConnection
@@ -55,47 +59,44 @@ private[daphttp] final class LocalPipeDapClient(
   }
 
   override def readMemory(address: Long, sizeBytes: Int): IO[Either[String, String]] =
-    IO.blocking {
+    withPersistentSession(dapTimeoutMs) { activeSession =>
       DapHttpLoggers.dap.debug(
         "readMemory pipe={} address=0x{} bytes={}",
         path,
         java.lang.Long.toHexString(address),
         Integer.valueOf(sizeBytes)
       )
-
-      withPersistentSession { activeSession =>
-        activeSession
-          .sendRequest(
-            command = "readMemory",
-            arguments = Some(
-              Json.obj(
-                "memoryReference" -> Json.fromString(f"0x$address%x"),
-                "count" -> Json.fromInt(sizeBytes)
-              )
+      activeSession
+        .sendRequest(
+          command = "readMemory",
+          arguments = Some(
+            Json.obj(
+              "memoryReference" -> Json.fromString(f"0x$address%x"),
+              "count" -> Json.fromInt(sizeBytes)
             )
           )
-          .flatMap { body =>
-            body.hcursor
-              .downField("data")
-              .as[String]
-              .toOption
-              .toRight("DAP readMemory response did not include body.data.")
-          } match {
-          case Right(value) =>
-            DapHttpLoggers.dap.debug(
-              "readMemory address=0x{} succeeded bytes={}",
-              java.lang.Long.toHexString(address),
-              Integer.valueOf(sizeBytes)
-            )
-            Right(value)
-          case Left(error) =>
-            DapHttpLoggers.dap.warn(
-              "readMemory address=0x{} failed: {}",
-              java.lang.Long.toHexString(address),
-              error
-            )
-            Left(error)
-        }
+        )
+        .flatMap { body =>
+          body.hcursor
+            .downField("data")
+            .as[String]
+            .toOption
+            .toRight("DAP readMemory response did not include body.data.")
+        } match {
+        case Right(value) =>
+          DapHttpLoggers.dap.debug(
+            "readMemory address=0x{} succeeded bytes={}",
+            java.lang.Long.toHexString(address),
+            Integer.valueOf(sizeBytes)
+          )
+          Right(value)
+        case Left(error) =>
+          DapHttpLoggers.dap.warn(
+            "readMemory address=0x{} failed: {}",
+            java.lang.Long.toHexString(address),
+            error
+          )
+          Left(error)
       }
     }.handleError { error =>
       DapHttpLoggers.dap.warn(
@@ -107,119 +108,146 @@ private[daphttp] final class LocalPipeDapClient(
     }
 
   override def continueExecution(): IO[Either[String, Json]] =
-    IO.blocking {
-      DapHttpLoggers.dap.info("continue pipe={}", path)
-      val _ = dapContinueTimeoutMs
-      withPersistentSession { activeSession =>
-        val threadId =
-          activeSession
-            .trySendRequest(
-              command = "threads",
-              arguments = None,
-              requestTimeoutMs = math.min(dapTimeoutMs, 2000)
-            )
-            .flatMap(json => parseThreadIds(json).headOption)
-            .getOrElse {
+    ensureSession
+      .flatMap { activeSession =>
+        val threadIdIO =
+          IO.interruptible(activeSession.sendRequest(command = "threads", arguments = None))
+            .timeout(math.min(dapTimeoutMs, 2000).millis)
+            .map(_.toOption.flatMap(json => parseThreadIds(json).headOption).getOrElse(1))
+            .handleError { _ =>
               DapHttpLoggers.dap.debug("threads unavailable; continuing with threadId=1")
               1
             }
 
-        activeSession
-          .sendRequest(
-            command = "continue",
-            arguments = Some(Json.obj("threadId" -> Json.fromInt(threadId)))
-          )
-          .map { response =>
-            DapHttpLoggers.dap.info("continue threadId={} succeeded", Integer.valueOf(threadId))
-            response
-          }
-          .left
-          .map { error =>
-            DapHttpLoggers.dap.warn(
-              "continue threadId={} failed: {}",
-              Integer.valueOf(threadId),
-              error
-            )
-            error
-          }
+        threadIdIO.flatMap { threadId =>
+          DapHttpLoggers.dap.info("continue pipe={}", path)
+          IO.interruptible {
+            activeSession
+              .sendRequest(
+                command = "continue",
+                arguments = Some(Json.obj("threadId" -> Json.fromInt(threadId)))
+              )
+              .map { response =>
+                DapHttpLoggers.dap.info("continue threadId={} succeeded", Integer.valueOf(threadId))
+                response
+              }
+              .left
+              .map { error =>
+                DapHttpLoggers.dap.warn(
+                  "continue threadId={} failed: {}",
+                  Integer.valueOf(threadId),
+                  error
+                )
+                error
+              }
+          }.timeout(dapContinueTimeoutMs.millis)
+        }
       }
-    }.handleError { error =>
-      DapHttpLoggers.dap.warn("continue failed: {}", error.getMessage)
-      Left(error.getMessage)
-    }
+      .handleErrorWith { error =>
+        DapHttpLoggers.dap.warn("continue failed: {}", error.getMessage)
+        invalidateSession.as(Left(error.getMessage))
+      }
 
-  private def withPersistentSession[A](f: DapStreamSession => A): A = {
-    def run(retrying: Boolean): A =
-      connectionLock.synchronized {
-        val activeSession = ensureSession()
-        try {
-          f(activeSession)
-        } catch {
-          case error: Exception =>
+  private def withPersistentSession[A](timeoutMs: Int)(f: DapStreamSession => A): IO[A] = {
+    def run(retrying: Boolean): IO[A] =
+      ensureSession.flatMap { activeSession =>
+        IO.interruptible(f(activeSession))
+          .timeout(timeoutMs.millis)
+          .handleErrorWith { error =>
             DapHttpLoggers.dap.warn(
               "DAP pipe connection error (retrying={}): {}",
               java.lang.Boolean.valueOf(!retrying),
               error.getMessage
             )
-            invalidateSession()
-            if (!retrying) run(retrying = true)
-            else throw error
-        }
+            invalidateSession *> {
+              if (!retrying) run(retrying = true)
+              else IO.raiseError(error)
+            }
+          }
       }
 
     run(retrying = false)
   }
 
-  private def ensureSession(): DapStreamSession =
-    connectionLock.synchronized {
-      session.filter(_.isOpen) match {
-        case Some(activeSession) =>
-          activeSession
-        case None =>
-          establishSession() match {
-            case Right(activeSession) =>
-              session = Some(activeSession)
-              activeSession
-            case Left(error) =>
-              throw new java.io.IOException(error)
-          }
-      }
+  private def ensureSession: IO[DapStreamSession] =
+    IO.delay {
+      connectionLock.synchronized(ownedSession.filter(_.session.isOpen))
+    }.flatMap {
+      case Some(owned) => IO.pure(owned.session)
+      case None        =>
+        establishSession.flatMap {
+          case Right(owned) =>
+            IO.delay {
+              connectionLock.synchronized {
+                ownedSession = Some(owned)
+              }
+              owned.session
+            }
+          case Left(error) =>
+            IO.raiseError(new java.io.IOException(error))
+        }
     }
 
-  private def tryEstablishSession(): Either[String, Unit] =
-    connectionLock.synchronized {
-      session.filter(_.isOpen) match {
-        case Some(_) => Right(())
-        case None    =>
-          establishSession().map { activeSession =>
-            session = Some(activeSession)
-          }
-      }
+  private def tryEstablishSession: IO[Either[String, Unit]] =
+    IO.delay {
+      connectionLock.synchronized(ownedSession.exists(_.session.isOpen))
+    }.flatMap {
+      case true  => IO.pure(Right(()))
+      case false =>
+        establishSession.flatMap {
+          case Right(owned) =>
+            IO.delay {
+              connectionLock.synchronized {
+                ownedSession = Some(owned)
+              }
+              Right(())
+            }
+          case Left(error) => IO.pure(Left(error))
+        }
     }
 
-  private def establishSession(): Either[String, DapStreamSession] = {
+  // DESNOTE(jbarber, 2026-07-19): Open + initialize under Resource so a failed handshake always
+  // closes the pipe/socket. On success, Resource.allocated transfers ownership to OwnedSession;
+  // invalidateSession runs the finalizer later.
+  private def establishSession: IO[Either[String, OwnedSession]] = {
     DapHttpLoggers.dap.info("connecting DAP session pipe={}", path)
-    try {
-      val opened = openStreams(path)
-      closeables = opened.closeables
-      val activeSession = new DapStreamSession(opened.in, opened.out, () => opened.close())
-      activeSession.initialize().map(_ => activeSession)
-    } catch {
-      case error: Exception =>
-        invalidateSession()
-        Left(error.getMessage)
+    openInitializedSession.attempt.map {
+      case Right((activeSession, release)) =>
+        Right(new OwnedSession(activeSession, release.handleErrorWith(_ => IO.unit)))
+      case Left(error) =>
+        Left(Option(error.getMessage).getOrElse(error.toString))
     }
   }
 
-  private def invalidateSession(): Unit =
-    connectionLock.synchronized {
-      session.foreach(_.close())
-      session = None
-      closeables.foreach { c =>
-        try c.close()
-        catch { case _: Exception => () }
+  private def openInitializedSession: IO[(DapStreamSession, IO[Unit])] =
+    Resource
+      .make(openStreamsIO)(opened => IO.blocking(opened.close()))
+      .evalMap { opened =>
+        IO.interruptible {
+          val activeSession = new DapStreamSession(opened.in, opened.out)
+          activeSession.initialize() match {
+            case Right(_)  => activeSession
+            case Left(err) => throw new IllegalStateException(err)
+          }
+        }.timeout(dapTimeoutMs.millis)
       }
-      closeables = Nil
+      .allocated
+
+  private def openStreamsIO: IO[OpenedStreams] =
+    IO.interruptible(openStreams(path)).timeout(dapConnectTimeoutMs.millis)
+
+  private def invalidateSession: IO[Unit] =
+    IO.delay {
+      connectionLock.synchronized {
+        val current = ownedSession
+        ownedSession = None
+        current
+      }
+    }.flatMap {
+      case Some(owned) =>
+        owned.session.markClosed() *> owned.release
+      case None =>
+        IO.unit
     }
 
   private def parseThreadIds(responseBody: Json): List[Int] =
@@ -233,9 +261,14 @@ private[daphttp] final class LocalPipeDapClient(
   private final class OpenedStreams(
       val in: InputStream,
       val out: OutputStream,
-      val closeables: List[Closeable],
-      val close: () => Unit
-  )
+      val closeables: List[Closeable]
+  ) {
+    def close(): Unit =
+      closeables.foreach { c =>
+        try c.close()
+        catch { case _: Exception => () }
+      }
+  }
 
   private def openStreams(pipePath: Path): OpenedStreams =
     if (isWindowsNamedPipePath(pipePath)) {
@@ -246,20 +279,25 @@ private[daphttp] final class LocalPipeDapClient(
       new OpenedStreams(
         Channels.newInputStream(channel),
         Channels.newOutputStream(channel),
-        List(raf),
-        () => raf.close()
+        List(raf)
       )
     } else {
       // DESNOTE(jbarber, 2026-07-19): dolphin-dap DAPSocket is an AF_UNIX path, not a FIFO.
       // See https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/nio/channels/SocketChannel.html
       val channel = SocketChannel.open(StandardProtocolFamily.UNIX)
-      channel.connect(UnixDomainSocketAddress.of(pipePath))
-      new OpenedStreams(
-        Channels.newInputStream(channel),
-        Channels.newOutputStream(channel),
-        List(channel),
-        () => channel.close()
-      )
+      try {
+        channel.connect(UnixDomainSocketAddress.of(pipePath))
+        new OpenedStreams(
+          Channels.newInputStream(channel),
+          Channels.newOutputStream(channel),
+          List(channel)
+        )
+      } catch {
+        case error: Exception =>
+          try channel.close()
+          catch { case _: Exception => () }
+          throw error
+      }
     }
 
   private def isWindowsNamedPipePath(pipePath: Path): Boolean = {
@@ -268,24 +306,17 @@ private[daphttp] final class LocalPipeDapClient(
   }
 
   /** Persistent DAP framing session over arbitrary byte streams. */
-  private final class DapStreamSession(
-      rawIn: InputStream,
-      rawOut: OutputStream,
-      closeFn: () => Unit
-  ) {
+  private final class DapStreamSession(rawIn: InputStream, rawOut: OutputStream) {
     private val in = new BufferedInputStream(rawIn)
     private val out = new BufferedOutputStream(rawOut)
     private var seqCounter = 1
     private var initialized = false
-    private var open = true
+    private val openFlag = new AtomicBoolean(true)
 
-    def isOpen: Boolean = open
+    def isOpen: Boolean = openFlag.get()
 
-    def close(): Unit = {
-      open = false
-      try closeFn()
-      catch { case _: Exception => () }
-    }
+    def markClosed(): IO[Unit] =
+      IO.delay { val _ = openFlag.set(false) }
 
     def sendRequest(command: String, arguments: Option[Json]): Either[String, Json] =
       initialize().flatMap { _ =>
@@ -335,22 +366,6 @@ private[daphttp] final class LocalPipeDapClient(
           }
         }
       }
-
-    def trySendRequest(
-        command: String,
-        arguments: Option[Json],
-        requestTimeoutMs: Int
-    ): Option[Json] = {
-      // DESNOTE(jbarber, 2026-07-19): Unix domain sockets / named pipes do not expose the same
-      // per-call SO_TIMEOUT control as TCP Socket; optional probes may block until the peer
-      // replies. Keep the API for parity with SocketDapClient.
-      val _ = requestTimeoutMs
-      try {
-        sendRequest(command, arguments).toOption
-      } catch {
-        case _: Exception => None
-      }
-    }
 
     private def nextSeq(): Int = {
       val value = seqCounter
@@ -497,6 +512,7 @@ private[daphttp] object DapClients {
           path,
           dapTimeoutMs,
           dapContinueTimeoutMs,
+          dapConnectTimeoutMs,
           dapConnectRetryMs
         )
       case None =>

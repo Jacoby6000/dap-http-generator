@@ -59,6 +59,49 @@ class DapTransportSpec extends AnyFunSuite {
     }
   }
 
+  test("LocalPipeDapClient closes streams when handshake fails") {
+    val dir = Files.createTempDirectory("dap-unix-fail")
+    val sockPath = dir.resolve("dap.sock")
+    val server = ServerSocketChannel.open(StandardProtocolFamily.UNIX)
+    server.bind(UnixDomainSocketAddress.of(sockPath))
+
+    val accepted = new CountDownLatch(1)
+    val adapterThread = new Thread(
+      () => {
+        val peer = server.accept()
+        accepted.countDown()
+        // Accept then hang without DAP responses so initialize times out.
+        try Thread.sleep(5000L)
+        catch { case _: InterruptedException => () }
+        finally peer.close()
+      },
+      "dummy-unix-fail-adapter"
+    )
+    adapterThread.setDaemon(true)
+    adapterThread.start()
+
+    val client =
+      new LocalPipeDapClient(
+        sockPath,
+        dapTimeoutMs = 200,
+        dapConnectTimeoutMs = 1000,
+        dapConnectRetryMs = 50
+      )
+    val result =
+      client
+        .readMemory(0x1000L, 2)
+        .unsafeRunSync()(cats.effect.unsafe.IORuntime.global)
+
+    assert(result.isLeft, result)
+    assert(!client.isConnected)
+    assert(accepted.await(2, TimeUnit.SECONDS))
+    adapterThread.interrupt()
+    adapterThread.join(2000L)
+    server.close()
+    val _ = Files.deleteIfExists(sockPath)
+    val _ = Files.deleteIfExists(dir)
+  }
+
   test("DapClients.create selects LocalPipeDapClient for --dap-pipe paths") {
     val client = DapClients.create(
       dapPipe = Some(java.nio.file.Paths.get("/tmp/example.sock")),
