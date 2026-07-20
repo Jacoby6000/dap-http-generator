@@ -80,5 +80,6 @@ final case class RoutePlansLoadResult(
 )
 final case class IrGenerationResult(
     warnings: List[String],
-    services: List[IrService]
+    services: List[IrService],
+    diagnostics: IrDiagnostics = IrDiagnostics()
 )

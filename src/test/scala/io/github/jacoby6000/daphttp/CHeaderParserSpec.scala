@@ -202,6 +202,56 @@ class CHeaderParserSpec extends AnyFunSuite {
     assert(flag.bitFieldWidth.contains(3))
   }
 
+  test("resolves array lengths from enumerator constant lookup without ScannerInfo macros") {
+    val source =
+      """
+        |typedef struct Hud {
+        |    int* jobjs[HUD_PLACE_MAX];
+        |} Hud;
+        |""".stripMargin
+
+    val structs = CHeaderParser.parse(source)
+    val jobjs = CHeaderParser
+      .extractFields(structs.head._2)
+      .find(f => CHeaderParser.fieldName(f.declarator) == "jobjs")
+      .get
+    assert(CHeaderParser.arrayLength(jobjs.declarator).isEmpty)
+    assert(CHeaderParser.arrayLength(jobjs.declarator, Map("HUD_PLACE_MAX" -> 4)).contains(4))
+  }
+
+  test("neutralizes top-level aggregate initializers and function bodies for CDT") {
+    val source =
+      """
+        |int table[4] = { 1, 2, 3, 4 };
+        |char *msg = "hello world";
+        |char name[] = "pLoadCommonData";
+        |u8 values[] = { 1, 2, 3, 4, 5 };
+        |int scalar = 42;
+        |void big(void) {
+        |    int local = 1;
+        |    local += 2;
+        |}
+        |typedef struct S { int x; } S;
+        |S g;
+        |""".stripMargin
+    val neutralized = CHeaderParser.neutralizeHeavyTopLevelContent(source)
+    assert(!neutralized.contains("1, 2, 3, 4"))
+    assert(!neutralized.contains("hello world"))
+    assert(!neutralized.contains("pLoadCommonData"))
+    assert(neutralized.contains("table[4] ={}") || neutralized.contains("table[4] = {}"))
+    assert(neutralized.contains("msg =\"\"") || neutralized.contains("msg = \"\""))
+    assert(neutralized.contains("name[16]"))
+    assert(neutralized.contains("values[5]"))
+    assert(neutralized.contains("scalar =42") || neutralized.contains("scalar = 42"))
+    assert(neutralized.contains("void big(void) {}"))
+    assert(!neutralized.contains("local +="))
+    val globals = CHeaderParser.parseGlobalDeclarations(neutralized)
+    assert(globals.map(_.name).toSet == Set("table", "msg", "name", "values", "scalar", "g"))
+    assert(globals.find(_.name == "table").flatMap(_.declaratorLength).contains(4))
+    assert(globals.find(_.name == "name").flatMap(_.declaratorLength).contains(16))
+    assert(globals.find(_.name == "values").flatMap(_.declaratorLength).contains(5))
+  }
+
   test("evaluates enumerator initializers that reference injected Count macros") {
     val source =
       """

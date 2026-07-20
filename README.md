@@ -38,6 +38,8 @@ Server subcommands (`smithy`, `cheaders`) share these flags:
   (`.data`, `.sdata`, `.sdata2`, `.sbss`, `.bss`, `.rodata`) are always included automatically.
   Unknown sections that don't match known data or code patterns are logged as warnings and
   skipped; use this flag to include them.
+- `--report <path>` (optional) — write a Markdown diagnostics report with full lists of skipped
+  symbols, missing types, and conflicting macros/structs/enums (console stays summarized).
 
 ### Custom C/DAP traits
 
@@ -159,9 +161,9 @@ sbt "run cheaders \
   --bind-port 8080"
 ```
 
-For Melee/doldecomp, pass game sources under `--headers`. If that path is `…/melee/src` and
-`…/melee/extern/dolphin/include` exists, it is scanned automatically so types like `Vec3` /
-`GXColor` resolve. You can still pass the Dolphin tree explicitly:
+For Melee/doldecomp, pass both game sources and the Dolphin SDK include tree so types like
+`Vec3` / `GXColor` resolve. If those types are missing, cheaders warns and may suggest nearby
+paths (for example `…/melee/extern/dolphin/include`) — it does not add them automatically:
 
 ```bash
 sbt "run cheaders \

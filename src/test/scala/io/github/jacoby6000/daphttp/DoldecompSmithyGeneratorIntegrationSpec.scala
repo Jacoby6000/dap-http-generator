@@ -1160,6 +1160,73 @@ class DoldecompSmithyGeneratorIntegrationSpec extends AnyFunSuite {
     }
   }
 
+  test("suggests nearby include paths when missing types fail without auto-adding them") {
+    val tmp = java.nio.file.Files.createTempDirectory("dap-speculate-includes")
+    try {
+      val src = tmp.resolve("src")
+      val sdk = tmp.resolve("extern/dolphin/include")
+      java.nio.file.Files.createDirectories(src)
+      java.nio.file.Files.createDirectories(sdk)
+      java.nio.file.Files.writeString(
+        src.resolve("game.h"),
+        """
+          |Vec3 g_vec;
+          |GXColor g_color;
+          |""".stripMargin
+      )
+      java.nio.file.Files.writeString(
+        sdk.resolve("math.h"),
+        """
+          |typedef struct Vec3 {
+          |    float x, y, z;
+          |} Vec3;
+          |""".stripMargin
+      )
+      java.nio.file.Files.writeString(
+        sdk.resolve("gx.h"),
+        """
+          |typedef struct GXColor {
+          |    unsigned char r, g, b, a;
+          |} GXColor;
+          |""".stripMargin
+      )
+      val symbols = tmp.resolve("symbols.txt")
+      java.nio.file.Files.writeString(
+        symbols,
+        """
+          |g_vec = .data:0x80000000; // type:object size:0xc scope:global
+          |g_color = .data:0x80000010; // type:object size:0x4 scope:global
+          |""".stripMargin
+      )
+
+      val generation = DoldecompIrGenerator
+        .generateFromPaths(
+          symbolsPath = symbols,
+          headerRoots = List(src),
+          namespace = "example.speculate",
+          serviceName = "Api",
+          wordSizeBits = 32
+        )
+        .toOption
+        .get
+
+      assert(generation.services.isEmpty || generation.services.head.operations.isEmpty)
+      assert(generation.warnings.exists(_.contains("Vec3")))
+      assert(generation.warnings.exists(_.contains("GXColor")))
+      assert(
+        generation.warnings.exists(w =>
+          w.contains("Nearby paths") && w.contains("extern/dolphin/include") && w.contains(
+            "--headers"
+          )
+        )
+      )
+    } finally {
+      java.nio.file.Files.walk(tmp).sorted(java.util.Comparator.reverseOrder()).forEach { path =>
+        val _ = java.nio.file.Files.deleteIfExists(path)
+      }
+    }
+  }
+
   test("warns when symbol size is inconsistent with C-derived array length") {
     val tmp = java.nio.file.Files.createTempDirectory("dap-size-mismatch")
     try {

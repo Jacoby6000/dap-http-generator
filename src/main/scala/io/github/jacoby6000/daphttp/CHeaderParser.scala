@@ -61,7 +61,15 @@ final case class CEnumDefinition(
 
 final case class EnumParseResult(
     enums: Map[String, CEnumDefinition],
-    warnings: List[String] = Nil
+    warnings: List[String] = Nil,
+    conflicts: List[NamedConflict] = Nil
+)
+
+/** One CDT translation unit extracted into the declaration kinds we care about. */
+final case class ParsedDeclarations(
+    structs: List[(String, IASTCompositeTypeSpecifier)],
+    typedefs: List[(String, String)],
+    globals: List[GlobalVariableDeclaration]
 )
 
 object CHeaderParser {
@@ -69,27 +77,30 @@ object CHeaderParser {
       headerSource: String,
       extraMacros: Map[String, String] = Map.empty
   ): List[(String, IASTCompositeTypeSpecifier)] =
-    parseTranslationUnit(headerSource, "header.h", extraMacros)
-      .map(_.getDeclarations.toList.flatMap(extractStructs))
-      .getOrElse(Nil)
+    parseDeclarations(headerSource, extraMacros).structs
 
   def parseTypedefs(
       source: String,
       extraMacros: Map[String, String] = Map.empty
   ): Map[String, String] =
-    parseTranslationUnit(source, "header.h", extraMacros)
-      .map(_.getDeclarations.toList.flatMap(extractTypedef).toMap)
-      .getOrElse(Map.empty)
+    parseDeclarations(source, extraMacros).typedefs.toMap
 
   def parseEnums(
       source: String,
       extraMacros: Map[String, String] = Map.empty
+  ): EnumParseResult =
+    parseEnums(source, scannerInfoFor(extraMacros), alreadyStripped = false)
+
+  private[daphttp] def parseEnums(
+      source: String,
+      scannerInfo: ScannerInfo,
+      alreadyStripped: Boolean
   ): EnumParseResult = {
     // DESNOTE(jbarber, 2026-07-19): Pass macros through CDT ScannerInfo so the preprocessor
     // expands #define uses in enumerator initializers before we evaluate them. Prefer CDT's
     // ValueFactory over hand-rolled expression/macro evaluation.
     // See https://github.com/eclipse-cdt/cdt/blob/main/core/org.eclipse.cdt.core/parser/org/eclipse/cdt/internal/core/dom/parser/ValueFactory.java
-    parseTranslationUnit(source, "header.h", extraMacros)
+    parseTranslationUnit(source, "header.h", scannerInfo, alreadyStripped)
       .map { translationUnit =>
         val warnings = ListBuffer.empty[String]
         val enums = translationUnit.getDeclarations.toList
@@ -100,11 +111,17 @@ object CHeaderParser {
       .getOrElse(EnumParseResult(Map.empty, Nil))
   }
 
-  private[daphttp] def extractMacros(source: String): Map[String, String] = {
+  private[daphttp] def extractMacros(source: String): Map[String, String] =
+    extractMacros(source, alreadyStripped = false)
+
+  private[daphttp] def extractMacros(
+      source: String,
+      alreadyStripped: Boolean
+  ): Map[String, String] = {
     // DESNOTE(jbarber, 2026-07-19): Always collect macros from CDT's preprocessor AST — never
     // regex/#define line scraping. Expansions (including parenthesized bodies) feed ScannerInfo
     // for later translation units.
-    parseTranslationUnit(source, "macros.h", Map.empty)
+    parseTranslationUnit(source, "macros.h", EmptyScannerInfo, alreadyStripped)
       .map { translationUnit =>
         translationUnit.getMacroDefinitions.toList.flatMap { macroDef =>
           val name = Option(macroDef.getName).map(_.toString.trim).filter(_.nonEmpty)
@@ -120,18 +137,54 @@ object CHeaderParser {
 
   def parseGlobalDeclarations(
       source: String,
-      extraMacros: Map[String, String] = Map.empty
+      extraMacros: Map[String, String] = Map.empty,
+      arrayConstants: Map[String, Int] = Map.empty
   ): List[GlobalVariableDeclaration] =
-    parseTranslationUnit(source, "source.c", extraMacros)
-      .map(_.getDeclarations.toList.flatMap(extractGlobalDeclaration))
-      .getOrElse(Nil)
+    parseDeclarations(source, extraMacros, arrayConstants).globals
+
+  def parseDeclarations(
+      source: String,
+      extraMacros: Map[String, String] = Map.empty,
+      arrayConstants: Map[String, Int] = Map.empty
+  ): ParsedDeclarations =
+    parseDeclarations(source, scannerInfoFor(extraMacros), arrayConstants, alreadyStripped = false)
+
+  private[daphttp] def parseDeclarations(
+      source: String,
+      scannerInfo: ScannerInfo,
+      arrayConstants: Map[String, Int],
+      alreadyStripped: Boolean
+  ): ParsedDeclarations =
+    parseTranslationUnit(source, "header.h", scannerInfo, alreadyStripped)
+      .map { translationUnit =>
+        val declarations = translationUnit.getDeclarations.toList
+        ParsedDeclarations(
+          structs = declarations.flatMap(extractStructs),
+          typedefs = declarations.flatMap(extractTypedef),
+          globals = declarations.flatMap(extractGlobalDeclaration(_, arrayConstants))
+        )
+      }
+      .getOrElse(ParsedDeclarations(Nil, Nil, Nil))
 
   def parseStructFieldInitializerLengths(
       source: String,
       structs: Map[String, IASTCompositeTypeSpecifier],
       extraMacros: Map[String, String] = Map.empty
   ): Map[(String, String), Int] =
-    parseTranslationUnit(source, "source.c", extraMacros)
+    parseStructFieldInitializerLengths(
+      source,
+      structs,
+      scannerInfoFor(extraMacros),
+      alreadyStripped = false
+    )
+
+  private[daphttp] def parseStructFieldInitializerLengths(
+      source: String,
+      structs: Map[String, IASTCompositeTypeSpecifier],
+      scannerInfo: ScannerInfo,
+      alreadyStripped: Boolean
+  ): Map[(String, String), Int] =
+    parseTranslationUnit(source, "source.c", scannerInfo, alreadyStripped)
       .map { translationUnit =>
         translationUnit.getDeclarations.toList.flatMap { declaration =>
           extractGlobalDeclaration(declaration).flatMap { global =>
@@ -155,18 +208,221 @@ object CHeaderParser {
   /** Opaque / placeholder macros always available during CDT parses and type validation. */
   private[daphttp] def builtInMacros: Map[String, String] = BuiltInMacros
 
+  private val EmptyScannerInfo: ScannerInfo = scannerInfoFor(Map.empty)
+
+  private[daphttp] def scannerInfoFor(extraMacros: Map[String, String]): ScannerInfo =
+    new ScannerInfo((BuiltInMacros ++ extraMacros).asJava, Array.empty[String])
+
+  private[daphttp] def stripComments(content: String): String =
+    content
+      .replaceAll("(?s)/\\*.*?\\*/", "")
+      .replaceAll("(?m)//.*$", "")
+
+  // DESNOTE(jbarber, 2026-07-20): Melee .c files carry huge static aggregate / string initializers
+  // and large function bodies. CDT still lexes/parses those at TU scope even with
+  // OPTION_SKIP_FUNCTION_BODIES for the declaration shape we need, which OOMs on full-tree scans.
+  // Neutralize heavy top-level payloads before CDT; keep declaration syntax (including `[]` bounds).
+  // When the declarator is an unsized array (`[]`), rewrite the bound from the initializer count so
+  // `type name[] = {…}` / `= "…"` still yields a length after the payload is dropped.
+  // See https://github.com/eclipse-cdt/cdt/blob/main/core/org.eclipse.cdt.core/model/org/eclipse/cdt/core/model/ILanguage.java
+  private[daphttp] def neutralizeHeavyTopLevelContent(source: String): String = {
+    val chars = source.toCharArray
+    val out = new java.lang.StringBuilder(chars.length)
+    var i = 0
+    var depth = 0
+    var inString = false
+    var inChar = false
+
+    def lastSignificantChar(): Option[Char] = {
+      var j = out.length() - 1
+      while (j >= 0 && Character.isWhitespace(out.charAt(j))) j -= 1
+      if (j < 0) None else Some(out.charAt(j))
+    }
+
+    def emptyArrayBracketStart(): Option[Int] = {
+      var j = out.length() - 1
+      while (j >= 0 && Character.isWhitespace(out.charAt(j))) j -= 1
+      if (j < 1 || out.charAt(j) != ']') None
+      else {
+        var k = j - 1
+        while (k >= 0 && Character.isWhitespace(out.charAt(k))) k -= 1
+        if (k >= 0 && out.charAt(k) == '[') Some(k) else None
+      }
+    }
+
+    def rewriteEmptyArrayBound(openBracket: Int, length: Int): Unit = {
+      var end = openBracket + 1
+      while (end < out.length() && Character.isWhitespace(out.charAt(end))) end += 1
+      if (end < out.length() && out.charAt(end) == ']') {
+        val _ = out.replace(openBracket, end + 1, s"[$length]")
+      }
+    }
+
+    def skipBalancedBrace(openIndex: Int): (Int, Int) = {
+      var j = openIndex
+      var d = 0
+      var s = false
+      var ch = false
+      var elements = 0
+      var elementStarted = false
+      while (j < chars.length) {
+        val c = chars(j)
+        if (s) {
+          if (c == '\\' && j + 1 < chars.length) j += 2
+          else {
+            if (c == '"') s = false
+            j += 1
+          }
+        } else if (ch) {
+          if (c == '\\' && j + 1 < chars.length) j += 2
+          else {
+            if (c == '\'') ch = false
+            j += 1
+          }
+        } else if (c == '"') {
+          s = true
+          if (d == 1) elementStarted = true
+          j += 1
+        } else if (c == '\'') {
+          ch = true
+          if (d == 1) elementStarted = true
+          j += 1
+        } else if (c == '{') {
+          if (d == 1) elementStarted = true
+          d += 1
+          j += 1
+        } else if (c == '}') {
+          if (d == 1 && elementStarted) {
+            elements += 1
+            elementStarted = false
+          }
+          d -= 1
+          j += 1
+          if (d == 0) return (j, elements)
+        } else if (c == ',' && d == 1) {
+          if (elementStarted) {
+            elements += 1
+            elementStarted = false
+          }
+          j += 1
+        } else {
+          if (d == 1 && !Character.isWhitespace(c)) elementStarted = true
+          j += 1
+        }
+      }
+      (chars.length, elements)
+    }
+
+    def skipStringLiteral(openIndex: Int): (Int, Int) = {
+      var j = openIndex + 1
+      var len = 0
+      while (j < chars.length) {
+        val c = chars(j)
+        if (c == '\\' && j + 1 < chars.length) {
+          len += 1
+          j += 2
+        } else if (c == '"') {
+          return (j + 1, len + 1) // include NUL for C string storage
+        } else {
+          len += 1
+          j += 1
+        }
+      }
+      (chars.length, len + 1)
+    }
+
+    while (i < chars.length) {
+      val c = chars(i)
+      if (inString) {
+        out.append(c)
+        if (c == '\\' && i + 1 < chars.length) {
+          out.append(chars(i + 1))
+          i += 2
+        } else {
+          if (c == '"') inString = false
+          i += 1
+        }
+      } else if (inChar) {
+        out.append(c)
+        if (c == '\\' && i + 1 < chars.length) {
+          out.append(chars(i + 1))
+          i += 2
+        } else {
+          if (c == '\'') inChar = false
+          i += 1
+        }
+      } else if (c == '"') {
+        inString = true
+        out.append(c)
+        i += 1
+      } else if (c == '\'') {
+        inChar = true
+        out.append(c)
+        i += 1
+      } else if (c == '{') {
+        if (depth == 0 && lastSignificantChar().contains(')')) {
+          i = skipBalancedBrace(i)._1
+          out.append('{').append('}')
+        } else {
+          out.append(c)
+          depth += 1
+          i += 1
+        }
+      } else if (c == '}') {
+        out.append(c)
+        if (depth > 0) depth -= 1
+        i += 1
+      } else if (c == '=' && depth == 0) {
+        val emptyArrayAt = emptyArrayBracketStart()
+        i += 1
+        while (i < chars.length && Character.isWhitespace(chars(i))) i += 1
+        if (i < chars.length && chars(i) == '{') {
+          val (next, count) = skipBalancedBrace(i)
+          i = next
+          emptyArrayAt match {
+            case Some(open) if count > 0 =>
+              rewriteEmptyArrayBound(open, count)
+            case _ =>
+              out.append('=').append('{').append('}')
+          }
+        } else if (i < chars.length && chars(i) == '"') {
+          val (next, count) = skipStringLiteral(i)
+          i = next
+          emptyArrayAt match {
+            case Some(open) if count > 0 =>
+              rewriteEmptyArrayBound(open, count)
+            case _ =>
+              out.append('=').append('"').append('"')
+          }
+        } else {
+          out.append('=')
+          // Scalar / other initializer — keep as-is from current i.
+        }
+      } else {
+        out.append(c)
+        i += 1
+      }
+    }
+    out.toString
+  }
+
+  private[daphttp] def prepareCdtSource(source: String, neutralizeHeavyContent: Boolean): String = {
+    val noComments = stripComments(source)
+    if (neutralizeHeavyContent) neutralizeHeavyTopLevelContent(noComments) else noComments
+  }
+
   private def parseTranslationUnit(
       source: String,
       fileName: String,
-      extraMacros: Map[String, String]
+      scannerInfo: ScannerInfo,
+      alreadyStripped: Boolean
   ): Option[IASTTranslationUnit] = {
-    val stripped = stripComments(source)
-    val allMacros = BuiltInMacros ++ extraMacros
+    val stripped = if (alreadyStripped) source else stripComments(source)
     try {
       Some(
         GCCLanguage.getDefault.getASTTranslationUnit(
           FileContent.create(fileName, stripped.toCharArray),
-          new ScannerInfo(allMacros.asJava, Array.empty[String]),
+          scannerInfo,
           IncludeFileContentProvider.getEmptyFilesProvider,
           null,
           ILanguage.OPTION_SKIP_FUNCTION_BODIES,
@@ -179,7 +435,8 @@ object CHeaderParser {
   }
 
   private[daphttp] def extractGlobalDeclaration(
-      declaration: IASTDeclaration
+      declaration: IASTDeclaration,
+      arrayConstants: Map[String, Int] = Map.empty
   ): List[GlobalVariableDeclaration] =
     declaration match {
       case simple: IASTSimpleDeclaration =>
@@ -192,11 +449,13 @@ object CHeaderParser {
             } else {
               val typeName =
                 normalizeTypeName(Option(composite.getName).map(_.toString).getOrElse(""))
-              if (typeName.isEmpty) Nil else extractGlobalDeclarators(typeName, simple)
+              if (typeName.isEmpty) Nil
+              else extractGlobalDeclarators(typeName, simple, arrayConstants)
             }
           case _ =>
             val typeName = normalizeTypeName(simple.getDeclSpecifier.getRawSignature)
-            if (typeName.isEmpty) Nil else extractGlobalDeclarators(typeName, simple)
+            if (typeName.isEmpty) Nil
+            else extractGlobalDeclarators(typeName, simple, arrayConstants)
         }
       case _ =>
         Nil
@@ -204,7 +463,8 @@ object CHeaderParser {
 
   private[daphttp] def extractGlobalDeclarators(
       typeName: String,
-      simple: IASTSimpleDeclaration
+      simple: IASTSimpleDeclaration,
+      arrayConstants: Map[String, Int] = Map.empty
   ): List[GlobalVariableDeclaration] =
     simple.getDeclarators.toList.flatMap { declarator =>
       val name = extractDeclaratorName(declarator)
@@ -212,7 +472,7 @@ object CHeaderParser {
         Nil
       } else {
         val isArray = isArrayDeclarator(declarator)
-        val declaratorLength = if (isArray) arrayLength(declarator) else None
+        val declaratorLength = if (isArray) arrayLength(declarator, arrayConstants) else None
         val initializerLength = if (isArray) initializerElementCount(declarator) else None
         List(
           GlobalVariableDeclaration(
@@ -511,14 +771,21 @@ object CHeaderParser {
     declaratorChain(declarator).map(_.getPointerOperators.length).sum
   }
 
-  def arrayLength(declarator: IASTDeclarator): Option[Int] = {
-    // DESNOTE(jbarber, 2026-07-19): Array bounds come from CDT's already-preprocessed AST via
-    // ValueFactory — do not re-parse raw signatures or look up macro names by hand.
+  def arrayLength(
+      declarator: IASTDeclarator,
+      constantLookup: Map[String, Int] = Map.empty
+  ): Option[Int] = {
+    // DESNOTE(jbarber, 2026-07-19): Prefer CDT ValueFactory on the preprocessed expression.
+    // When the bound is an enumerator left as an identifier (not injected into ScannerInfo — that
+    // OOM'd Melee-scale corpora), fall back to a constant table built from merged enums.
+    // See https://github.com/eclipse-cdt/cdt/blob/main/core/org.eclipse.cdt.core/parser/org/eclipse/cdt/internal/core/dom/parser/ValueFactory.java
     declaratorChain(declarator).collectFirst(Function.unlift {
       case arrayDeclarator: IASTArrayDeclarator =>
         arrayDeclarator.getArrayModifiers.toList.collectFirst(Function.unlift { modifier =>
           Option(modifier.getConstantExpression).flatMap { expr =>
-            Option(ValueFactory.getConstantNumericalValue(expr)).map(_.intValue())
+            Option(ValueFactory.getConstantNumericalValue(expr))
+              .map(_.intValue())
+              .orElse(constantLookup.get(expr.getRawSignature.trim))
           }
         })
       case _ =>
@@ -675,11 +942,5 @@ object CHeaderParser {
       changed = normalized != previous
     }
     normalized
-  }
-
-  private def stripComments(content: String): String = {
-    content
-      .replaceAll("(?s)/\\*.*?\\*/", "")
-      .replaceAll("(?m)//.*$", "")
   }
 }

@@ -66,6 +66,10 @@ lazy val root = (project in file("."))
       "org.scalatest" %% "scalatest" % "3.2.20" % Test
     ),
     Compile / mainClass := Some("io.github.jacoby6000.daphttp.Cli"),
+    // DESNOTE(jbarber, 2026-07-20): Fork run so cats-effect IOApp owns the main thread (avoids the
+    // non-main-thread cleanup warning) and so Melee-scale CDT parses get a dedicated heap.
+    Compile / run / fork := true,
+    Compile / run / javaOptions ++= Seq("-Xmx4g"),
     Test / fork := true,
     Compile / resourceGenerators += Def.task {
       val jsFile = (ui / Compile / fastOptJS).value.data

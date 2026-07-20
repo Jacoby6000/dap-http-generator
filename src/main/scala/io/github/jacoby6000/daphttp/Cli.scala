@@ -47,6 +47,15 @@ object Cli
       .map(_.split(',').map(_.trim).filter(_.nonEmpty).toSet)
       .withDefault(Set.empty)
 
+  private val reportOpt: Opts[Option[Path]] =
+    Opts
+      .option[Path](
+        "report",
+        "Write a detailed cheaders diagnostics report (full skip/conflict lists) to this path",
+        metavar = "path"
+      )
+      .orNone
+
   private val serverConfigOpts: Opts[ServerConfig] = (
     Opts
       .option[Path](
@@ -130,9 +139,19 @@ object Cli
           .option[Int]("word-size", "Pointer word size in bits", metavar = "bits")
           .withDefault(32),
         dataSectionsOpt,
+        reportOpt,
         serverConfigOpts
       ).mapN {
-        (symbolsPath, headerPaths, namespace, service, wordSize, dataSections, serverConfig) =>
+        (
+            symbolsPath,
+            headerPaths,
+            namespace,
+            service,
+            wordSize,
+            dataSections,
+            reportPath,
+            serverConfig
+        ) =>
           IO.blocking(
             loadCHeaderPlans(
               symbolsPath,
@@ -140,7 +159,8 @@ object Cli
               namespace,
               service,
               wordSize,
-              dataSections
+              dataSections,
+              reportPath
             )
           ).flatMap(runServer(serverConfig, _, Nil, watch = false))
       }
@@ -168,24 +188,36 @@ object Cli
           .option[Int]("word-size", "Pointer word size in bits", metavar = "bits")
           .withDefault(32),
         dataSectionsOpt,
+        reportOpt,
         Opts.option[Path]("output", "Output Smithy model file path", metavar = "path")
-      ).mapN { (symbolsPath, headerPaths, namespace, service, wordSize, dataSections, outputPath) =>
-        IO.blocking(
-          emitSmithyFromCHeaders(
+      ).mapN {
+        (
             symbolsPath,
-            headerPaths.toList,
+            headerPaths,
             namespace,
             service,
             wordSize,
             dataSections,
+            reportPath,
             outputPath
-          )
-        ).map {
-          case Right(_) =>
-            IO.println(s"Wrote Smithy model to $outputPath") *> IO.pure(ExitCode.Success)
-          case Left(errors) =>
-            IO.println(errors.mkString("\n")) *> IO.pure(ExitCode.Error)
-        }.flatten
+        ) =>
+          IO.blocking(
+            emitSmithyFromCHeaders(
+              symbolsPath,
+              headerPaths.toList,
+              namespace,
+              service,
+              wordSize,
+              dataSections,
+              outputPath,
+              reportPath
+            )
+          ).map {
+            case Right(_) =>
+              IO.println(s"Wrote Smithy model to $outputPath") *> IO.pure(ExitCode.Success)
+            case Left(errors) =>
+              IO.println(errors.mkString("\n")) *> IO.pure(ExitCode.Error)
+          }.flatten
       }
     )
 
@@ -223,7 +255,8 @@ object Cli
       namespace: String,
       service: String,
       wordSize: Int,
-      extraDataSections: Set[String]
+      extraDataSections: Set[String],
+      reportPath: Option[Path]
   ): RoutePlansLoadResult =
     loadIrFromCHeaders(
       symbolsPath,
@@ -239,6 +272,7 @@ object Cli
       case Right(generation) =>
         // DESNOTE(jbarber, 2026-07-20): DoldecompIrGenerator already logs its warnings while
         // building IR; re-logging here doubled every line on cheaders startup.
+        writeReportIfRequested(reportPath, generation, symbolsPath)
         IrSizingWarnings.writeToStderr(generation.services)
         val plans = HttpRouteIrEmitter.emitRoutePlansFromIr(generation.services)
         RoutePlansLoadResult(
@@ -271,10 +305,12 @@ object Cli
       service: String,
       wordSize: Int,
       extraDataSections: Set[String],
-      outputPath: Path
+      outputPath: Path,
+      reportPath: Option[Path]
   ): Either[List[String], Unit] =
     loadIrFromCHeaders(symbolsPath, headerPaths, namespace, service, wordSize, extraDataSections)
       .flatMap { generation =>
+        writeReportIfRequested(reportPath, generation, symbolsPath)
         val operations = generation.services.flatMap(_.operations)
         if (generation.services.isEmpty || operations.isEmpty) {
           val emptyOpsWarning =
@@ -288,6 +324,22 @@ object Cli
           SmithyIrEmitter.emitToPath(generation.services, outputPath)
         }
       }
+
+  private def writeReportIfRequested(
+      reportPath: Option[Path],
+      generation: IrGenerationResult,
+      symbolsPath: Path
+  ): Unit =
+    reportPath.foreach { path =>
+      val written =
+        DoldecompReport.write(
+          path,
+          generation.diagnostics,
+          generation.warnings,
+          symbolsPath = Some(symbolsPath)
+        )
+      DapHttpLoggers.irSourceDoldecomp.info("Wrote diagnostics report to {}", written)
+    }
 
   private def collectSmithyFiles(path: Path): List[Path] = {
     if (!Files.exists(path)) {

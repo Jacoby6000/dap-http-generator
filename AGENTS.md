@@ -12,9 +12,9 @@ The entrypoint is `io.github.jacoby6000.daphttp.Cli` (a Decline CLI) with three 
 
 - `smithy` — load API definitions from Smithy model files (`--smithy <path>` repeatable, `--watch`).
 - `cheaders` — load from C headers + a doldecomp symbols file (`--symbols`, `--headers` repeatable,
-  `--namespace`, `--service`, `--word-size`, `--data-sections`) and run the HTTP server.
+  `--namespace`, `--service`, `--word-size`, `--data-sections`, `--report`) and run the HTTP server.
 - `cheaders-smithy` — generate a Smithy model from C headers + symbols (`--symbols`, `--headers`,
-  `--namespace`, `--service`, `--word-size`, `--data-sections`, `--output`).
+  `--namespace`, `--service`, `--word-size`, `--data-sections`, `--report`, `--output`).
 
 `smithy` and `cheaders` share DAP transport flags and `--bind-host/--bind-port`
 (default `0.0.0.0:8080`). DAP transport is one of:
@@ -134,9 +134,13 @@ flowchart LR
   `ftCo_MS_Count` → `ftMh_MS_Count` → `ftCh_MS_Count` resolve even when defining headers sort after
   consumers. Only Count sentinels that appear before any failed initializer in their enum are
   exported during enum reparse (avoids colliding with later redefinitions of the same enum tag).
-  After enums merge, all enumerator values are injected for struct/global parses so array bounds
-  like `jobjs[HUD_PLACE_MAX]` evaluate. Opaque type macros such as melee `UNK_T` (`void*`) are
-  expanded when validating symbol types.
+  After enums merge, enumerator values are kept in a constant table for array-bound lookup
+  (e.g. `jobjs[HUD_PLACE_MAX]`) — they are not injected into CDT ScannerInfo (that OOM'd on
+  Melee-scale corpora). Opaque type macros such as melee `UNK_T` (`void*`) are expanded when
+  validating symbol types. Header sources are read once into a corpus; `.c` files have top-level
+  aggregate/string initializers and function bodies neutralized before CDT (avoids OOM on data
+  objects). Shared ScannerInfo + one declarations parse per file; field-initializer lengths only
+  re-parse small (≤64KiB) `.c` files with real initializers intact.
 - Decoded struct JSON includes `"_address": "0x…"` on every struct object (root, nested members,
   and array elements of structs), including pointees from pointer routes. Top-level response
   envelopes no longer carry a separate `address`/`offset` field for the decoded value;
@@ -151,13 +155,15 @@ flowchart LR
   known code sections (`.text`, `.ctors`, `extab`, …) are summarized by section count (no
   `--data-sections` tip). Unknown sections still suggest `--data-sections`. Data symbols without
   `ctype`/C declarations and symbols whose resolved type is missing from `--headers` are summarized
-  (sample names + count). When `--headers` points at `…/melee/src`, adjacent
-  `…/melee/extern/dolphin/include` is auto-scanned if present so `Vec3`/`GXColor` resolve; a second
-  `--headers` remains valid and overrides ordering.
+  (sample names + count). When any symbol fails for a missing type, nearby directories
+  (e.g. sibling `extern/dolphin/include`) are probed and suggested via warning only — never
+  auto-added to the scan set. Pass extra `--headers` roots explicitly.
 - Duplicate C globals for one symbol name merge deterministically: prefer non-`static` declarations
   with array length metadata; take `pointerDepth` from that primary (not `max`). Conflicting macros,
   structs, typedefs, and enums across scanned files keep the first definition and emit one summarized
-  warning per kind. `cheaders-smithy` fails when the service has zero operations.
+  warning per kind. Pass `--report <path>` to write a Markdown file with the full per-name /
+  per-symbol detail behind those summaries. `cheaders-smithy` fails when the service has zero
+  operations.
 - C typedefs of `int`/`float`/… (e.g. melee `enum_t`, `MessageBufferID`) set `primitiveOverride` so
   `IrSizingWarnings` does not treat them as ambiguous Smithy prelude Integer/Float.
 - First `sbt` invocation downloads sbt/Scala launchers and Coursier deps; expect a slow cold start.

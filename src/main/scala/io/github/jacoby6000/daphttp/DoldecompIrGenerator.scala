@@ -31,7 +31,8 @@ object DoldecompIrGenerator {
 
   private final case class MergedNamedMap[A](
       values: Map[String, A],
-      warnings: List[String]
+      warnings: List[String],
+      conflicts: List[NamedConflict] = Nil
   )
 
   def generateFromPaths(
@@ -58,40 +59,40 @@ object DoldecompIrGenerator {
       wordSizeBits: Int = 32,
       extraDataSections: Set[String] = Set.empty
   ): IrGenerationResult = {
-    val effectiveHeaderRoots = expandHeaderRoots(headerRoots)
+    val corpus = loadCorpus(headerRoots)
     DapHttpLoggers.irSourceDoldecomp.info(
-      "Generating IR from {} symbol(s) across {} header root(s)",
+      "Generating IR from {} symbol(s) across {} header root(s) ({} source file(s))",
       Integer.valueOf(symbols.size),
-      Integer.valueOf(effectiveHeaderRoots.size)
+      Integer.valueOf(headerRoots.size),
+      Integer.valueOf(corpus.files.size)
     )
-    val macroLoad = loadAllMacros(effectiveHeaderRoots)
+    val macroLoad = loadAllMacros(corpus)
     val allMacros = CHeaderParser.builtInMacros ++ macroLoad.values
-    // Enums before structs: array bounds like jobjs[HUD_PLACE_MAX] need enumerator values in
-    // ScannerInfo. Count-sentinel iteration stays enum-only; full enumerator macros are for
-    // structs/globals only (injecting them during enum reparse collides with tag redefinitions).
-    val enumParse = loadEnums(effectiveHeaderRoots, allMacros)
+    // Enums before types: Count-sentinel iteration stays enum-only. Array bounds that use
+    // enumerator names (e.g. jobjs[HUD_PLACE_MAX]) resolve via arrayConstants lookup — never by
+    // injecting every enumerator into ScannerInfo (that OOM'd Melee-scale corpora).
+    val enumParse = loadEnums(corpus, allMacros)
     val enums = enumParse.enums
-    val macrosWithEnums = allMacros ++ enumeratorMacros(enums).filter { case (name, _) =>
+    val arrayConstants = enumeratorIntConstants(enums)
+    val macrosForTypes = allMacros ++ countMacrosFromEnums(enums).filter { case (name, _) =>
       !allMacros.contains(name)
     }
-    val structLoad = loadStructs(effectiveHeaderRoots, macrosWithEnums)
-    val headerStructs = structLoad.values
-    val structMemberOffsets = loadStructMemberOffsets(effectiveHeaderRoots)
-    val globalDeclarations = loadGlobalDeclarations(effectiveHeaderRoots, macrosWithEnums)
-    val fieldInitializerLengths =
-      loadFieldInitializerLengths(effectiveHeaderRoots, headerStructs, macrosWithEnums)
-    val typedefLoad = loadTypedefs(effectiveHeaderRoots, macrosWithEnums)
-    val typedefs = typedefLoad.values
+    val typeCorpus = loadTypeCorpus(corpus, macrosForTypes, arrayConstants)
+    val headerStructs = typeCorpus.structs.values
+    val structMemberOffsets = loadStructMemberOffsets(corpus)
+    val globalDeclarations = typeCorpus.globals
+    val fieldInitializerLengths = typeCorpus.fieldInitializerLengths
+    val typedefs = typeCorpus.typedefs.values
     val sectionResult = SectionFilter.filterDataSymbols(symbols, extraDataSections)
     sectionResult.warnings.foreach(w => DapHttpLoggers.irSourceDoldecomp.warn("{}", w))
     val dataObjectSymbols = sectionResult.dataSymbols
     val warnings = mutable.ListBuffer.empty[String]
     warnings ++= sectionResult.warnings
     warnings ++= macroLoad.warnings
-    warnings ++= structLoad.warnings
-    warnings ++= typedefLoad.warnings
+    warnings ++= typeCorpus.structs.warnings
+    warnings ++= typeCorpus.typedefs.warnings
     warnings ++= enumParse.warnings
-    (macroLoad.warnings ++ structLoad.warnings ++ typedefLoad.warnings ++ enumParse.warnings)
+    (macroLoad.warnings ++ typeCorpus.structs.warnings ++ typeCorpus.typedefs.warnings ++ enumParse.warnings)
       .foreach(w => DapHttpLoggers.irSourceDoldecomp.warn("{}", w))
 
     val unresolvedSymbols = mutable.ListBuffer.empty[String]
@@ -104,6 +105,35 @@ object DoldecompIrGenerator {
           None
       }
     }
+    val includeHints = mutable.ListBuffer.empty[String]
+    val otherWarnings = mutable.ListBuffer.empty[String]
+
+    def baseDiagnostics(
+        resolvedCount: Int,
+        operations: Int,
+        missingTypes: List[(String, List[String])] = Nil,
+        extras: List[String] = Nil
+    ): IrDiagnostics =
+      IrDiagnostics(
+        codeSectionSkips = sectionResult.codeSectionSkips,
+        unknownSectionSkips = sectionResult.unknownSectionSkips,
+        unresolvedSymbols = unresolvedSymbols.toList,
+        missingTypes = missingTypes,
+        conflictingMacros = macroLoad.conflicts,
+        conflictingStructs = typeCorpus.structs.conflicts,
+        conflictingTypedefs = typeCorpus.typedefs.conflicts,
+        conflictingEnums = enumParse.conflicts,
+        enumEvaluationWarnings = enumParse.warnings.filterNot(_.contains("Conflicting enum")),
+        includeHints = includeHints.toList,
+        otherWarnings = (otherWarnings ++ extras).toList,
+        headerRoots = headerRoots.map(_.toString),
+        sourceFileCount = corpus.files.size,
+        symbolCount = symbols.size,
+        dataObjectCount = dataObjectSymbols.size,
+        resolvedSymbolCount = resolvedCount,
+        operationCount = operations
+      )
+
     if (unresolvedSymbols.nonEmpty) {
       val names = unresolvedSymbols.take(40).mkString(", ")
       val suffix =
@@ -115,12 +145,20 @@ object DoldecompIrGenerator {
     }
 
     if (resolvedSymbols.isEmpty) {
-      if (!warnings.exists(_.contains("matching global C declaration"))) {
-        val message = "No data object symbols with a matching C declaration were found."
-        warnings += message
-        DapHttpLoggers.irSourceDoldecomp.warn("{}", message)
-      }
-      IrGenerationResult(warnings = warnings.toList.distinct, services = Nil)
+      val emptyMessage =
+        if (!warnings.exists(_.contains("matching global C declaration"))) {
+          val message = "No data object symbols with a matching C declaration were found."
+          warnings += message
+          DapHttpLoggers.irSourceDoldecomp.warn("{}", message)
+          List(message)
+        } else {
+          Nil
+        }
+      IrGenerationResult(
+        warnings = warnings.toList.distinct,
+        services = Nil,
+        diagnostics = baseDiagnostics(resolvedCount = 0, operations = 0, extras = emptyMessage)
+      )
     } else {
       val missingTypeByName = mutable.LinkedHashMap.empty[String, mutable.ListBuffer[String]]
       val validResolved = resolvedSymbols.filter { resolved =>
@@ -141,6 +179,7 @@ object DoldecompIrGenerator {
                 .append(resolved.symbol.name)
             } else {
               warnings += error
+              otherWarnings += error
               DapHttpLoggers.irSourceDoldecomp.debug("Skipping symbol: {}", error)
             }
             false
@@ -148,17 +187,38 @@ object DoldecompIrGenerator {
             true
         }
       }
-      missingTypeByName.foreach { case (typeName, symbols) =>
-        val names = symbols.take(20).mkString(", ")
-        val suffix = if (symbols.size > 20) s", … (${symbols.size - 20} more)" else ""
+      missingTypeByName.foreach { case (typeName, typeSymbols) =>
+        val names = typeSymbols.take(20).mkString(", ")
+        val suffix = if (typeSymbols.size > 20) s", … (${typeSymbols.size - 20} more)" else ""
         val message =
-          s"Skipping ${symbols.size} symbol(s) with missing struct or primitive definition for '$typeName' (add the defining headers via --headers): $names$suffix."
+          s"Skipping ${typeSymbols.size} symbol(s) with missing struct or primitive definition for '$typeName' (add the defining headers via --headers): $names$suffix."
         warnings += message
         DapHttpLoggers.irSourceDoldecomp.warn("{}", message)
       }
+      // DESNOTE(jbarber, 2026-07-20): Do not auto-add guessed include roots. When any type fails
+      // to resolve, probe nearby directories and suggest --headers adjustments only.
+      if (missingTypeByName.nonEmpty) {
+        speculateMissingIncludePaths(headerRoots, missingTypeByName.keys.toList).foreach { hint =>
+          warnings += hint
+          includeHints += hint
+          DapHttpLoggers.irSourceDoldecomp.warn("{}", hint)
+        }
+      }
+
+      val missingTypesList = missingTypeByName.toList.map { case (name, syms) =>
+        name -> syms.toList
+      }
 
       if (validResolved.isEmpty) {
-        IrGenerationResult(warnings.toList, Nil)
+        IrGenerationResult(
+          warnings.toList,
+          Nil,
+          baseDiagnostics(
+            resolvedCount = resolvedSymbols.size,
+            operations = 0,
+            missingTypes = missingTypesList
+          )
+        )
       } else {
         val usedOutputNames = mutable.Set.empty[String]
         val usedOperationNames = mutable.Set.empty[String]
@@ -269,7 +329,8 @@ object DoldecompIrGenerator {
                       enums = enums,
                       pointeeTypeFor = pointeeTypeFor,
                       fieldInitializerLengths = fieldInitializerLengths,
-                      typedefs = typedefs
+                      typedefs = typedefs,
+                      arrayConstants = arrayConstants
                     ),
                     declaredSizeBits = None
                   )
@@ -360,8 +421,10 @@ object DoldecompIrGenerator {
           if (operation.isArray && operation.arrayLength.isEmpty) {
             val resolvedRoot = resolveTypedef(operation.rootTypeName, typedefs)
             if (operation.pointerDepth == 0 && isStructType(resolvedRoot)) {
-              warnings +=
+              val message =
                 s"${operation.symbol.name}: Unable to infer array length for aggregate '${operation.rootTypeName}' without a C declarator bound or initializer; symbol size may include element-stride padding."
+              warnings += message
+              otherWarnings += message
               None
             } else {
               elementSizeBytesForRootType(operation.rootTypeName, operation.pointerDepth) match {
@@ -370,11 +433,17 @@ object DoldecompIrGenerator {
                     case Some(length) =>
                       Some(operation.copy(arrayLength = Some(length)))
                     case None =>
-                      warnings += s"${operation.symbol.name}: Unable to infer array length for '${operation.rootTypeName}'."
+                      val message =
+                        s"${operation.symbol.name}: Unable to infer array length for '${operation.rootTypeName}'."
+                      warnings += message
+                      otherWarnings += message
                       None
                   }
                 case None =>
-                  warnings += s"${operation.symbol.name}: Unable to determine element size for '${operation.rootTypeName}'."
+                  val message =
+                    s"${operation.symbol.name}: Unable to determine element size for '${operation.rootTypeName}'."
+                  warnings += message
+                  otherWarnings += message
                   None
               }
             }
@@ -396,8 +465,10 @@ object DoldecompIrGenerator {
               // per-element stride padding (when divisible) or trailing section padding.
               if length > 0 && totalSize < length.toLong * elementSize
             } {
-              warnings +=
+              val message =
                 s"${operation.symbol.name}: symbol size 0x${totalSize.toHexString} is inconsistent with array length $length and element size $elementSize."
+              warnings += message
+              otherWarnings += message
             }
           }
         }
@@ -479,7 +550,9 @@ object DoldecompIrGenerator {
             )
           } catch {
             case ex: Exception =>
-              warnings += s"${operation.symbol.name}: ${ex.getMessage}"
+              val message = s"${operation.symbol.name}: ${ex.getMessage}"
+              warnings += message
+              otherWarnings += message
               None
           }
         }
@@ -493,6 +566,11 @@ object DoldecompIrGenerator {
               defaultEndian = IrEndian.Big,
               operations = irOperations
             )
+          ),
+          diagnostics = baseDiagnostics(
+            resolvedCount = resolvedSymbols.size,
+            operations = irOperations.size,
+            missingTypes = missingTypesList
           )
         )
         DapHttpLoggers.irSourceDoldecomp.info(
@@ -528,7 +606,8 @@ object DoldecompIrGenerator {
       enums: Map[String, CEnumDefinition],
       pointeeTypeFor: (String, Map[String, IASTCompositeTypeSpecifier]) => IrType,
       fieldInitializerLengths: Map[(String, String), Int],
-      typedefs: Map[String, String]
+      typedefs: Map[String, String],
+      arrayConstants: Map[String, Int]
   ): List[IrMember] =
     groupBitfieldFields(fields, wordSizeBits).flatMap {
       case RegularFieldGroup(field) =>
@@ -547,7 +626,8 @@ object DoldecompIrGenerator {
             enums = enums,
             pointeeTypeFor = pointeeTypeFor,
             fieldInitializerLengths = fieldInitializerLengths,
-            typedefs = typedefs
+            typedefs = typedefs,
+            arrayConstants = arrayConstants
           )
         )
       case BitmaskFieldGroup(name, bitfields, storageBits) if bitfields.size == 1 =>
@@ -718,7 +798,8 @@ object DoldecompIrGenerator {
       enums: Map[String, CEnumDefinition],
       pointeeTypeFor: (String, Map[String, IASTCompositeTypeSpecifier]) => IrType,
       fieldInitializerLengths: Map[(String, String), Int],
-      typedefs: Map[String, String]
+      typedefs: Map[String, String],
+      arrayConstants: Map[String, Int]
   ): IrMember = {
     val normalizedType = CHeaderParser.normalizeTypeName(fieldTypeName).replaceAll("\\s+", "")
     val fieldName = CHeaderParser.fieldName(fieldDeclarator)
@@ -727,7 +808,7 @@ object DoldecompIrGenerator {
     val isPointer = CHeaderParser.pointerDepth(fieldDeclarator) > 0
     val arrayLength =
       CHeaderParser
-        .arrayLength(fieldDeclarator)
+        .arrayLength(fieldDeclarator, arrayConstants)
         .orElse(fieldInitializerLengths.get((structName, fieldName)))
 
     val funcPointerSig =
@@ -1105,29 +1186,34 @@ object DoldecompIrGenerator {
       }
     }
 
-  private def loadStructMemberOffsets(headerRoots: List[Path]): Map[(String, String), Int] = {
-    val sourceFiles = headerRoots.flatMap(collectSourceFiles).distinct
-    sourceFiles.flatMap { path =>
-      val source = new String(Files.readAllBytes(path))
-      CHeaderOffsetParser.parse(source).toList
-    }.toMap
+  private final case class HeaderFile(path: Path, raw: String, cdtSource: String) {
+    def isHeader: Boolean = path.toString.endsWith(".h")
+    def isCSource: Boolean = path.toString.endsWith(".c")
   }
 
-  private def loadGlobalDeclarations(
-      headerRoots: List[Path],
-      macros: Map[String, String]
-  ): Map[String, GlobalVariableDeclaration] = {
-    val sourceFiles = headerRoots.flatMap(collectSourceFiles).distinct
-    sourceFiles
-      .flatMap { path =>
-        val source = new String(Files.readAllBytes(path))
-        CHeaderParser.parseGlobalDeclarations(source, macros)
-      }
-      .groupBy(_.name)
-      .view
-      .mapValues(mergeGlobalDeclarations)
-      .toMap
+  private final case class HeaderCorpus(files: Vector[HeaderFile])
+
+  private final case class TypeCorpus(
+      structs: MergedNamedMap[IASTCompositeTypeSpecifier],
+      typedefs: MergedNamedMap[String],
+      globals: Map[String, GlobalVariableDeclaration],
+      fieldInitializerLengths: Map[(String, String), Int]
+  )
+
+  private def loadCorpus(headerRoots: List[Path]): HeaderCorpus = {
+    val paths = headerRoots.flatMap(collectSourceFiles).distinct.sortBy(_.toString)
+    HeaderCorpus(
+      paths.map { path =>
+        val raw = new String(Files.readAllBytes(path))
+        val isC = path.toString.endsWith(".c")
+        HeaderFile(path, raw, CHeaderParser.prepareCdtSource(raw, neutralizeHeavyContent = isC))
+      }.toVector
+    )
   }
+
+  private def loadStructMemberOffsets(corpus: HeaderCorpus): Map[(String, String), Int] =
+    // Offset comments must be read from raw source — stripped CDT input removes them.
+    corpus.files.flatMap(file => CHeaderOffsetParser.parse(file.raw).toList).toMap
 
   private[daphttp] def mergeGlobalDeclarations(
       declarations: List[GlobalVariableDeclaration]
@@ -1170,74 +1256,106 @@ object DoldecompIrGenerator {
     )
   }
 
-  private def loadFieldInitializerLengths(
-      headerRoots: List[Path],
-      headerStructs: Map[String, IASTCompositeTypeSpecifier],
-      macros: Map[String, String]
-  ): Map[(String, String), Int] = {
-    val sourceFiles = headerRoots.flatMap(collectSourceFiles).distinct
-    sourceFiles
-      .flatMap { path =>
-        val source = new String(Files.readAllBytes(path))
-        CHeaderParser.parseStructFieldInitializerLengths(source, headerStructs, macros).toList
+  private def loadAllMacros(corpus: HeaderCorpus): MergedNamedMap[String] = {
+    val entries = corpus.files.flatMap { file =>
+      CHeaderParser
+        .extractMacros(file.cdtSource, alreadyStripped = true)
+        .toList
+        .map { case (name, value) => (name, value, file.path.toString) }
+    }.toList
+    mergeNamedEntries(entries, "macro", (a: String, b: String) => a == b)
+  }
+
+  private def loadTypeCorpus(
+      corpus: HeaderCorpus,
+      macros: Map[String, String],
+      arrayConstants: Map[String, Int]
+  ): TypeCorpus = {
+    // DESNOTE(jbarber, 2026-07-20): .c sources are neutralized (no huge initializers / bodies) before
+    // CDT, so retaining struct ASTs from them is safe; skipping .c structs broke fixtures that define
+    // types in .c and would miss real TU-local types.
+    val scannerInfo = CHeaderParser.scannerInfoFor(macros)
+    val structEntries =
+      mutable.ListBuffer.empty[(String, IASTCompositeTypeSpecifier, String)]
+    val typedefEntries = mutable.ListBuffer.empty[(String, String, String)]
+    val globalEntries = mutable.ListBuffer.empty[GlobalVariableDeclaration]
+    corpus.files.foreach { file =>
+      val parsed =
+        CHeaderParser.parseDeclarations(
+          file.cdtSource,
+          scannerInfo,
+          arrayConstants,
+          alreadyStripped = true
+        )
+      val source = file.path.toString
+      structEntries ++= parsed.structs.map { case (name, spec) => (name, spec, source) }
+      typedefEntries ++= parsed.typedefs.map { case (name, target) => (name, target, source) }
+      globalEntries ++= parsed.globals
+    }
+    val structs = mergeNamedEntries(structEntries.toList, "struct", structDefinitionsEquivalent)
+    val typedefs =
+      mergeNamedEntries(typedefEntries.toList, "typedef", (a: String, b: String) => a == b)
+    val globals = globalEntries.toList
+      .groupBy(_.name)
+      .view
+      .mapValues(mergeGlobalDeclarations)
+      .toMap
+    // Field-initializer lengths need real initializer ASTs. Only re-parse small .c files without
+    // neutralization so Melee data objects (often MBs) are skipped.
+    val maxFieldInitBytes = 64 * 1024
+    val fieldInitScanner = CHeaderParser.scannerInfoFor(macros)
+    val fieldInitializerLengths = corpus.files.iterator
+      .filter(file => file.isCSource && file.raw.length <= maxFieldInitBytes)
+      .flatMap { file =>
+        val forInits = CHeaderParser.stripComments(file.raw)
+        CHeaderParser
+          .parseStructFieldInitializerLengths(
+            forInits,
+            structs.values,
+            fieldInitScanner,
+            alreadyStripped = true
+          )
+          .toList
       }
+      .toList
       .groupBy(_._1)
       .view
       .mapValues(_.map(_._2).max)
       .toMap
-  }
-
-  private def loadAllMacros(headerRoots: List[Path]): MergedNamedMap[String] = {
-    val sourceFiles = headerRoots.flatMap(collectSourceFiles).distinct
-    val entries = sourceFiles.flatMap { path =>
-      val source = new String(Files.readAllBytes(path))
-      CHeaderParser.extractMacros(source).toList
-    }
-    mergeNamedEntries(entries, "macro", _ == _)
-  }
-
-  private def loadStructs(
-      headerRoots: List[Path],
-      macros: Map[String, String]
-  ): MergedNamedMap[IASTCompositeTypeSpecifier] = {
-    val sourceFiles = headerRoots.flatMap(collectSourceFiles).distinct
-    val entries = sourceFiles.flatMap { path =>
-      val source = new String(Files.readAllBytes(path))
-      CHeaderParser.parse(source, macros).toList
-    }
-    mergeNamedEntries(entries, "struct", structDefinitionsEquivalent)
-  }
-
-  private def loadTypedefs(
-      headerRoots: List[Path],
-      macros: Map[String, String]
-  ): MergedNamedMap[String] = {
-    val sourceFiles = headerRoots.flatMap(collectSourceFiles).distinct
-    val entries = sourceFiles.flatMap { path =>
-      val source = new String(Files.readAllBytes(path))
-      CHeaderParser.parseTypedefs(source, macros).toList
-    }
-    mergeNamedEntries(entries, "typedef", _ == _)
+    TypeCorpus(structs, typedefs, globals, fieldInitializerLengths)
   }
 
   private def mergeNamedEntries[A](
-      entries: List[(String, A)],
+      entries: List[(String, A, String)],
       kind: String,
       equivalent: (A, A) => Boolean
   ): MergedNamedMap[A] = {
-    val conflictNames = mutable.LinkedHashSet.empty[String]
+    val conflictIgnored = mutable.LinkedHashMap.empty[String, mutable.ListBuffer[String]]
+    val keptSource = mutable.LinkedHashMap.empty[String, String]
     val merged = mutable.LinkedHashMap.empty[String, A]
-    entries.foreach { case (name, value) =>
+    entries.foreach { case (name, value, source) =>
       merged.get(name) match {
         case None =>
           merged(name) = value
+          keptSource(name) = source
         case Some(existing) if equivalent(existing, value) =>
           ()
         case Some(_) =>
-          conflictNames += name
+          conflictIgnored.getOrElseUpdate(name, mutable.ListBuffer.empty).append(source)
       }
     }
-    MergedNamedMap(merged.toMap, summarizeNameConflicts(kind, conflictNames.toList))
+    val conflicts = conflictIgnored.toList.map { case (name, ignored) =>
+      NamedConflict(
+        name = name,
+        keptSource = keptSource.getOrElse(name, "<unknown>"),
+        ignoredSources = ignored.toList.distinct
+      )
+    }
+    MergedNamedMap(
+      merged.toMap,
+      summarizeNameConflicts(kind, conflicts.map(_.name)),
+      conflicts
+    )
   }
 
   private def summarizeNameConflicts(kind: String, names: List[String]): List[String] =
@@ -1265,21 +1383,22 @@ object DoldecompIrGenerator {
     }
 
   private def loadEnums(
-      headerRoots: List[Path],
+      corpus: HeaderCorpus,
       macros: Map[String, String]
   ): EnumParseResult = {
-    val sourceFiles = headerRoots.flatMap(collectSourceFiles).distinct
     // DESNOTE(jbarber, 2026-07-20): Character motion enums form a dependency chain
     // (ftCo_MS_Count → ftMh_MS_Count → ftCh_MS_Count). Iterate: parse → harvest Count sentinels that
     // appear before any failed initializer in their enum → reparse until macros stabilize (capped).
     // Only Count sentinels are injected — exporting every enumerator as a macro would collide with
-    // later redefinitions of the same enum tag (see enum-merge fixture).
+    // later redefinitions of the same enum tag (see enum-merge fixture) and OOM ScannerInfo setup.
     // See https://github.com/eclipse-cdt/cdt/blob/main/core/org.eclipse.cdt.core/parser/org/eclipse/cdt/internal/core/dom/parser/ValueFactory.java
-    def parseAll(macrosForPass: Map[String, String]): List[EnumParseResult] =
-      sourceFiles.map { path =>
-        val source = new String(Files.readAllBytes(path))
-        CHeaderParser.parseEnums(source, macrosForPass)
-      }
+    def parseAll(macrosForPass: Map[String, String]): List[(String, EnumParseResult)] = {
+      val scannerInfo = CHeaderParser.scannerInfoFor(macrosForPass)
+      corpus.files.map { file =>
+        file.path.toString ->
+          CHeaderParser.parseEnums(file.cdtSource, scannerInfo, alreadyStripped = true)
+      }.toList
+    }
 
     var macrosForPass = macros
     var results = parseAll(macrosForPass)
@@ -1287,11 +1406,11 @@ object DoldecompIrGenerator {
     var continue = true
     while (continue && pass < 4) {
       pass += 1
-      val warningCount = results.map(_.warnings.size).sum
+      val warningCount = results.map(_._2.warnings.size).sum
       // Accumulate onto macrosForPass — never rebuild from the original `macros` alone, or a later
       // harvest that omits an earlier Count (because that enumerator name is now a macro in its
       // defining file) would drop dependencies needed by consumers.
-      val nextMacros = macrosForPass ++ countSentinelMacros(results)
+      val nextMacros = macrosForPass ++ countSentinelMacros(results.map(_._2))
       if (nextMacros == macrosForPass || warningCount == 0) {
         continue = false
       } else {
@@ -1330,61 +1449,146 @@ object DoldecompIrGenerator {
       .toMap
   }
 
-  private def enumeratorMacros(enums: Map[String, CEnumDefinition]): Map[String, String] = {
-    // DESNOTE(jbarber, 2026-07-20): After enums are merged, export every enumerator as a ScannerInfo
-    // macro for struct/global parses so bounds like jobjs[HUD_PLACE_MAX] evaluate. First name wins
-    // on cross-enum collisions. Do not feed these into loadEnums (see countSentinelMacros DESNOTE).
+  private def countMacrosFromEnums(enums: Map[String, CEnumDefinition]): Map[String, String] =
     enums.values
       .flatMap(_.values)
       .foldLeft(Map.empty[String, String]) { (acc, value) =>
-        if (acc.contains(value.name)) acc else acc + (value.name -> value.value.toString)
+        if (
+          acc.contains(value.name) ||
+          !(value.name.endsWith("_Count") || value.name.endsWith("_SelfCount"))
+        ) {
+          acc
+        } else {
+          acc + (value.name -> value.value.toString)
+        }
       }
-  }
 
-  private def mergeEnumParseResults(results: List[EnumParseResult]): EnumParseResult = {
+  private def enumeratorIntConstants(enums: Map[String, CEnumDefinition]): Map[String, Int] =
+    // Post-hoc array-bound lookup table — not fed into ScannerInfo.
+    enums.values
+      .flatMap(_.values)
+      .foldLeft(Map.empty[String, Int]) { (acc, value) =>
+        if (acc.contains(value.name)) acc else acc + (value.name -> value.value)
+      }
+
+  private def mergeEnumParseResults(
+      results: List[(String, EnumParseResult)]
+  ): EnumParseResult = {
     val warnings = mutable.ListBuffer.empty[String]
-    warnings ++= results.flatMap(_.warnings)
-    val conflictNames = mutable.LinkedHashSet.empty[String]
+    warnings ++= results.flatMap(_._2.warnings)
+    val conflictIgnored = mutable.LinkedHashMap.empty[String, mutable.ListBuffer[String]]
+    val keptSource = mutable.LinkedHashMap.empty[String, String]
     val merged = mutable.LinkedHashMap.empty[String, CEnumDefinition]
-    results.foreach { result =>
+    results.foreach { case (source, result) =>
       result.enums.foreach { case (name, definition) =>
         merged.get(name) match {
           case None =>
             merged(name) = definition
+            keptSource(name) = source
           case Some(existing) if existing.values == definition.values =>
             ()
           case Some(existing) if existing.values.isEmpty && definition.values.nonEmpty =>
             merged(name) = definition
+            keptSource(name) = source
           case Some(existing) if existing.values.nonEmpty && definition.values.isEmpty =>
             warnings += s"$name: Ignoring empty enum redefinition."
           case Some(_) =>
-            conflictNames += name
+            conflictIgnored.getOrElseUpdate(name, mutable.ListBuffer.empty).append(source)
         }
       }
     }
-    warnings ++= summarizeNameConflicts("enum", conflictNames.toList)
-    EnumParseResult(merged.toMap, warnings.toList)
-  }
-
-  private def expandHeaderRoots(headerRoots: List[Path]): List[Path] = {
-    // DESNOTE(jbarber, 2026-07-20): Melee layouts put Dolphin SDK headers at
-    // <repo>/extern/dolphin/include next to <repo>/src. Auto-append when present so Vec3/GXColor
-    // resolve without a second --headers. Explicit --headers paths still win for ordering.
-    // See https://github.com/zeldaret/melee (extern/dolphin).
-    val extras = headerRoots.flatMap { root =>
-      val absolute = root.toAbsolutePath.normalize
-      Option(absolute.getParent)
-        .map(_.resolve("extern/dolphin/include"))
-        .filter(p => Files.isDirectory(p) && !headerRoots.exists(_.toAbsolutePath.normalize == p))
-        .toList
-    }.distinct
-    if (extras.nonEmpty) {
-      DapHttpLoggers.irSourceDoldecomp.info(
-        "Also scanning adjacent Dolphin SDK include(s): {}",
-        extras.map(_.toString).mkString(", ")
+    val conflicts = conflictIgnored.toList.map { case (name, ignored) =>
+      NamedConflict(
+        name = name,
+        keptSource = keptSource.getOrElse(name, "<unknown>"),
+        ignoredSources = ignored.toList.distinct
       )
     }
-    (headerRoots ++ extras).map(_.toAbsolutePath.normalize).distinct
+    warnings ++= summarizeNameConflicts("enum", conflicts.map(_.name))
+    EnumParseResult(merged.toMap, warnings.toList, conflicts)
+  }
+
+  private def speculateMissingIncludePaths(
+      headerRoots: List[Path],
+      missingTypes: List[String]
+  ): List[String] = {
+    if (missingTypes.isEmpty) {
+      Nil
+    } else {
+      val alreadyScanned = headerRoots.map(_.toAbsolutePath.normalize).toSet
+      val candidates = headerRoots
+        .flatMap(nearbyIncludeCandidates)
+        .map(_.toAbsolutePath.normalize)
+        .distinct
+        .filter(p => Files.isDirectory(p) && !alreadyScanned.contains(p))
+      val hits = candidates.flatMap { dir =>
+        val defined = missingTypes.filter(typeName => directoryLikelyDefinesType(dir, typeName))
+        if (defined.isEmpty) None
+        else Some(dir -> defined)
+      }
+      if (hits.isEmpty) {
+        Nil
+      } else {
+        val details = hits
+          .map { case (dir, types) =>
+            val sample = types.take(8).mkString(", ")
+            val more = if (types.size > 8) s", … (${types.size - 8} more)" else ""
+            s"$dir (may define $sample$more)"
+          }
+          .mkString("; ")
+        List(
+          s"Missing type definitions may indicate incomplete --headers. Nearby paths that appear to define some of them: $details. Add those paths via --headers or adjust your include path."
+        )
+      }
+    }
+  }
+
+  private def nearbyIncludeCandidates(root: Path): List[Path] = {
+    val absolute = root.toAbsolutePath.normalize
+    val parent = Option(absolute.getParent)
+    val grandparent = parent.flatMap(p => Option(p.getParent))
+    List[Option[Path]](
+      parent.map(_.resolve("include")),
+      parent.map(_.resolve("extern")),
+      parent.map(_.resolve("extern/dolphin/include")),
+      parent.map(_.resolve("dolphin/include")),
+      parent.map(_.resolve("sdk/include")),
+      grandparent.map(_.resolve("extern/dolphin/include")),
+      grandparent.map(_.resolve("include")),
+      Some(absolute.resolveSibling("include")),
+      Some(absolute.resolveSibling("extern/dolphin/include"))
+    ).flatten
+  }
+
+  private def directoryLikelyDefinesType(dir: Path, typeName: String): Boolean = {
+    // Lightweight text probe only — never add the directory to the scan set.
+    val needle = typeName.replaceAll("\\*", "").trim
+    if (needle.isEmpty || !Files.isDirectory(dir)) {
+      false
+    } else {
+      val quoted = java.util.regex.Pattern.quote(needle)
+      val patterns = List(
+        raw"\bstruct\s+$quoted\b".r,
+        raw"\bunion\s+$quoted\b".r,
+        raw"\benum\s+$quoted\b".r,
+        raw"\btypedef\b[^;{}]*\b$quoted\s*;".r,
+        raw"\}\s*$quoted\s*;".r
+      )
+      val stream = Files.walk(dir)
+      try {
+        stream
+          .iterator()
+          .asScala
+          .filter(path => Files.isRegularFile(path) && path.toString.endsWith(".h"))
+          .take(400)
+          .exists { path =>
+            val text = new String(Files.readAllBytes(path))
+            patterns.exists(_.findFirstIn(text).isDefined)
+          }
+      } finally {
+        stream.close()
+      }
+    }
   }
 
   private def collectSourceFiles(root: Path): List[Path] = {

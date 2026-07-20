@@ -10,7 +10,9 @@ object SectionFilter {
 
   final case class SectionFilterResult(
       dataSymbols: List[DoldecompSymbol],
-      warnings: List[String]
+      warnings: List[String],
+      codeSectionSkips: List[(String, List[String])] = Nil,
+      unknownSectionSkips: List[(String, List[String])] = Nil
   )
 
   def filterDataSymbols(
@@ -32,32 +34,47 @@ object SectionFilter {
       NonDataSections.contains(normalize(symbol.section))
     }
 
-    val unknownSections = unknownSectionSymbols
-      .map(s => normalize(s.section))
-      .filterNot(knownData.contains)
-      .filterNot(looksLikeData)
-      .distinct
-      .sorted
+    val codeSectionSkips = codeSectionSymbols
+      .groupBy(s => normalize(s.section))
+      .toList
+      .sortBy(_._1)
+      .map { case (section, sectionSymbols) =>
+        section -> sectionSymbols.map(_.name).sorted
+      }
 
-    val unknownWarnings = unknownSections.map { section =>
+    val unknownSectionSkips = unknownSectionSymbols
+      .groupBy(s => normalize(s.section))
+      .toList
+      .sortBy(_._1)
+      .filter { case (section, _) =>
+        !knownData.contains(section) && !looksLikeData(section)
+      }
+      .map { case (section, sectionSymbols) =>
+        section -> sectionSymbols.map(_.name).sorted
+      }
+
+    val unknownWarnings = unknownSectionSkips.map { case (section, _) =>
       s"Unknown section '$section' is not recognized as data or code; symbols in it will be skipped. Use --data-sections to include it."
     }
     // DESNOTE(jbarber, 2026-07-20): Known code sections (.text, .ctors, extab, …) are never data;
     // do not suggest --data-sections. Summarize counts so Melee-scale skips stay one line.
     val codeWarnings =
-      if (codeSectionSymbols.isEmpty) {
+      if (codeSectionSkips.isEmpty) {
         Nil
       } else {
-        val bySection = codeSectionSymbols.groupBy(s => normalize(s.section)).toList.sortBy(_._1)
-        val summary = bySection
-          .map { case (section, symbols) => s"'$section' (${symbols.size})" }
+        val summary = codeSectionSkips
+          .map { case (section, names) => s"'$section' (${names.size})" }
           .mkString(", ")
-        List(
-          s"Skipping ${codeSectionSymbols.size} object symbol(s) in known code section(s): $summary."
-        )
+        val total = codeSectionSkips.map(_._2.size).sum
+        List(s"Skipping $total object symbol(s) in known code section(s): $summary.")
       }
 
-    SectionFilterResult(dataSymbols, unknownWarnings ++ codeWarnings)
+    SectionFilterResult(
+      dataSymbols = dataSymbols,
+      warnings = unknownWarnings ++ codeWarnings,
+      codeSectionSkips = codeSectionSkips,
+      unknownSectionSkips = unknownSectionSkips
+    )
   }
 
   private def normalize(section: String): String =
