@@ -26,6 +26,7 @@ object Cli
     ) {
 
   private final case class ServerConfig(
+      dapPipe: Option[Path],
       dapHost: String,
       dapPort: Int,
       dapTimeoutMs: Int,
@@ -48,10 +49,17 @@ object Cli
 
   private val serverConfigOpts: Opts[ServerConfig] = (
     Opts
-      .option[String]("dap-host", "DAP debug adapter host", metavar = "host")
+      .option[Path](
+        "dap-pipe",
+        "Existing local DAP path: Unix domain socket, or \\\\.\\pipe\\Name on Windows",
+        metavar = "path"
+      )
+      .orNone,
+    Opts
+      .option[String]("dap-host", "DAP debug adapter host (TCP)", metavar = "host")
       .withDefault("127.0.0.1"),
     Opts
-      .option[Int]("dap-port", "DAP debug adapter port", metavar = "port")
+      .option[Int]("dap-port", "DAP debug adapter port (TCP)", metavar = "port")
       .withDefault(4711),
     Opts
       .option[Int]("dap-timeout-ms", "DAP socket read timeout in milliseconds", metavar = "ms")
@@ -312,7 +320,8 @@ object Cli
       _ <-
         if (watch && watchPaths.nonEmpty) startSmithyWatcher(watchPaths, plansRef)
         else IO.unit
-      dapClient = new DapHttpServerMain.SocketDapClient(
+      dapClient = DapClients.create(
+        config.dapPipe,
         config.dapHost,
         config.dapPort,
         config.dapTimeoutMs,

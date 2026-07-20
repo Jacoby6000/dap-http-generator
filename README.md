@@ -17,9 +17,13 @@ entrypoint also exists at `io.github.jacoby6000.daphttp.DapHttpServerMain`.
 
 Server subcommands (`smithy`, `cheaders`) share these flags:
 
-- `--dap-host` / `--dap-port` (default `127.0.0.1:4711`) — DAP debug adapter
-- `--dap-timeout-ms` (default `5000`) — DAP socket read timeout for memory reads
-- `--dap-continue-timeout-ms` (default `30000`) — DAP socket read timeout for `POST /resume`
+- DAP transport (choose one):
+  - TCP (default): `--dap-host` / `--dap-port` (default `127.0.0.1:4711`)
+  - Local pipe: `--dap-pipe <path>` — Unix domain socket
+    (e.g. dolphin-dap `DAPSocket=/tmp/dolphin-dap.sock`) or Windows named pipe
+    (`\\.\pipe\Name`)
+- `--dap-timeout-ms` (default `5000`) — DAP read timeout for memory reads
+- `--dap-continue-timeout-ms` (default `30000`) — DAP read timeout for `POST /resume`
 - `--dap-connect-timeout-ms` (default `1000`) — TCP connect timeout per DAP attempt
 - `--dap-connect-retry-ms` (default `5000`) — delay between DAP connect attempts at startup
 - `--bind-host` / `--bind-port` (default `0.0.0.0:8080`) — HTTP server bind address
@@ -125,11 +129,11 @@ The server:
 
 `/`, `/health`, `/routes`, and `POST /resume` work without a debugger. `/routes` returns both a flat
 `routes` list and a `tree` for the UI. On startup the server immediately tries to connect to the DAP
-adapter (1s TCP timeout per attempt, retrying every 5s until connected). `/resume` reuses the
-persistent DAP TCP session (then sends `continue`). Use it when the target is stopped and
-`readMemory` times out. Generated **data** routes use the same connection for `readMemory`
-(serialized under a lock); if the connection drops the client reconnects. If nothing is listening
-they return per-read `error` fields while the HTTP request still succeeds.
+adapter over TCP or `--dap-pipe` (1s TCP connect timeout per attempt, retrying every 5s until
+connected). `/resume` reuses the persistent DAP session (then sends `continue`). Use it when the
+target is stopped and `readMemory` times out. Generated **data** routes use the same connection for
+`readMemory` (serialized under a lock); if the connection drops the client reconnects. If nothing is
+listening they return per-read `error` fields while the HTTP request still succeeds.
 
 ### Running locally
 
@@ -152,6 +156,29 @@ sbt "run cheaders \
   --symbols /absolute/path/to/symbols.txt \
   --headers /absolute/path/to/src \
   --word-size 32 \
+  --bind-port 8080"
+```
+
+Local DAP pipe (client to an existing endpoint):
+
+```bash
+# Linux: Unix domain socket (dolphin-dap Dolphin.General.DAPSocket)
+sbt "run smithy --smithy /absolute/path/to/models \
+  --dap-pipe /tmp/dolphin-dap.sock \
+  --bind-port 8080"
+
+# Windows: named pipe created by the adapter
+sbt "run smithy --smithy /absolute/path/to/models \
+  --dap-pipe \\\\.\\pipe\\MyDapAdapter \
+  --bind-port 8080"
+```
+
+TCP attach (dolphin-dap `Dolphin.General.DAPPort`):
+
+```bash
+sbt "run smithy --smithy /absolute/path/to/models \
+  --dap-host 127.0.0.1 \
+  --dap-port 5678 \
   --bind-port 8080"
 ```
 

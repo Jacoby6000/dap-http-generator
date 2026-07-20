@@ -40,6 +40,7 @@ import scala.util.Try
 object DapHttpServerMain extends IOApp {
   private final case class Config(
       smithyPaths: List[Path],
+      dapPipe: Option[Path],
       dapHost: String,
       dapPort: Int,
       dapTimeoutMs: Int,
@@ -59,7 +60,8 @@ object DapHttpServerMain extends IOApp {
         for {
           plansRef <- Ref.of[IO, RoutePlansLoadResult](loadPlans(config.smithyPaths))
           _ <- watchSmithySources(config, plansRef)
-          dapClient = new SocketDapClient(
+          dapClient = DapClients.create(
+            config.dapPipe,
             config.dapHost,
             config.dapPort,
             config.dapTimeoutMs,
@@ -102,6 +104,7 @@ object DapHttpServerMain extends IOApp {
       Right(
         Config(
           smithyPaths = smithyPaths,
+          dapPipe = values.get("dapPipe").map(Paths.get(_)),
           dapHost = values.getOrElse("dapHost", "127.0.0.1"),
           dapPort = values.get("dapPort").flatMap(v => Try(v.toInt).toOption).getOrElse(4711),
           dapTimeoutMs =

@@ -16,11 +16,35 @@ The entrypoint is `io.github.jacoby6000.daphttp.Cli` (a Decline CLI) with three 
 - `cheaders-smithy` — generate a Smithy model from C headers + symbols (`--symbols`, `--headers`,
   `--namespace`, `--service`, `--word-size`, `--data-sections`, `--output`).
 
-`smithy` and `cheaders` share `--dap-host/--dap-port` (default `127.0.0.1:4711`) and
-`--bind-host/--bind-port` (default `0.0.0.0:8080`). Run with `sbt "run <subcommand> ..."`.
-Standard build/lint/test commands are documented in `README.md` and `.github/workflows/ci.yml`
-(`sbt fmt`, `sbt fix`, `sbt test`, and CI's `scalafmtCheckAll;scalafmtSbtCheck` /
-`scalafixAll --check`).
+`smithy` and `cheaders` share DAP transport flags and `--bind-host/--bind-port`
+(default `0.0.0.0:8080`). DAP transport is one of:
+
+- TCP (default): `--dap-host/--dap-port` (default `127.0.0.1:4711`) — persistent TCP session
+- Local pipe (client only): `--dap-pipe` — Unix domain socket (Linux/macOS) or Windows named
+  pipe (`\\.\pipe\Name`)
+
+Also shared: `--dap-timeout-ms`, `--dap-continue-timeout-ms`, `--dap-connect-timeout-ms`,
+`--dap-connect-retry-ms`.
+
+Intended peer for Melee/doldecomp workflows is the local `dolphin-dap` fork (sibling
+`../dolphin-dap`), which listens via `Dolphin.General.DAPPort` (TCP) or
+`Dolphin.General.DAPSocket` (Unix domain socket). Upstream Dolphin does not ship DAP yet.
+
+Run with `sbt "run <subcommand> ..."`. Standard build/lint/test commands are documented in
+`README.md` and `.github/workflows/ci.yml` (`sbt fmt`, `sbt fix`, `sbt test`, and CI's
+`scalafmtCheckAll;scalafmtSbtCheck` / `scalafixAll --check`).
+
+### DAP transport notes
+
+- TCP client: `DapHttpServerMain.SocketDapClient`. Pipe/socket client: `LocalPipeDapClient`.
+- Sessions are persistent, handshake with DAP `initialize`, serialize concurrent requests, and
+  skip non-matching DAP events until the matching `response` arrives.
+- `LocalPipeDapClient` opens the pipe/socket under cats-effect `Resource` so failed handshakes
+  always close the connection; read/continue/connect use `IO.interruptible` + `IO.timeout`.
+  Concurrent DAP requests are serialized with `Mutex[IO]` (one in-flight framing exchange).
+- We are always a **client** to an adapter-owned endpoint (never create the pipe/socket).
+  `--dap-pipe` matches VS Code's "named pipe" path convention: AF_UNIX connect on Unix
+  (dolphin-dap `DAPSocket`), `RandomAccessFile(..., "rw")` for Windows `\\.\pipe\Name`.
 
 ### IR pipeline
 
@@ -90,12 +114,13 @@ flowchart LR
 - Generated data routes are always under `/api` (`ApiRoutes.normalize`). Meta UI endpoints stay at
   the root so they never collide with a Smithy service named `api`.
 - The `/health` and `/routes` endpoints work without a debugger. On startup the server immediately
-  tries to connect to the DAP adapter on `--dap-port` (1s TCP timeout per attempt, retrying every
-  5s until connected). Generated **data** routes reuse that persistent TCP connection (serialized
-  across concurrent requests); if the adapter is not listening they return per-read `error` fields
-  (the HTTP request still succeeds). To exercise data routes locally without a real debugger, run a
-  small mock TCP server that speaks the DAP `readMemory` framing (`Content-Length: N\r\n\r\n` +
-  JSON body, responding with `{"success":true,"body":{"data":"<base64>"}}`).
+  tries to connect to the DAP adapter (TCP or `--dap-pipe`; 1s TCP connect timeout per attempt,
+  retrying every 5s until connected). Generated **data** routes reuse that persistent session
+  (serialized across concurrent requests); if the adapter is not listening they return per-read
+  `error` fields (the HTTP request still succeeds). To exercise data routes locally without a real
+  debugger, run a mock that speaks DAP framing (`Content-Length: N\r\n\r\n` + JSON) over TCP or a
+  Unix domain socket / Windows named pipe, responding with
+  `{"success":true,"body":{"data":"<base64>"}}`.
 - `IrSizingWarnings` logs non-fatal warnings to stderr when IR members use ambiguous Smithy
   prelude types (`Integer`, `Long`, `Float`, `Double`) without explicit width traits (`@u32`,
   `@f64`, etc.). Pointer members are excluded.
