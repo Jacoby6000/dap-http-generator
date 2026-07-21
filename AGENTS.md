@@ -119,7 +119,8 @@ flowchart LR
   Path matching for GET/watches lives in `RoutePathResolver`; single-region DAP
   read/decode is shared via `MemoryDecodeService`. Smithy assembly is
   `SmithyModelLoader` (used by Cli). Process entry is `Cli` only; `DapHttpServerMain` is the
-  HTTP/DAP runtime library (routes, clients, decode), not a second `IOApp`.
+  HTTP/DAP runtime library (routes, clients, decode), not a second `IOApp`. Watch/WebSocket
+  deps are `Option` (`None` in tests without realtime); never null sentinels.
 - **api-models (JVM + JS)** — under `modules/api-models/`; Circe transport models shared by
   server and explorer (`RouteTreeNode`, `RoutesResponse`, overlay document types,
   `TypeCatalogEntry`), plus shared helpers `DualDecodeAlign` (source/overlay JSON row

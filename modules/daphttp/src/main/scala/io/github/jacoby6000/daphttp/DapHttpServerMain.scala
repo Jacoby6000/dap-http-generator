@@ -35,8 +35,8 @@ object DapHttpServerMain {
       dapClient,
       Ref.unsafe[IO, OverlayEngine](OverlayEngine.empty),
       overlayPersistPath = None,
-      watchService = null,
-      wsBuilder = null
+      watchService = None,
+      wsBuilder = None
     )
 
   private[daphttp] def routes(
@@ -45,15 +45,15 @@ object DapHttpServerMain {
       overlaysRef: Ref[IO, OverlayEngine],
       overlayPersistPath: Option[Path]
   ): HttpRoutes[IO] =
-    routes(plansRef, dapClient, overlaysRef, overlayPersistPath, null, null)
+    routes(plansRef, dapClient, overlaysRef, overlayPersistPath, None, None)
 
   private[daphttp] def routes(
       plansRef: Ref[IO, RoutePlansLoadResult],
       dapClient: DapClient,
       overlaysRef: Ref[IO, OverlayEngine],
       overlayPersistPath: Option[Path],
-      watchService: RealtimeWatchService,
-      wsBuilder: WebSocketBuilder2[IO]
+      watchService: Option[RealtimeWatchService],
+      wsBuilder: Option[WebSocketBuilder2[IO]]
   ): HttpRoutes[IO] =
     DapProxyRoutes.routes(plansRef, dapClient, overlaysRef) <+>
       WebAppRoutes.routes(
@@ -517,7 +517,7 @@ object DapHttpServerMain {
         Ok(
           Json.obj(
             "route" -> Json.fromString(routePath),
-            "pointerAddress" -> Json.fromString(f"0x$pointerAddress%x"),
+            "pointerAddress" -> Json.fromString(DapAddress.format(pointerAddress)),
             "error" -> Json.fromString(error)
           )
         )
@@ -530,7 +530,7 @@ object DapHttpServerMain {
                 "route" -> Json.fromString(routePath),
                 "member" -> Json.fromString(sub.memberName),
                 "index" -> index.map(Json.fromInt).getOrElse(Json.Null),
-                "pointerAddress" -> Json.fromString(f"0x$pointerAddress%x"),
+                "pointerAddress" -> Json.fromString(DapAddress.format(pointerAddress)),
                 "decoded" -> Json.fromString(value)
               )
             )
@@ -543,7 +543,7 @@ object DapHttpServerMain {
                   "route" -> Json.fromString(routePath),
                   "member" -> Json.fromString(sub.memberName),
                   "index" -> index.map(Json.fromInt).getOrElse(Json.Null),
-                  "pointerAddress" -> Json.fromString(f"0x$pointerAddress%x"),
+                  "pointerAddress" -> Json.fromString(DapAddress.format(pointerAddress)),
                   "error" -> Json.fromString("Unable to determine pointee size.")
                 )
               )
@@ -566,7 +566,7 @@ object DapHttpServerMain {
                       "route" -> Json.fromString(routePath),
                       "member" -> Json.fromString(sub.memberName),
                       "index" -> index.map(Json.fromInt).getOrElse(Json.Null),
-                      "pointerAddress" -> Json.fromString(f"0x$pointerAddress%x"),
+                      "pointerAddress" -> Json.fromString(DapAddress.format(pointerAddress)),
                       "error" -> Json.fromString(error)
                     )
                   )
@@ -578,7 +578,7 @@ object DapHttpServerMain {
                         "route" -> Json.fromString(routePath),
                         "member" -> Json.fromString(sub.memberName),
                         "index" -> index.map(Json.fromInt).getOrElse(Json.Null),
-                        "pointerAddress" -> Json.fromString(f"0x$pointerAddress%x"),
+                        "pointerAddress" -> Json.fromString(DapAddress.format(pointerAddress)),
                         "bytes" -> Json.fromInt(readSize),
                         "decoded" -> finalDecoded
                       )

@@ -30,8 +30,8 @@ private[daphttp] object WebAppRoutes {
       plansRef: Ref[IO, RoutePlansLoadResult],
       overlaysRef: Ref[IO, OverlayEngine],
       overlayPersistPath: Option[Path],
-      watchService: RealtimeWatchService,
-      wsBuilder: WebSocketBuilder2[IO]
+      watchService: Option[RealtimeWatchService],
+      wsBuilder: Option[WebSocketBuilder2[IO]]
   ): HttpRoutes[IO] =
     HttpRoutes.of[IO] {
       case GET -> Root / "health" =>
@@ -48,63 +48,40 @@ private[daphttp] object WebAppRoutes {
           )
         }
 
-      case GET -> Root / "watches" if watchService != null =>
-        watchService.list.flatMap { watches =>
-          Ok(
-            Json.obj(
-              "watches" -> watches
-                .map(w =>
-                  Json.obj(
-                    "watchId" -> Json.fromInt(w.watchId),
-                    "path" -> Json.fromString(w.path),
-                    "address" -> Json.fromString(f"0x${w.address}%x"),
-                    "count" -> Json.fromInt(w.count),
-                    "overlaySegments" -> w.overlayFields.map(f => f.segments.asJson).asJson
-                  )
-                )
-                .asJson
-            )
-          )
+      case GET -> Root / "watches" if watchService.isDefined =>
+        watchService.get.list.flatMap { watches =>
+          Ok(Json.obj("watches" -> watches.map(watchBindingJson).asJson))
         }
 
-      case req @ POST -> Root / "watches" if watchService != null =>
+      case req @ POST -> Root / "watches" if watchService.isDefined =>
         req.as[Json].flatMap { body =>
           body.hcursor.get[String]("path") match {
             case Left(_) =>
               BadRequest(Json.obj("error" -> Json.fromString("Missing path")))
             case Right(path) =>
-              watchService.subscribe(path).flatMap {
+              watchService.get.subscribe(path).flatMap {
                 case Left(error) =>
                   BadRequest(Json.obj("error" -> Json.fromString(error)))
                 case Right(binding) =>
-                  Ok(
-                    Json.obj(
-                      "watchId" -> Json.fromInt(binding.watchId),
-                      "path" -> Json.fromString(binding.path),
-                      "address" -> Json.fromString(f"0x${binding.address}%x"),
-                      "count" -> Json.fromInt(binding.count),
-                      "overlaySegments" -> binding.overlayFields
-                        .map(f => f.segments.asJson)
-                        .asJson
-                    )
-                  )
+                  Ok(watchBindingJson(binding))
               }
           }
         }
 
-      case DELETE -> Root / "watches" / IntVar(watchId) if watchService != null =>
-        watchService.cancel(watchId).flatMap {
+      case DELETE -> Root / "watches" / IntVar(watchId) if watchService.isDefined =>
+        watchService.get.cancel(watchId).flatMap {
           case Left(error) =>
             NotFound(Json.obj("error" -> Json.fromString(error)))
           case Right(_) =>
             Ok(Json.obj("status" -> Json.fromString("ok")))
         }
 
-      case GET -> Root / "ws" if watchService != null && wsBuilder != null =>
+      case GET -> Root / "ws" if watchService.isDefined && wsBuilder.isDefined =>
         // DESNOTE(jbarber, 2026-07-20): Ember's default idle timeout is 60s; quiet watch
         // sockets with no memoryChanged frames get killed. Periodic Ping frames keep the
         // connection active (browsers auto-reply with Pong).
-        val toClient = watchService.updatesStream
+        val watches = watchService.get
+        val toClient = watches.updatesStream
           .map { update =>
             val payload = Json.obj(
               "type" -> Json.fromString("memoryChanged"),
@@ -124,31 +101,19 @@ private[daphttp] object WebAppRoutes {
             WebSocketFrame.Text(payload.noSpaces)
           }
           .merge(
-            watchService.clearedStream.map { _ =>
+            watches.clearedStream.map { _ =>
               WebSocketFrame.Text(
                 Json.obj("type" -> Json.fromString("watchesCleared")).noSpaces
               )
             }
           )
           .merge(
-            watchService.reboundStream.map { watches =>
+            watches.reboundStream.map { rebound =>
               WebSocketFrame.Text(
                 Json
                   .obj(
                     "type" -> Json.fromString("watchesRebound"),
-                    "watches" -> watches
-                      .map(w =>
-                        Json.obj(
-                          "watchId" -> Json.fromInt(w.watchId),
-                          "path" -> Json.fromString(w.path),
-                          "address" -> Json.fromString(f"0x${w.address}%x"),
-                          "count" -> Json.fromInt(w.count),
-                          "overlaySegments" -> w.overlayFields
-                            .map(f => f.segments.asJson)
-                            .asJson
-                        )
-                      )
-                      .asJson
+                    "watches" -> rebound.map(watchBindingJson).asJson
                   )
                   .noSpaces
               )
@@ -160,7 +125,7 @@ private[daphttp] object WebAppRoutes {
               .as(WebSocketFrame.Ping())
           )
         val fromClient: Pipe[IO, WebSocketFrame, Unit] = _.drain
-        wsBuilder.build(toClient, fromClient)
+        wsBuilder.get.build(toClient, fromClient)
 
       case GET -> Root / "types" =>
         for {
@@ -226,28 +191,14 @@ private[daphttp] object WebAppRoutes {
                           _ <- IO.blocking {
                             overlayPersistPath.foreach(TypeOverlay.saveDocument(_, normalized))
                           }
-                          rebindResult <-
-                            if (watchService != null) watchService.rebindAll
-                            else IO.pure((List.empty[WatchBinding], List.empty[String]))
-                          (watches, watchErrors) = rebindResult
+                          rebindResult <- watchService.fold(
+                            IO.pure((List.empty[WatchBinding], List.empty[String]))
+                          )(_.rebindAll)
+                          (bindings, watchErrors) = rebindResult
                           response <- Ok(
                             normalized.asJson.mapObject { obj =>
-                              val withWatches = obj.add(
-                                "watches",
-                                watches
-                                  .map(w =>
-                                    Json.obj(
-                                      "watchId" -> Json.fromInt(w.watchId),
-                                      "path" -> Json.fromString(w.path),
-                                      "address" -> Json.fromString(f"0x${w.address}%x"),
-                                      "count" -> Json.fromInt(w.count),
-                                      "overlaySegments" -> w.overlayFields
-                                        .map(f => f.segments.asJson)
-                                        .asJson
-                                    )
-                                  )
-                                  .asJson
-                              )
+                              val withWatches =
+                                obj.add("watches", bindings.map(watchBindingJson).asJson)
                               if (watchErrors.isEmpty) withWatches
                               else withWatches.add("watchErrors", watchErrors.asJson)
                             }
@@ -265,6 +216,15 @@ private[daphttp] object WebAppRoutes {
       case request @ GET -> Root / "assets" / fileName =>
         serveWebAsset(request, fileName)
     }
+
+  private def watchBindingJson(w: WatchBinding): Json =
+    Json.obj(
+      "watchId" -> Json.fromInt(w.watchId),
+      "path" -> Json.fromString(w.path),
+      "address" -> Json.fromString(DapAddress.format(w.address)),
+      "count" -> Json.fromInt(w.count),
+      "overlaySegments" -> w.overlayFields.map(f => f.segments.asJson).asJson
+    )
 
   /** Prefer canonical `namespace#name` keys so overlay lookup matches IR shape ids. */
   private def normalizeOverlayKeys(

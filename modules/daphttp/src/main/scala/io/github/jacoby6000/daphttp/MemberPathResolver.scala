@@ -238,13 +238,10 @@ private[daphttp] object MemberPathResolver {
         if (endian == IrEndian.Big) uint32 else uint32L
     }
     word.xmap[Json](
-      value => Json.fromString(f"0x${value}%x"),
+      value => Json.fromString(DapAddress.format(value)),
       json =>
         json.asString
-          .flatMap { raw =>
-            val hex = raw.toLowerCase.stripPrefix("0x")
-            scala.util.Try(java.lang.Long.parseUnsignedLong(hex, 16)).toOption
-          }
+          .flatMap(DapAddress.parse)
           .getOrElse(0L)
     )
   }

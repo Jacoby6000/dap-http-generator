@@ -59,7 +59,7 @@ private[daphttp] object DapProxyRoutes {
             .get[String]("memoryReference")
             .toOption
             .orElse(cursor.get[String]("address").toOption)
-            .flatMap(parseHexAddress)
+            .flatMap(DapAddress.parse)
           val countOpt = cursor.get[Int]("count").toOption.filter(_ > 0)
           val offset = cursor.get[Int]("offset").getOrElse(0)
           (addressOpt, countOpt) match {
@@ -96,7 +96,7 @@ private[daphttp] object DapProxyRoutes {
                       "command" -> Json.fromString("readMemory"),
                       "success" -> Json.True,
                       "body" -> Json.obj(
-                        "address" -> Json.fromString(f"0x$readAddress%x"),
+                        "address" -> Json.fromString(DapAddress.format(readAddress)),
                         "data" -> Json.fromString(data)
                       )
                     )
@@ -113,7 +113,7 @@ private[daphttp] object DapProxyRoutes {
             .get[String]("memoryReference")
             .toOption
             .orElse(cursor.get[String]("address").toOption)
-            .flatMap(parseHexAddress)
+            .flatMap(DapAddress.parse)
           val offset = cursor.get[Int]("offset").getOrElse(0)
 
           (addressOpt, dataOpt) match {
@@ -145,7 +145,7 @@ private[daphttp] object DapProxyRoutes {
               val typedAddress = cursor
                 .get[String]("address")
                 .toOption
-                .flatMap(parseHexAddress)
+                .flatMap(DapAddress.parse)
               val valueOpt = cursor.downField("value").focus
               val segments = cursor.get[List[String]]("segments").getOrElse(Nil)
               val decodeTypeOpt = cursor.get[String]("decodeType").toOption
@@ -291,7 +291,7 @@ private[daphttp] object DapProxyRoutes {
                         "success" -> Json.True,
                         "body" -> Json.obj(
                           "bytesWritten" -> Json.fromInt(written),
-                          "address" -> Json.fromString(f"0x$address%x")
+                          "address" -> Json.fromString(DapAddress.format(address))
                         )
                       )
                     )
@@ -299,13 +299,5 @@ private[daphttp] object DapProxyRoutes {
             }
         }
     }
-  }
-
-  private def parseHexAddress(raw: String): Option[Long] = {
-    val hex = raw.trim.toLowerCase.stripPrefix("0x")
-    if (hex.isEmpty || !hex.forall(c => c.isDigit || (c >= 'a' && c <= 'f'))) None
-    else
-      try Some(java.lang.Long.parseUnsignedLong(hex, 16))
-      catch { case _: NumberFormatException => None }
   }
 }

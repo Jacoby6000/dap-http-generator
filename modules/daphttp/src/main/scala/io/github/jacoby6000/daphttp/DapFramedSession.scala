@@ -86,7 +86,7 @@ private[daphttp] final class DapFramedSession(
       "dolphin_realtimeWatch",
       Some(
         Json.obj(
-          "memoryReference" -> Json.fromString(f"0x$address%x"),
+          "memoryReference" -> Json.fromString(DapAddress.format(address)),
           "count" -> Json.fromInt(count)
         )
       ),
@@ -295,7 +295,7 @@ private[daphttp] final class DapFramedSession(
       address <- cursor
         .get[String]("address")
         .toOption
-        .flatMap(parseHexAddress)
+        .flatMap(DapAddress.parse)
         .orElse(cursor.get[Long]("address").toOption)
         .toRight("DAP realtimeWatch response missing address.")
     } yield WatchHandle(watchId, address, count)
@@ -310,17 +310,9 @@ private[daphttp] final class DapFramedSession(
       address <- cursor
         .get[String]("address")
         .toOption
-        .flatMap(parseHexAddress)
+        .flatMap(DapAddress.parse)
         .orElse(cursor.get[Long]("address").toOption)
     } yield MemoryChangedEvent(watchId, address, count, data)
-  }
-
-  private def parseHexAddress(raw: String): Option[Long] = {
-    val hex = raw.trim.toLowerCase.stripPrefix("0x")
-    if (hex.isEmpty || !hex.forall(c => c.isDigit || (c >= 'a' && c <= 'f'))) None
-    else
-      try Some(java.lang.Long.parseUnsignedLong(hex, 16))
-      catch { case _: NumberFormatException => None }
   }
 
   private def failAllPending(message: String): Unit = {

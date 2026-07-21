@@ -394,8 +394,8 @@ object Cli
                 dapClient,
                 overlaysRef,
                 config.overlaysPath,
-                watchService,
-                wsBuilder
+                Some(watchService),
+                Some(wsBuilder)
               )
               .orNotFound
           )

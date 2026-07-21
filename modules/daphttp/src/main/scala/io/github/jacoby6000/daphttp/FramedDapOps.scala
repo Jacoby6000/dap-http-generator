@@ -20,7 +20,7 @@ private[daphttp] object FramedDapOps {
         command = "readMemory",
         arguments = Some(
           Json.obj(
-            "memoryReference" -> Json.fromString(f"0x$address%x"),
+            "memoryReference" -> Json.fromString(DapAddress.format(address)),
             "count" -> Json.fromInt(sizeBytes)
           )
         ),
@@ -60,7 +60,7 @@ private[daphttp] object FramedDapOps {
         command = "writeMemory",
         arguments = Some(
           Json.obj(
-            "memoryReference" -> Json.fromString(f"0x$address%x"),
+            "memoryReference" -> Json.fromString(DapAddress.format(address)),
             "data" -> Json.fromString(dataBase64)
           )
         ),
