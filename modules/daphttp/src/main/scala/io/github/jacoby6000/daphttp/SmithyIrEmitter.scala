@@ -456,9 +456,5 @@ object SmithyIrEmitter {
   }
 
   private def formatAddress(address: Long): String =
-    if (address >= 0) {
-      s"0x${address.toHexString}"
-    } else {
-      s"0x${java.lang.Long.toUnsignedString(address, 16)}"
-    }
+    DapAddress.format(address)
 }

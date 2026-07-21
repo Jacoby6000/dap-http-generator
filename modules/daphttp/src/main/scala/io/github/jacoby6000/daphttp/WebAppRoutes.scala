@@ -40,11 +40,11 @@ private[daphttp] object WebAppRoutes {
       case GET -> Root / "routes" =>
         plansRef.get.flatMap { result =>
           Ok(
-            Json.obj(
-              "routes" -> RouteTree.flatPaths(result.routes).asJson,
-              "tree" -> RouteTree.fromPlans(result.routes).asJson,
-              "errors" -> result.errors.asJson
-            )
+            RoutesResponse(
+              routes = RouteTree.flatPaths(result.routes),
+              tree = RouteTree.fromPlans(result.routes),
+              errors = result.errors
+            ).asJson
           )
         }
 
