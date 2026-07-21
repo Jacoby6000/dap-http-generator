@@ -186,6 +186,20 @@ class FunctionPointerSpec extends AnyFunSuite {
     assert(decoded.asString.get == "<function OnInit() @ 0x80001234>")
   }
 
+  test("null function pointer (address 0) decodes as null") {
+    val plans = HttpRouteIrEmitter.emitRoutePlansFromIr(fnptrIr.services)
+    val route = plans.routes("/api/FnPtrApi/g_CallbackTable")
+    val onInitSubRoute = route.memberSubRoutes
+      .find(_.memberName == "onInit")
+      .get
+      .asInstanceOf[MemberSubRoute.ValueSubRoute]
+
+    val bytes = longToBigEndian(0L, 4)
+    val result = onInitSubRoute.decodeCodec.get.decode(BitVector(bytes))
+    assert(result.isSuccessful)
+    assert(result.require.value.asString.contains("<function OnInit() @ null>"))
+  }
+
   test("function pointer info survives Smithy round-trip") {
     val smithyText =
       SmithyIrEmitter.emit(fnptrIr.services).fold(errors => fail(errors.mkString("\n")), identity)
@@ -228,14 +242,15 @@ class FunctionPointerSpec extends AnyFunSuite {
       onUpdateAddr: Long,
       onDestroyAddr: Long
   ): Array[Byte] = {
-    val bytes = new Array[Byte](13)
+    // u8 id @0, 3-byte ABI pad, then three 4-byte function pointers.
+    val bytes = new Array[Byte](16)
     bytes(0) = 0x01
     val initBytes = longToBigEndian(onInitAddr, 4)
-    System.arraycopy(initBytes, 0, bytes, 1, 4)
+    System.arraycopy(initBytes, 0, bytes, 4, 4)
     val updateBytes = longToBigEndian(onUpdateAddr, 4)
-    System.arraycopy(updateBytes, 0, bytes, 5, 4)
+    System.arraycopy(updateBytes, 0, bytes, 8, 4)
     val destroyBytes = longToBigEndian(onDestroyAddr, 4)
-    System.arraycopy(destroyBytes, 0, bytes, 9, 4)
+    System.arraycopy(destroyBytes, 0, bytes, 12, 4)
     bytes
   }
 

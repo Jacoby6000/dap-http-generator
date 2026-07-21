@@ -1,1 +1,1 @@
-gPlayerState = .data:0x80453100; // type:object size:0x20 ctype:PlayerState
+gPlayerState = .data:0x80453100; // type:object size:0x28 ctype:PlayerState

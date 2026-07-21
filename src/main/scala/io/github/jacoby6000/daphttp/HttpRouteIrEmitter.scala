@@ -88,13 +88,65 @@ object HttpRouteIrEmitter {
       }
     }
 
-    val result = RoutePlansLoadResult(routes.toMap, errors.toList.distinct)
+    val result =
+      RoutePlansLoadResult(routes.toMap, errors.toList.distinct, irServices)
     DapHttpLoggers.irEmit.info(
       "Emitted {} route(s) with {} error(s)",
       Integer.valueOf(result.routes.size),
       Integer.valueOf(result.errors.size)
     )
     result
+  }
+
+  /** Compile a JSON decode codec for an IR type (used by type overlays). */
+  def compileCodec(
+      irType: IrType,
+      endian: IrEndian,
+      wordSize: Option[Int]
+  ): Either[List[String], Codec[Json]] = {
+    val errors = ListBuffer.empty[String]
+    compileJsonCodecForType(irType, endian, wordSize, errors, irType.toString) match {
+      case Some(codec) if errors.isEmpty => Right(codec)
+      case Some(_)                       => Left(errors.toList.distinct)
+      case None                          =>
+        Left(
+          if (errors.isEmpty) List(s"Unable to compile codec for $irType")
+          else errors.toList.distinct
+        )
+    }
+  }
+
+  /** Packed / declared size in bytes for an IR type (used by type overlays). */
+  def sizeBytesForType(
+      irType: IrType,
+      wordSize: Option[Int]
+  ): Either[List[String], Int] = {
+    val errors = ListBuffer.empty[String]
+    val size = irType match {
+      case struct: IrType.Struct =>
+        structureSizeBytes(struct, wordSize, errors)
+      case other =>
+        pointeeSizeBytes(other, wordSize, errors)
+    }
+    size match {
+      case Some(n) if errors.isEmpty => Right(n)
+      case Some(_)                   => Left(errors.toList.distinct)
+      case None                      =>
+        Left(
+          if (errors.isEmpty) List(s"Unable to determine size for $irType")
+          else errors.toList.distinct
+        )
+    }
+  }
+
+  /** Compile a JSON memory codec for nested member-path reads/watches. */
+  def codecForType(
+      irType: IrType,
+      endian: IrEndian,
+      wordSize: Option[Int]
+  ): Option[Codec[Json]] = {
+    val errors = ListBuffer.empty[String]
+    compileJsonCodecForType(irType, endian, wordSize, errors, "member-path")
   }
 
   /** Inject `_address` hex fields into every decoded struct (and struct array element). */
@@ -126,7 +178,9 @@ object HttpRouteIrEmitter {
       case Some(obj) =>
         val errors = ListBuffer.empty[String]
         val offsets = computeMemberOffsets(struct, wordSize, errors)
-        val withoutPrior = obj.filterKeys(_ != "_address")
+        val withoutPrior =
+          obj.filterKeys(k => k != "_address" && k != "_offsets" && k != "_pointer")
+        val wasPointer = obj("_pointer").flatMap(_.asBoolean).contains(true)
         val annotatedMembers = struct.members.foldLeft(withoutPrior) { (acc, member) =>
           acc(member.name) match {
             case None =>
@@ -139,10 +193,24 @@ object HttpRouteIrEmitter {
               )
           }
         }
-        Json.obj(
-          (("_address" -> Json.fromString(formatHexAddress(baseAddress))) +:
-            annotatedMembers.toList): _*
-        )
+        // DESNOTE(jbarber, 2026-07-20): `_offsets` lets the dual decode UI align source vs
+        // overlay fields by byte offset (renames share a row; missing sides leave gaps).
+        // `_pointer` marks values that were followed from a pointer slot so the UI can focus
+        // the pointee as a root tab.
+        val offsetFields =
+          struct.members.flatMap { member =>
+            if (!annotatedMembers.contains(member.name)) None
+            else
+              offsets.get(member.name).map { off =>
+                member.name -> Json.fromInt(off)
+              }
+          }
+        val meta =
+          List(
+            "_address" -> Json.fromString(formatHexAddress(baseAddress)),
+            "_offsets" -> Json.obj(offsetFields: _*)
+          ) ++ (if (wasPointer) List("_pointer" -> Json.True) else Nil)
+        Json.obj((meta ++ annotatedMembers.toList): _*)
     }
 
   private def annotateMemberAddresses(
@@ -263,10 +331,51 @@ object HttpRouteIrEmitter {
       readPlan.decodeType match {
         case Some(struct: IrType.Struct) =>
           buildSubRoutesForStruct(struct, readPlan.address, defaultEndian, wordSizeBits, errors)
+        case Some(list: IrType.ListType) =>
+          buildRootArraySubRoute(readPlan, list, wordSizeBits, errors).toList
         case _ =>
           Nil
       }
     }
+
+  /** Indexed element routes for a root-level array read (`$basePath/0`, `$basePath/1`, …). */
+  private def buildRootArraySubRoute(
+      readPlan: ReadPlan,
+      list: IrType.ListType,
+      wordSizeBits: Int,
+      errors: ListBuffer[String]
+  ): Option[MemberSubRoute.ValueSubRoute] = {
+    val endian = readPlan.endian
+    val elemSize = pointeeSizeBytes(list.element, Some(wordSizeBits), errors)
+    val stride = readPlan.elementStrideBytes.orElse(elemSize)
+    val length = readPlan.arrayLength.orElse {
+      for {
+        size <- elemSize.orElse(stride)
+        if size > 0 && readPlan.sizeBytes % size == 0
+      } yield readPlan.sizeBytes / size
+    }
+    elemSize.filter(_ > 0).map { size =>
+      MemberSubRoute.ValueSubRoute(
+        memberName = MemberSubRoute.RootArrayMemberName,
+        baseAddress = readPlan.address,
+        memberOffsetBytes = 0,
+        isArray = true,
+        arrayLength = length,
+        wordSizeBits = wordSizeBits,
+        endian = endian,
+        valueType = Some(list.element),
+        elementSizeBytes = Some(size),
+        elementStrideBytes = stride.orElse(Some(size)),
+        decodeCodec = compileJsonCodecForType(
+          list.element,
+          endian,
+          Some(wordSizeBits),
+          errors,
+          s"${readPlan.path}/[element]"
+        )
+      )
+    }
+  }
 
   private def buildSubRoutesForStruct(
       struct: IrType.Struct,
@@ -306,34 +415,39 @@ object HttpRouteIrEmitter {
       context: String
   ): Option[MemberSubRoute.PointerSubRoute] = {
     val pointeeType = member.target match {
-      case listType: IrType.ListType                                => Some(listType.element)
-      case _ if member.primitiveOverride.contains(IrPrimitive.Char) =>
-        Some(IrType.Primitive(IrPrimitive.Char))
-      case _ => None
+      case _: IrType.FunctionPointer =>
+        None
+      case listType: IrType.ListType =>
+        listType.element match {
+          case _: IrType.FunctionPointer => None
+          case element                   => Some(element)
+        }
+      case other if member.isPointer =>
+        Some(other)
+      case _ =>
+        None
     }
-    pointeeType.flatMap { ptype =>
+    pointeeType.map { ptype =>
       val isCharPointee = ptype == IrType.Primitive(IrPrimitive.Char) ||
         member.primitiveOverride.contains(IrPrimitive.Char)
-      Some(
-        MemberSubRoute.PointerSubRoute(
-          memberName = member.name,
-          baseAddress = baseAddress,
-          memberOffsetBytes = memberOffset,
-          isArray = member.isArray,
-          arrayLength = member.arrayLength,
-          wordSizeBits = wordSizeBits,
-          endian = endian,
-          pointeeType = Some(ptype),
-          pointeeSizeBytes = pointeeSizeBytes(ptype, Some(wordSizeBits), errors),
-          pointeeDecodeCodec = compileJsonCodecForType(
-            ptype,
-            endian,
-            Some(wordSizeBits),
-            errors,
-            context
-          ),
-          followCString = isCharPointee
-        )
+      MemberSubRoute.PointerSubRoute(
+        memberName = member.name,
+        baseAddress = baseAddress,
+        memberOffsetBytes = memberOffset,
+        isArray = member.isArray,
+        arrayLength = member.arrayLength,
+        wordSizeBits = wordSizeBits,
+        endian = endian,
+        pointeeType = Some(ptype),
+        pointeeSizeBytes = pointeeSizeBytes(ptype, Some(wordSizeBits), errors),
+        pointeeDecodeCodec = compileJsonCodecForType(
+          ptype,
+          endian,
+          Some(wordSizeBits),
+          errors,
+          context
+        ),
+        followCString = isCharPointee
       )
     }
   }
@@ -390,14 +504,8 @@ object HttpRouteIrEmitter {
       wordSize: Option[Int],
       errors: ListBuffer[String]
   ): Map[String, Int] = {
-    var currentOffset = 0
-    struct.members.map { member =>
-      val offset = member.offsetBytes.getOrElse(currentOffset)
-      memberSizeBytes(member, wordSize, errors).foreach { sizeBytes =>
-        currentOffset = offset + sizeBytes
-      }
-      member.name -> offset
-    }.toMap
+    val packed = ensurePackedOffsets(struct, wordSize, errors)
+    packed.members.flatMap(m => m.offsetBytes.map(m.name -> _)).toMap
   }
 
   private def pointeeSizeBytes(
@@ -511,7 +619,8 @@ object HttpRouteIrEmitter {
                       decodeCodec = decodeCodec,
                       cStringPointer = isCharPointer && !member.isArray,
                       cStringPointerArray = isCharPointer && member.isArray,
-                      elementStrideBytes = arrayElementStrideBytes(member, wordSize)
+                      elementStrideBytes = arrayElementStrideBytes(member, wordSize),
+                      arrayLength = if (member.isArray) member.arrayLength else None
                     )
                   }
                 }.toList
@@ -547,25 +656,26 @@ object HttpRouteIrEmitter {
       wordSize: Option[Int],
       errors: ListBuffer[String]
   ): Option[Int] = {
-    structure.declaredSizeBits
+    val packed = ensurePackedOffsets(structure, wordSize, errors)
+    packed.declaredSizeBits
       .map { raw =>
-        structure match {
+        packed match {
           case _: IrType.Bitmask => math.ceil(raw.toDouble / 8d).toInt
           case _                 => raw
         }
       }
       .orElse {
-        if (structure.members.exists(_.offsetBytes.isDefined)) {
-          structure.members.flatMap { member =>
+        if (packed.members.exists(_.offsetBytes.isDefined)) {
+          packed.members.flatMap { member =>
             for {
               offset <- member.offsetBytes
               sizeBytes <- memberSizeBytes(member, wordSize, errors)
             } yield offset + sizeBytes
           }.maxOption
         } else {
-          val bits = structure.members.flatMap(member => memberBitWidth(member, wordSize, errors))
+          val bits = packed.members.flatMap(member => memberBitWidth(member, wordSize, errors))
           if (bits.isEmpty) {
-            errors += s"${structure.id}: Unable to infer read width; add @size."
+            errors += s"${packed.id}: Unable to infer read width; add @size."
             None
           } else {
             Some(math.ceil(bits.sum.toDouble / 8d).toInt)
@@ -573,6 +683,13 @@ object HttpRouteIrEmitter {
         }
       }
   }
+
+  private def ensurePackedOffsets(
+      structure: IrType.Struct,
+      wordSize: Option[Int],
+      errors: ListBuffer[String]
+  ): IrType.Struct =
+    IrLayout.ensureMemberOffsets(structure, wordSize, errors)
 
   private def memberSizeBytes(
       member: IrMember,
@@ -928,35 +1045,6 @@ object HttpRouteIrEmitter {
     override def bitWidth: Int = members.map(_.bitWidth).max
   }
 
-  private def groupMembersForLayout(members: List[IrMember]): List[List[IrMember]] = {
-    val groups = ListBuffer.empty[List[IrMember]]
-    val currentUnion = ListBuffer.empty[IrMember]
-    var currentUnionGroup: Option[String] = None
-
-    def flushUnion(): Unit =
-      if (currentUnion.nonEmpty) {
-        groups += currentUnion.toList
-        currentUnion.clear()
-        currentUnionGroup = None
-      }
-
-    members.foreach { member =>
-      member.unionGroup match {
-        case Some(group) if currentUnionGroup.contains(group) =>
-          currentUnion += member
-        case Some(group) =>
-          flushUnion()
-          currentUnionGroup = Some(group)
-          currentUnion += member
-        case None =>
-          flushUnion()
-          groups += List(member)
-      }
-    }
-    flushUnion()
-    groups.toList
-  }
-
   private final case class PaddingLayoutSlot(paddingBits: Int) extends LayoutSlot {
     override def bitWidth: Int = paddingBits
   }
@@ -968,7 +1056,8 @@ object HttpRouteIrEmitter {
       errors: ListBuffer[String],
       context: String
   ): Option[Codec[Json]] = {
-    val layoutGroups = groupMembersForLayout(struct.members)
+    val layoutStruct = ensurePackedOffsets(struct, wordSize, errors)
+    val layoutGroups = IrLayout.groupMembersForLayout(layoutStruct.members)
     var currentOffsetBits = 0
     val compiledSlots = layoutGroups.flatMap { group =>
       val groupOffsetBits = group.flatMap(_.offsetBytes).headOption.map(_ * 8)
@@ -1024,8 +1113,8 @@ object HttpRouteIrEmitter {
     } else {
       val memberBits = compiledSlots.map(_.bitWidth).sum
       val offsetAwareEndBits =
-        if (struct.members.exists(_.offsetBytes.isDefined)) {
-          struct.members.flatMap { member =>
+        if (layoutStruct.members.exists(_.offsetBytes.isDefined)) {
+          layoutStruct.members.flatMap { member =>
             for {
               offset <- member.offsetBytes
               width <- memberBitWidth(member, wordSize, errors)
@@ -1034,9 +1123,9 @@ object HttpRouteIrEmitter {
         } else {
           None
         }
-      val totalBits = struct.declaredSizeBits
+      val totalBits = layoutStruct.declaredSizeBits
         .map(raw =>
-          struct match {
+          layoutStruct match {
             case _: IrType.Bitmask => raw
             case _                 => raw * 8
           }
@@ -1283,7 +1372,10 @@ object HttpRouteIrEmitter {
         value => {
           val normalized = applyEndianToBits(value, bitWidth, endian)
           val raw = bitVectorToUnsigned(normalized)
-          Json.fromString(s"$prefix${raw.toString(16)}>")
+          // DESNOTE(jbarber, 2026-07-20): Unset callbacks are stored as NULL (0); keep the
+          // function shape but show "@ null" instead of "@ 0x0" so empty slots read clearly.
+          if (raw == 0L) Json.fromString(s"<function ${fp.name}($paramStr) @ null>")
+          else Json.fromString(s"$prefix${raw.toString(16)}>")
         },
         _ => primitiveToBitVector(bitWidth)
       )

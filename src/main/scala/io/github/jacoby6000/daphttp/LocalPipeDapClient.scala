@@ -15,7 +15,6 @@ import java.net.StandardProtocolFamily
 import java.net.UnixDomainSocketAddress
 import java.nio.channels.Channels
 import java.nio.channels.SocketChannel
-import java.nio.charset.StandardCharsets
 import java.nio.file.Path
 import java.util.concurrent.atomic.AtomicBoolean
 import scala.concurrent.duration._
@@ -28,10 +27,12 @@ private[daphttp] final class LocalPipeDapClient(
     dapConnectTimeoutMs: Int = 1000,
     dapConnectRetryMs: Int = 5000
 ) extends DapHttpServerMain.DapClient {
-  private final class OwnedSession(val session: DapStreamSession, val release: IO[Unit])
+  private final class OwnedSession(val session: DapFramedSession, val release: IO[Unit])
 
   private val connectionLock = new AnyRef
   private var ownedSession: Option[OwnedSession] = None
+  private val memoryChangedTopic = DapEventBus.createMemoryChangedTopic()
+  private val sessionResetTopic = DapEventBus.createSessionResetTopic()
 
   // DESNOTE(jbarber, 2026-07-19): Serialize all DAP framing I/O on this client. Unlike
   // SocketDapClient (which holds a JVM monitor across the request), pipe sessions are driven by
@@ -45,6 +46,12 @@ private[daphttp] final class LocalPipeDapClient(
 
   private[daphttp] def isConnected: Boolean =
     connectionLock.synchronized(ownedSession.exists(_.session.isOpen))
+
+  override def memoryChanged: fs2.Stream[IO, MemoryChangedEvent] =
+    memoryChangedTopic.subscribe(256)
+
+  override def sessionResets: fs2.Stream[IO, Unit] =
+    sessionResetTopic.subscribe(32)
 
   override def startConnectionManager(): IO[Unit] = {
     def maintainConnection: IO[Unit] =
@@ -86,7 +93,8 @@ private[daphttp] final class LocalPipeDapClient(
                 "memoryReference" -> Json.fromString(f"0x$address%x"),
                 "count" -> Json.fromInt(sizeBytes)
               )
-            )
+            ),
+            timeoutMs = dapTimeoutMs
           )
           .flatMap { body =>
             body.hcursor
@@ -120,12 +128,81 @@ private[daphttp] final class LocalPipeDapClient(
       Left(error.getMessage)
     }
 
+  override def writeMemory(address: Long, dataBase64: String): IO[Either[String, Int]] =
+    withSessionLock {
+      withPersistentSession(dapTimeoutMs) { activeSession =>
+        DapHttpLoggers.dap.debug(
+          "writeMemory pipe={} address=0x{}",
+          path,
+          java.lang.Long.toHexString(address)
+        )
+        activeSession
+          .sendRequest(
+            command = "writeMemory",
+            arguments = Some(
+              Json.obj(
+                "memoryReference" -> Json.fromString(f"0x$address%x"),
+                "data" -> Json.fromString(dataBase64)
+              )
+            ),
+            timeoutMs = dapTimeoutMs
+          )
+          .flatMap { body =>
+            body.hcursor
+              .get[Int]("bytesWritten")
+              .toOption
+              .toRight("DAP writeMemory response did not include body.bytesWritten.")
+          } match {
+          case Right(written) =>
+            DapHttpLoggers.dap.debug(
+              "writeMemory address=0x{} succeeded bytesWritten={}",
+              java.lang.Long.toHexString(address),
+              Integer.valueOf(written)
+            )
+            Right(written)
+          case Left(error) =>
+            DapHttpLoggers.dap.warn(
+              "writeMemory address=0x{} failed: {}",
+              java.lang.Long.toHexString(address),
+              error
+            )
+            Left(error)
+        }
+      }
+    }.handleError { error =>
+      DapHttpLoggers.dap.warn(
+        "writeMemory address=0x{} failed: {}",
+        java.lang.Long.toHexString(address),
+        error.getMessage
+      )
+      Left(error.getMessage)
+    }
+
+  override def realtimeWatch(address: Long, count: Int): IO[Either[String, WatchHandle]] =
+    withSessionLock {
+      withPersistentSession(dapTimeoutMs) { activeSession =>
+        activeSession.realtimeWatch(address, count, dapTimeoutMs)
+      }
+    }.handleError(error => Left(error.getMessage))
+
+  override def realtimeWatchCancel(watchId: Int): IO[Either[String, Unit]] =
+    withSessionLock {
+      withPersistentSession(dapTimeoutMs) { activeSession =>
+        activeSession.realtimeWatchCancel(watchId, dapTimeoutMs)
+      }
+    }.handleError(error => Left(error.getMessage))
+
   override def continueExecution(): IO[Either[String, Json]] =
     withSessionLock {
       ensureSession.flatMap { activeSession =>
         val threadIdIO =
-          IO.interruptible(activeSession.sendRequest(command = "threads", arguments = None))
-            .timeout(math.min(dapTimeoutMs, 2000).millis)
+          IO.interruptible(
+            activeSession.sendRequest(
+              command = "threads",
+              arguments = None,
+              timeoutMs = math.min(dapTimeoutMs, 2000)
+            )
+          ).timeout(math.min(dapTimeoutMs, 2000).millis)
             .map(_.toOption.flatMap(json => parseThreadIds(json).headOption).getOrElse(1))
             .handleError { _ =>
               DapHttpLoggers.dap.debug("threads unavailable; continuing with threadId=1")
@@ -138,7 +215,8 @@ private[daphttp] final class LocalPipeDapClient(
             activeSession
               .sendRequest(
                 command = "continue",
-                arguments = Some(Json.obj("threadId" -> Json.fromInt(threadId)))
+                arguments = Some(Json.obj("threadId" -> Json.fromInt(threadId))),
+                timeoutMs = dapContinueTimeoutMs
               )
               .map { response =>
                 DapHttpLoggers.dap.info("continue threadId={} succeeded", Integer.valueOf(threadId))
@@ -161,7 +239,7 @@ private[daphttp] final class LocalPipeDapClient(
       withSessionLock(invalidateSession).as(Left(error.getMessage))
     }
 
-  private def withPersistentSession[A](timeoutMs: Int)(f: DapStreamSession => A): IO[A] = {
+  private def withPersistentSession[A](timeoutMs: Int)(f: DapFramedSession => A): IO[A] = {
     def run(retrying: Boolean): IO[A] =
       ensureSession.flatMap { activeSession =>
         IO.interruptible(f(activeSession))
@@ -182,12 +260,25 @@ private[daphttp] final class LocalPipeDapClient(
     run(retrying = false)
   }
 
-  private def ensureSession: IO[DapStreamSession] =
+  private def ensureSession: IO[DapFramedSession] =
     IO.delay {
-      connectionLock.synchronized(ownedSession.filter(_.session.isOpen))
+      connectionLock.synchronized(ownedSession)
     }.flatMap {
-      case Some(owned) => IO.pure(owned.session)
-      case None        =>
+      case Some(owned) if owned.session.isOpen =>
+        IO.pure(owned.session)
+      case Some(_) =>
+        invalidateSession *> establishSession.flatMap {
+          case Right(owned) =>
+            IO.delay {
+              connectionLock.synchronized {
+                ownedSession = Some(owned)
+              }
+              owned.session
+            }
+          case Left(error) =>
+            IO.raiseError(new java.io.IOException(error))
+        }
+      case None =>
         establishSession.flatMap {
           case Right(owned) =>
             IO.delay {
@@ -203,10 +294,22 @@ private[daphttp] final class LocalPipeDapClient(
 
   private def tryEstablishSessionUnlocked: IO[Either[String, Unit]] =
     IO.delay {
-      connectionLock.synchronized(ownedSession.exists(_.session.isOpen))
+      connectionLock.synchronized(ownedSession)
     }.flatMap {
-      case true  => IO.pure(Right(()))
-      case false =>
+      case Some(owned) if owned.session.isOpen =>
+        IO.pure(Right(()))
+      case Some(_) =>
+        invalidateSession *> establishSession.flatMap {
+          case Right(owned) =>
+            IO.delay {
+              connectionLock.synchronized {
+                ownedSession = Some(owned)
+              }
+              Right(())
+            }
+          case Left(error) => IO.pure(Left(error))
+        }
+      case None =>
         establishSession.flatMap {
           case Right(owned) =>
             IO.delay {
@@ -232,15 +335,23 @@ private[daphttp] final class LocalPipeDapClient(
     }
   }
 
-  private def openInitializedSession: IO[(DapStreamSession, IO[Unit])] =
+  private def openInitializedSession: IO[(DapFramedSession, IO[Unit])] =
     Resource
       .make(openStreamsIO)(opened => IO.blocking(opened.close()))
       .evalMap { opened =>
         IO.interruptible {
-          val activeSession = new DapStreamSession(opened.in, opened.out)
-          activeSession.initialize() match {
-            case Right(_)  => activeSession
-            case Left(err) => throw new IllegalStateException(err)
+          val activeSession = new DapFramedSession(
+            new BufferedInputStream(opened.in),
+            new BufferedOutputStream(opened.out),
+            event => DapEventBus.publish(memoryChangedTopic, event),
+            () => opened.close()
+          )
+          activeSession.sendRequest("threads", None, dapTimeoutMs) match {
+            case Left(error) if !activeSession.isOpen =>
+              activeSession.close()
+              throw new IllegalStateException(error)
+            case Left(_) | Right(_) =>
+              activeSession
           }
         }.timeout(dapTimeoutMs.millis)
       }
@@ -258,7 +369,9 @@ private[daphttp] final class LocalPipeDapClient(
       }
     }.flatMap {
       case Some(owned) =>
-        owned.session.markClosed() *> owned.release
+        IO.blocking(owned.session.close()) *> owned.release <* IO.delay(
+          DapEventBus.publish(sessionResetTopic, ())
+        )
       case None =>
         IO.unit
     }
@@ -276,10 +389,13 @@ private[daphttp] final class LocalPipeDapClient(
       val out: OutputStream,
       val closeables: List[Closeable]
   ) {
+    private val closed = new AtomicBoolean(false)
     def close(): Unit =
-      closeables.foreach { c =>
-        try c.close()
-        catch { case _: Exception => () }
+      if (closed.compareAndSet(false, true)) {
+        closeables.foreach { c =>
+          try c.close()
+          catch { case _: Exception => () }
+        }
       }
   }
 
@@ -316,196 +432,6 @@ private[daphttp] final class LocalPipeDapClient(
   private def isWindowsNamedPipePath(pipePath: Path): Boolean = {
     val normalized = pipePath.toString.replace('/', '\\').toLowerCase
     normalized.startsWith("""\\.\pipe\""") || normalized.startsWith("""\\?\pipe\""")
-  }
-
-  /** Persistent DAP framing session over arbitrary byte streams. */
-  private final class DapStreamSession(rawIn: InputStream, rawOut: OutputStream) {
-    private val in = new BufferedInputStream(rawIn)
-    private val out = new BufferedOutputStream(rawOut)
-    private var seqCounter = 1
-    private var initialized = false
-    private val openFlag = new AtomicBoolean(true)
-
-    def isOpen: Boolean = openFlag.get()
-
-    def markClosed(): IO[Unit] =
-      IO.delay { val _ = openFlag.set(false) }
-
-    def sendRequest(command: String, arguments: Option[Json]): Either[String, Json] =
-      initialize().flatMap { _ =>
-        val requestSeq = nextSeq()
-        writeRequest(requestSeq, command, arguments)
-        readUntilResponse(requestSeq, command)
-      }
-
-    def initialize(): Either[String, Unit] =
-      if (initialized) {
-        Right(())
-      } else {
-        val requestSeq = nextSeq()
-        writeRequest(
-          requestSeq,
-          "initialize",
-          Some(
-            Json.obj(
-              "clientID" -> Json.fromString("dap-http-generator"),
-              "clientName" -> Json.fromString("dap-http-generator"),
-              "adapterID" -> Json.fromString("dap-http-generator"),
-              "pathFormat" -> Json.fromString("path"),
-              "linesStartAt1" -> Json.True,
-              "columnsStartAt1" -> Json.True,
-              "supportsVariableType" -> Json.True,
-              "supportsVariablePaging" -> Json.False,
-              "supportsRunInTerminalRequest" -> Json.False
-            )
-          )
-        )
-        readUntilResponse(requestSeq, "initialize").flatMap { body =>
-          writeEvent("initialized")
-          val needsConfigurationDone = body.hcursor
-            .downField("supportsConfigurationDoneRequest")
-            .as[Boolean]
-            .getOrElse(false)
-          if (needsConfigurationDone) {
-            val configSeq = nextSeq()
-            writeRequest(configSeq, "configurationDone", None)
-            readUntilResponse(configSeq, "configurationDone").map { _ =>
-              initialized = true
-              ()
-            }
-          } else {
-            initialized = true
-            Right(())
-          }
-        }
-      }
-
-    private def nextSeq(): Int = {
-      val value = seqCounter
-      seqCounter += 1
-      value
-    }
-
-    private def writeRequest(seq: Int, command: String, arguments: Option[Json]): Unit = {
-      val request = arguments match {
-        case Some(args) =>
-          Json.obj(
-            "seq" -> Json.fromInt(seq),
-            "type" -> Json.fromString("request"),
-            "command" -> Json.fromString(command),
-            "arguments" -> args
-          )
-        case None =>
-          Json.obj(
-            "seq" -> Json.fromInt(seq),
-            "type" -> Json.fromString("request"),
-            "command" -> Json.fromString(command)
-          )
-      }
-      writeMessage(request)
-    }
-
-    private def writeEvent(event: String): Unit = {
-      val payload = Json.obj(
-        "seq" -> Json.fromInt(nextSeq()),
-        "type" -> Json.fromString("event"),
-        "event" -> Json.fromString(event)
-      )
-      writeMessage(payload)
-    }
-
-    private def writeMessage(json: Json): Unit = {
-      val payload = json.noSpaces.getBytes(StandardCharsets.UTF_8)
-      out.write(s"Content-Length: ${payload.length}\r\n\r\n".getBytes(StandardCharsets.UTF_8))
-      out.write(payload)
-      out.flush()
-    }
-
-    private def readUntilResponse(requestSeq: Int, command: String): Either[String, Json] = {
-      var skippedEvents = 0
-      while (skippedEvents < 64) {
-        val body = readMessageBody()
-        io.circe.parser.parse(body).toOption match {
-          case Some(json) if isMatchingResponse(json, requestSeq) =>
-            return parseDapResponse(json, command)
-          case Some(json) if json.hcursor.downField("type").as[String].contains("event") =>
-            DapHttpLoggers.dap.debug(
-              "skipping DAP event {} while waiting for {} response",
-              json.hcursor.downField("event").as[String].getOrElse("?"),
-              command
-            )
-            skippedEvents += 1
-          case Some(json) =>
-            DapHttpLoggers.dap.debug(
-              "skipping unexpected DAP message while waiting for {} response: {}",
-              command,
-              json.noSpaces
-            )
-            skippedEvents += 1
-          case None =>
-            return Left(s"Failed to parse DAP $command response payload.")
-        }
-      }
-      Left(s"Timed out waiting for DAP $command response.")
-    }
-
-    private def isMatchingResponse(json: Json, requestSeq: Int): Boolean =
-      json.hcursor.downField("type").as[String].contains("response") &&
-        json.hcursor.downField("request_seq").as[Int].contains(requestSeq)
-
-    private def parseDapResponse(json: Json, command: String): Either[String, Json] =
-      if (json.hcursor.downField("success").as[Boolean].getOrElse(false)) {
-        Right(json.hcursor.downField("body").focus.getOrElse(Json.Null))
-      } else {
-        val message = json.hcursor
-          .downField("message")
-          .as[String]
-          .toOption
-          .getOrElse(s"DAP $command failed")
-        Left(message)
-      }
-
-    private def readMessageBody(): String = {
-      val contentLength = readContentLength(in)
-      readBody(in, contentLength)
-    }
-
-    private def readContentLength(input: BufferedInputStream): Int = {
-      var contentLength = 0
-      var line = readLine(input)
-      while (line.nonEmpty) {
-        val lower = line.toLowerCase
-        if (lower.startsWith("content-length:")) {
-          contentLength = lower.stripPrefix("content-length:").trim.toInt
-        }
-        line = readLine(input)
-      }
-      contentLength
-    }
-
-    private def readBody(input: BufferedInputStream, length: Int): String = {
-      val buffer = new Array[Byte](length)
-      var read = 0
-      while (read < length) {
-        val bytesRead = input.read(buffer, read, length - read)
-        if (bytesRead == -1)
-          throw new IllegalStateException("Unexpected EOF while reading DAP response body.")
-        read += bytesRead
-      }
-      new String(buffer, StandardCharsets.UTF_8)
-    }
-
-    private def readLine(input: BufferedInputStream): String = {
-      val buffer = new StringBuilder
-      var current = input.read()
-      var previous = -1
-      while (current != -1 && !(previous == '\r' && current == '\n')) {
-        if (current != '\r') buffer.append(current.toChar)
-        previous = current
-        current = input.read()
-      }
-      buffer.toString()
-    }
   }
 }
 

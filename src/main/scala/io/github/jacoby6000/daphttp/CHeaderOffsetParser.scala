@@ -5,7 +5,9 @@ import scala.util.matching.Regex
 
 object CHeaderOffsetParser {
   private val StructStart: Regex = """(?:typedef\s+)?struct\s+(\w+)\s*\{""".r
-  private val OffsetComment: Regex = """/\*\s*(0x[0-9A-Fa-f]+)\s*\*/""".r
+  // DESNOTE(jbarber, 2026-07-20): Melee/doldecomp headers use both `/* 0x04 */` and `/* +0x04 */`
+  // / `/* +194 */` (hex without 0x). Treat the optional `+` form as hex offsets.
+  private val OffsetComment: Regex = """/\*\s*\+?(0x[0-9A-Fa-f]+|[0-9A-Fa-f]+)\s*\*/""".r
   private val BlockComment: Regex = """/\*.*?\*/""".r
   private val FunctionPointerName: Regex =
     """\(\s*\*+\s*([A-Za-z_]\w*)\s*(?:\[[^\]]*\]\s*)*\)""".r

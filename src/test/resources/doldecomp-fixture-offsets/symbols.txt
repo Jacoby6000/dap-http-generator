@@ -1,1 +1,1 @@
-padded_struct = .data:0x80401000; // type:object scope:global size:0xC
+padded_struct = .data:0x80401000; // type:object scope:global size:0x8

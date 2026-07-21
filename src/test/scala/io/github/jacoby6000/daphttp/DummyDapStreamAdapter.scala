@@ -9,7 +9,7 @@ import java.io.OutputStream
 import java.nio.charset.StandardCharsets
 import java.util.Base64
 
-/** Minimal DAP peer for stream / Unix-socket tests (initialize + readMemory). */
+/** Minimal DAP peer for stream / Unix-socket tests (initialize + readMemory + writeMemory). */
 final class DummyDapStreamAdapter(
     in: InputStream,
     out: OutputStream,
@@ -66,6 +66,30 @@ final class DummyDapStreamAdapter(
                   if (closeAfterReadMemory) keepReading = false
                 case None =>
                   writeFailure(bufferedOut, requestSeq, "readMemory", "missing payload")
+                  keepReading = false
+              }
+            case (Some("request"), Some("writeMemory")) =>
+              val memoryReference =
+                cursor.flatMap(
+                  _.downField("arguments").downField("memoryReference").as[String].toOption
+                )
+              val dataB64 =
+                cursor.flatMap(_.downField("arguments").downField("data").as[String].toOption)
+              val address = memoryReference.flatMap(parseAddress)
+              (address, dataB64) match {
+                case (Some(_), Some(b64)) =>
+                  val nbytes =
+                    try Base64.getDecoder.decode(b64).length
+                    catch { case _: IllegalArgumentException => 0 }
+                  writeResponse(
+                    bufferedOut,
+                    requestSeq,
+                    "writeMemory",
+                    Json.obj("bytesWritten" -> Json.fromInt(nbytes))
+                  )
+                  if (closeAfterReadMemory) keepReading = false
+                case _ =>
+                  writeFailure(bufferedOut, requestSeq, "writeMemory", "missing payload")
                   keepReading = false
               }
             case (Some("request"), Some(other)) =>

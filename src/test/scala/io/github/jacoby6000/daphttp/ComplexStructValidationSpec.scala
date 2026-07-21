@@ -224,14 +224,20 @@ class ComplexStructValidationSpec extends AnyFunSuite {
     assert(math.abs(spawnPos.downField("y").as[Double].toOption.get - 2.0) < 0.001)
     assert(math.abs(spawnPos.downField("z").as[Double].toOption.get - (-3.5)) < 0.001)
 
-    val colors = decoded.downField("colors").as[List[Long]].toOption.get
-    assert(
-      colors == List(
-        0x80003000L - 0x100000000L,
-        0x80003010L - 0x100000000L,
-        0x80003020L - 0x100000000L
-      )
+    val expectedColors = List(
+      ("0x80003000", 255, 0, 0, 255),
+      ("0x80003010", 0, 255, 0, 255),
+      ("0x80003020", 0, 0, 255, 128)
     )
+    val colors = decoded.downField("colors").focus.flatMap(_.asArray).get
+    assert(colors.length == expectedColors.length)
+    expectedColors.zip(colors).foreach { case ((addr, r, g, b, a), color) =>
+      assert(color.hcursor.downField("_address").as[String].toOption.contains(addr))
+      assert(color.hcursor.downField("r").as[Int].toOption.contains(r))
+      assert(color.hcursor.downField("g").as[Int].toOption.contains(g))
+      assert(color.hcursor.downField("b").as[Int].toOption.contains(b))
+      assert(color.hcursor.downField("a").as[Int].toOption.contains(a))
+    }
 
     val uid = decoded.downField("uniqueId").as[String].toOption.get
     assert(uid == "81985529216486895")
@@ -303,14 +309,20 @@ class ComplexStructValidationSpec extends AnyFunSuite {
     val spawnPos = decoded.downField("spawnPos")
     assert(math.abs(spawnPos.downField("x").as[Double].toOption.get - 1.5) < 0.001)
 
-    val colors = decoded.downField("colors").as[List[Long]].toOption.get
-    assert(
-      colors == List(
-        0x80003000L - 0x100000000L,
-        0x80003010L - 0x100000000L,
-        0x80003020L - 0x100000000L
-      )
+    val expectedColors = List(
+      ("0x80003000", 255, 0, 0, 255),
+      ("0x80003010", 0, 255, 0, 255),
+      ("0x80003020", 0, 0, 255, 128)
     )
+    val colors = decoded.downField("colors").focus.flatMap(_.asArray).get
+    assert(colors.length == expectedColors.length)
+    expectedColors.zip(colors).foreach { case ((addr, r, g, b, a), color) =>
+      assert(color.hcursor.downField("_address").as[String].toOption.contains(addr))
+      assert(color.hcursor.downField("r").as[Int].toOption.contains(r))
+      assert(color.hcursor.downField("g").as[Int].toOption.contains(g))
+      assert(color.hcursor.downField("b").as[Int].toOption.contains(b))
+      assert(color.hcursor.downField("a").as[Int].toOption.contains(a))
+    }
   }
 
   // ---- Member sub-route tests ----

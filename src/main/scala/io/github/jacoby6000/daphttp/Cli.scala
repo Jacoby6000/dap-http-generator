@@ -34,7 +34,8 @@ object Cli
       dapConnectTimeoutMs: Int,
       dapConnectRetryMs: Int,
       bindHost: String,
-      bindPort: Int
+      bindPort: Int,
+      overlaysPath: Option[Path]
   )
 
   private val dataSectionsOpt: Opts[Set[String]] =
@@ -52,6 +53,15 @@ object Cli
       .option[Path](
         "report",
         "Write a detailed cheaders diagnostics report (full skip/conflict lists) to this path",
+        metavar = "path"
+      )
+      .orNone
+
+  private val overlaysOpt: Opts[Option[Path]] =
+    Opts
+      .option[Path](
+        "overlays",
+        "Load/save client type reinterpretation overlays (JSON) at this path",
         metavar = "path"
       )
       .orNone
@@ -99,7 +109,8 @@ object Cli
       .withDefault("0.0.0.0"),
     Opts
       .option[Int]("bind-port", "HTTP server bind port", metavar = "port")
-      .withDefault(8080)
+      .withDefault(8080),
+    overlaysOpt
   ).mapN(ServerConfig.apply)
 
   private val smithySubcommand: Command[IO[ExitCode]] =
@@ -277,7 +288,8 @@ object Cli
         val plans = HttpRouteIrEmitter.emitRoutePlansFromIr(generation.services)
         RoutePlansLoadResult(
           routes = plans.routes,
-          errors = generation.warnings ++ plans.errors
+          errors = generation.warnings ++ plans.errors,
+          services = generation.services
         )
     }
 
@@ -370,9 +382,22 @@ object Cli
   ): IO[ExitCode] =
     for {
       plansRef <- Ref.of[IO, RoutePlansLoadResult](plans)
-      _ <-
-        if (watch && watchPaths.nonEmpty) startSmithyWatcher(watchPaths, plansRef)
-        else IO.unit
+      overlayDocument <- IO.blocking {
+        config.overlaysPath match {
+          case None =>
+            TypeOverlayDocument.empty
+          case Some(path) =>
+            TypeOverlayDocument.load(path) match {
+              case Right(doc) => doc
+              case Left(err)  =>
+                System.err.println(s"Failed to load overlays from $path: $err")
+                TypeOverlayDocument.empty
+            }
+        }
+      }
+      overlaysRef <- Ref.of[IO, OverlayEngine](
+        OverlayEngine.fromServices(overlayDocument, plans.services)
+      )
       dapClient = DapClients.create(
         config.dapPipe,
         config.dapHost,
@@ -382,15 +407,34 @@ object Cli
         config.dapConnectTimeoutMs,
         config.dapConnectRetryMs
       )
+      watchService <- RealtimeWatchService.create(dapClient, plansRef, overlaysRef)
+      _ <-
+        if (watch && watchPaths.nonEmpty)
+          startSmithyWatcher(watchPaths, plansRef, overlaysRef, watchService)
+        else IO.unit
       _ <- dapClient.startConnectionManager()
-      app = HttpLoggingMiddleware(
-        DapHttpServerMain.routes(plansRef, dapClient).orNotFound
-      )
+      _ <- watchService.start()
       exit <- EmberServerBuilder
         .default[IO]
         .withHost(Host.fromString(config.bindHost).getOrElse(Host.fromString("0.0.0.0").get))
         .withPort(Port.fromInt(config.bindPort).getOrElse(Port.fromInt(8080).get))
-        .withHttpApp(app)
+        // DESNOTE(jbarber, 2026-07-20): Default Ember idle is 60s, which drops quiet /ws
+        // sockets. Server Ping frames keep them alive; this is a safety margin for brief gaps.
+        .withIdleTimeout(5.minutes)
+        .withHttpWebSocketApp { wsBuilder =>
+          HttpLoggingMiddleware(
+            DapHttpServerMain
+              .routes(
+                plansRef,
+                dapClient,
+                overlaysRef,
+                config.overlaysPath,
+                watchService,
+                wsBuilder
+              )
+              .orNotFound
+          )
+        }
         .build
         .use(_ => IO.never)
         .as(ExitCode.Success)
@@ -398,7 +442,9 @@ object Cli
 
   private def startSmithyWatcher(
       paths: List[Path],
-      plansRef: Ref[IO, RoutePlansLoadResult]
+      plansRef: Ref[IO, RoutePlansLoadResult],
+      overlaysRef: Ref[IO, OverlayEngine],
+      watchService: RealtimeWatchService
   ): IO[Unit] = {
     def newestTimestamp: Long =
       paths
@@ -411,7 +457,15 @@ object Cli
     def loop(lastSeen: Long): IO[Unit] =
       IO.sleep(2.seconds) *> IO.blocking(newestTimestamp).flatMap { newest =>
         if (newest > lastSeen)
-          IO.blocking(loadSmithyPlans(paths)).flatMap(plansRef.set) *> loop(newest)
+          IO.blocking(loadSmithyPlans(paths)).flatMap { plans =>
+            for {
+              _ <- plansRef.set(plans)
+              engine <- overlaysRef.get
+              _ <- overlaysRef.set(OverlayEngine.fromServices(engine.document, plans.services))
+              _ <- watchService.rebindAll
+              _ <- loop(newest)
+            } yield ()
+          }
         else
           loop(lastSeen)
       }

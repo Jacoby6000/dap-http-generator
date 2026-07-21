@@ -27,6 +27,8 @@ Server subcommands (`smithy`, `cheaders`) share these flags:
 - `--dap-connect-timeout-ms` (default `1000`) — TCP connect timeout per DAP attempt
 - `--dap-connect-retry-ms` (default `5000`) — delay between DAP connect attempts at startup
 - `--bind-host` / `--bind-port` (default `0.0.0.0:8080`) — HTTP server bind address
+- `--overlays <path>` (optional) — load/save client type reinterpretation overlays (JSON).
+  The UI editor `PUT`s overlays here so reinterpretations survive restarts.
 
 `smithy` also supports `--watch` to reload models when files change.
 
@@ -123,18 +125,21 @@ flowchart LR
 The server:
 
 - loads API definitions from Smithy models or C headers,
-- generates read-only GET data routes under `/api/<ServiceName>/...`,
-- serves an HTML + Scala.js explorer at `/` that mirrors those routes (collapse/expand + per-node refresh),
+- generates GET data routes under `/api/<ServiceName>/...` and `PUT /memory` for leaf field writes,
+- serves an HTML + Scala.js explorer at `/` that mirrors those routes (collapse/expand + per-node refresh;
+  double-click a leaf to edit, Enter writes via DAP `writeMemory`),
 - requires non-DAP output members to use `@staticAddress(...)`,
-- resolves DAP-backed structs (`@dapStruct`/`@bitmask`) and reads memory through a DAP `readMemory` request,
+- resolves DAP-backed structs (`@dapStruct`/`@bitmask`) and reads/writes memory through DAP
+  `readMemory` / `writeMemory` requests,
 - watches Smithy sources and reloads routes when model files change (`smithy --watch`).
 
-`/`, `/health`, `/routes`, and `POST /resume` work without a debugger. `/routes` returns both a flat
+`/`, `/health`, `/routes`, and `POST /resume` work without a debugger. `PUT /memory` needs a DAP
+adapter that supports `writeMemory`. `/routes` returns both a flat
 `routes` list and a `tree` for the UI. On startup the server immediately tries to connect to the DAP
 adapter over TCP or `--dap-pipe` (1s TCP connect timeout per attempt, retrying every 5s until
 connected). `/resume` reuses the persistent DAP session (then sends `continue`). Use it when the
 target is stopped and `readMemory` times out. Generated **data** routes use the same connection for
-`readMemory` (serialized under a lock); if the connection drops the client reconnects. If nothing is
+`readMemory` / `writeMemory` (serialized under a lock); if the connection drops the client reconnects. If nothing is
 listening they return per-read `error` fields while the HTTP request still succeeds.
 
 ### Running locally

@@ -3,6 +3,21 @@ package io.github.jacoby6000.daphttp
 import org.scalatest.funsuite.AnyFunSuite
 
 class CHeaderOffsetParserSpec extends AnyFunSuite {
+  test("parses Melee-style +offset comments without 0x prefix") {
+    val source =
+      """
+        |typedef struct PlusStyle {
+        |    /*   +0 */ u32 total;
+        |    /*   +4 */ u32 mid;
+        |    /* +194 */ u32 tail;
+        |} PlusStyle;
+        |""".stripMargin
+    val offsets = CHeaderOffsetParser.parse(source)
+    assert(offsets(("PlusStyle", "total")) == 0)
+    assert(offsets(("PlusStyle", "mid")) == 4)
+    assert(offsets(("PlusStyle", "tail")) == 0x194)
+  }
+
   test("parses doldecomp-style member offset comments") {
     val source =
       """

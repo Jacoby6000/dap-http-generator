@@ -427,4 +427,105 @@ class DapHttpServerMainSpec extends AnyFunSuite {
     assert(response.status == Status.Ok)
     assert(resumed.get())
   }
+
+  test("PUT /memory encodes a field and issues DAP writeMemory") {
+    import cats.effect.IO
+    import cats.effect.Ref
+    import cats.effect.unsafe.implicits.global
+    import io.circe.Json
+    import io.circe.syntax._
+    import org.http4s.Method.PUT
+    import org.http4s.Request
+    import org.http4s.Status
+    import org.http4s.circe._
+    import org.http4s.implicits._
+    import software.amazon.smithy.model.shapes.ShapeId
+
+    val written = new java.util.concurrent.atomic.AtomicReference[(Long, String)](null)
+    val dapClient = new DapHttpServerMain.DapClient {
+      override def readMemory(address: Long, sizeBytes: Int): IO[Either[String, String]] =
+        IO.pure(Right(""))
+
+      override def continueExecution(): IO[Either[String, Json]] =
+        IO.pure(Right(Json.obj()))
+
+      override def writeMemory(address: Long, dataBase64: String): IO[Either[String, Int]] =
+        IO {
+          written.set((address, dataBase64))
+          Right(java.util.Base64.getDecoder.decode(dataBase64).length)
+        }
+    }
+
+    def sid(name: String): ShapeId = ShapeId.from(s"example#$name")
+    def mem(
+        name: String,
+        target: IrType,
+        offset: Int,
+        primitive: Option[IrPrimitive] = None
+    ): IrMember =
+      IrMember(
+        id = sid(s"Demo_$name"),
+        name = name,
+        target = target,
+        staticAddress = None,
+        paddingRepeats = None,
+        isPointer = false,
+        isArray = false,
+        arrayLength = None,
+        endianOverride = None,
+        primitiveOverride = primitive,
+        offsetBytes = Some(offset)
+      )
+
+    val demo = IrType.MemoryMappedStruct(
+      id = sid("Demo"),
+      members = List(
+        mem("x", IrType.Primitive(IrPrimitive.U32), 0, Some(IrPrimitive.U32)),
+        mem("y", IrType.Primitive(IrPrimitive.U16), 4, Some(IrPrimitive.U16))
+      ),
+      declaredSizeBits = Some(48)
+    )
+    val services = List(
+      IrService(
+        name = "Api",
+        wordSizeBits = Some(32),
+        defaultEndian = IrEndian.Big,
+        operations = List(
+          IrOperation(
+            name = "GetDemo",
+            routePath = "/api/Api/GetDemo",
+            output = IrType.EnclosingStruct(
+              id = sid("GetDemoOutput"),
+              members = List(
+                mem("value", demo, 0).copy(id = sid("GetDemoOutput_value"), offsetBytes = None)
+              ),
+              declaredSizeBits = None
+            )
+          )
+        )
+      )
+    )
+
+    val plansRef = Ref.unsafe[IO, RoutePlansLoadResult](
+      RoutePlansLoadResult(Map.empty, Nil, services)
+    )
+    val app = HttpLoggingMiddleware(DapHttpServerMain.routes(plansRef, dapClient).orNotFound)
+    val body = Json.obj(
+      "address" -> Json.fromString("0x1004"),
+      "value" -> Json.fromLong(0xabcdL),
+      "decodeType" -> Json.fromString("example#Demo"),
+      "segments" -> List("y").asJson,
+      "overlay" -> Json.False
+    )
+    val response = app
+      .run(Request[IO](PUT, uri"/memory").withEntity(body))
+      .unsafeRunSync()
+
+    assert(response.status == Status.Ok)
+    val (addr, data) = written.get()
+    assert(addr == 0x1004L)
+    assert(
+      java.util.Base64.getDecoder.decode(data).toSeq == Seq(0xab, 0xcd).map(_.toByte)
+    )
+  }
 }

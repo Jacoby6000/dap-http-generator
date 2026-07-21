@@ -312,28 +312,58 @@ object DoldecompIrGenerator {
               case Some(composite) =>
                 buildingStructs += name
                 try {
-                  IrType.MemoryMappedStruct(
+                  val fields = CHeaderParser.extractFields(composite)
+                  val rawMembers = buildStructMembers(
+                    namespace = namespace,
+                    structName = name,
+                    wordSizeBits = wordSizeBits,
+                    fields = fields,
+                    reachableStructs = reachableByName,
+                    buildStruct = buildStruct,
+                    buildEnum = buildEnum,
+                    enums = enums,
+                    pointeeTypeFor = pointeeTypeFor,
+                    fieldInitializerLengths = fieldInitializerLengths,
+                    typedefs = typedefs,
+                    arrayConstants = arrayConstants
+                  )
+                  val members = enrichMissingArrayLengths(
+                    structName = name,
+                    fields = fields,
+                    members = rawMembers,
+                    commentOffsets = structMemberOffsets,
+                    arrayConstants = arrayConstants,
+                    wordSizeBits = wordSizeBits
+                  )
+                  val unpacked = IrType.MemoryMappedStruct(
                     id = ShapeId.from(s"$namespace#$name"),
-                    members = buildStructMembers(
-                      namespace = namespace,
-                      structName = name,
-                      wordSizeBits = wordSizeBits,
-                      fields = enrichFieldOffsets(
-                        name,
-                        CHeaderParser.extractFields(composite),
-                        structMemberOffsets
-                      ),
-                      reachableStructs = reachableByName,
-                      buildStruct = buildStruct,
-                      buildEnum = buildEnum,
-                      enums = enums,
-                      pointeeTypeFor = pointeeTypeFor,
-                      fieldInitializerLengths = fieldInitializerLengths,
-                      typedefs = typedefs,
-                      arrayConstants = arrayConstants
-                    ),
+                    members = members,
                     declaredSizeBits = None
                   )
+                  val packed = IrLayout.packStruct(unpacked, Some(wordSizeBits)) match {
+                    case Right(p) =>
+                      p
+                    case Left(errs) =>
+                      // DESNOTE(jbarber, 2026-07-20): Packing is required for layout, but a single
+                      // unresolved flexible array should not abort the whole Melee corpus. Warn and
+                      // keep the unpacked members so other symbols can still load.
+                      errs.foreach { err =>
+                        DapHttpLoggers.irSourceDoldecomp.warn(
+                          "Failed to pack struct '{}': {}",
+                          name,
+                          err
+                        )
+                      }
+                      unpacked
+                  }
+                  commentOffsetWarnings(
+                    name,
+                    fields.map(f => CHeaderParser.fieldName(f.declarator)),
+                    packed.members,
+                    structMemberOffsets
+                  )
+                    .foreach(msg => DapHttpLoggers.irSourceDoldecomp.warn(msg))
+                  packed
                 } finally {
                   buildingStructs -= name
                 }
@@ -663,14 +693,133 @@ object DoldecompIrGenerator {
         )
     }
 
-  private def enrichFieldOffsets(
+  /** Offset comments are documentation; warn when they disagree with type-packed layout. */
+  private[daphttp] def commentOffsetWarnings(
+      structName: String,
+      fieldNames: List[String],
+      packedMembers: List[IrMember],
+      commentOffsets: Map[(String, String), Int]
+  ): List[String] = {
+    val packedByName =
+      packedMembers.flatMap(m => m.offsetBytes.map(off => m.name -> off)).toMap
+    fieldNames.flatMap { cName =>
+      val camel = toCamelCase(cName)
+      for {
+        comment <- commentOffsets.get((structName, cName))
+        packed <- packedByName.get(camel).orElse(packedByName.get(cName))
+        if packed != comment
+      } yield s"$structName.$cName: offset comment 0x${Integer.toHexString(comment)} disagrees with type-packed layout 0x${Integer.toHexString(packed)}"
+    }
+  }
+
+  /** When an array bound (often an enumerator like `StatsAttack_Count`) does not resolve, recover
+    * length from the gap between this field's offset comment and the next field's comment.
+    */
+  private[daphttp] def enrichMissingArrayLengths(
       structName: String,
       fields: List[StructFieldDecl],
-      offsets: Map[(String, String), Int]
-  ): List[StructFieldDecl] =
-    fields.map { field =>
-      val fieldName = CHeaderParser.fieldName(field.declarator)
-      field.copy(offsetBytes = offsets.get((structName, fieldName)).orElse(field.offsetBytes))
+      members: List[IrMember],
+      commentOffsets: Map[(String, String), Int],
+      arrayConstants: Map[String, Int],
+      wordSizeBits: Int
+  ): List[IrMember] = {
+    val fieldNames = fields.map(f => CHeaderParser.fieldName(f.declarator))
+    val fieldByCamel = fieldNames.map(n => toCamelCase(n) -> n).toMap
+    members.map { member =>
+      if (!member.isArray || member.arrayLength.isDefined) {
+        member
+      } else {
+        val cName = fieldByCamel.getOrElse(member.name, member.name)
+        val bound = fields
+          .find(f => CHeaderParser.fieldName(f.declarator) == cName)
+          .flatMap(f => CHeaderParser.arrayBoundExpression(f.declarator))
+        bound.foreach { expr =>
+          if (!arrayConstants.contains(expr)) {
+            DapHttpLoggers.irSourceDoldecomp.warn(
+              "{}.{}: unable to resolve array bound '{}' (not in enumerator/macro constant table)",
+              structName,
+              cName,
+              expr
+            )
+          }
+        }
+        inferArrayLengthFromOffsetComments(
+          structName,
+          cName,
+          member,
+          commentOffsets,
+          wordSizeBits
+        ) match {
+          case Some(length) =>
+            val boundNote = bound.map(b => s" (bound '$b' unresolved)").getOrElse("")
+            DapHttpLoggers.irSourceDoldecomp.warn(
+              "{}.{}: inferred arrayLength={} from offset comments{}",
+              structName,
+              cName,
+              Integer.valueOf(length),
+              boundNote
+            )
+            ensureArrayListTarget(member.copy(arrayLength = Some(length)), structName)
+          case None =>
+            member
+        }
+      }
+    }
+  }
+
+  private def inferArrayLengthFromOffsetComments(
+      structName: String,
+      cFieldName: String,
+      member: IrMember,
+      commentOffsets: Map[(String, String), Int],
+      wordSizeBits: Int
+  ): Option[Int] = {
+    val start = commentOffsets.get((structName, cFieldName))
+    val next = start.flatMap { startOff =>
+      commentOffsets.collect {
+        case ((`structName`, _), off) if off > startOff => off
+      }.minOption
+    }
+    val elemSize = arrayElementSizeBytes(member, wordSizeBits)
+    for {
+      s <- start
+      n <- next
+      elem <- elemSize
+      if elem > 0 && (n - s) % elem == 0
+      length = (n - s) / elem
+      if length > 0
+    } yield length
+  }
+
+  private def arrayElementSizeBytes(member: IrMember, wordSizeBits: Int): Option[Int] = {
+    val wordSize = Some(wordSizeBits)
+    val errors = mutable.ListBuffer.empty[String]
+    if (member.isPointer) {
+      wordSize.map(_ / 8)
+    } else {
+      member.target match {
+        case list: IrType.ListType =>
+          IrLayout.typeSizeBytes(list.element, wordSize, errors)
+        case other =>
+          IrLayout.typeSizeBytes(other, wordSize, errors)
+      }
+    }
+  }
+
+  private def ensureArrayListTarget(member: IrMember, structName: String): IrMember =
+    if (member.isPointer || member.target.isInstanceOf[IrType.ListType]) {
+      member
+    } else {
+      member.copy(
+        target = IrType.ListType(
+          id = ShapeId.from(
+            s"${member.id.getNamespace}#${structName}${toPascalCase(member.name)}Array"
+          ),
+          element = member.target,
+          bytesAlias = false,
+          bitsAlias = false
+        )
+      )
     }
 
   private def groupBitfieldFields(
@@ -686,10 +835,18 @@ object DoldecompIrGenerator {
     def flushPending(): Unit =
       if (pending.nonEmpty) {
         val bitfields = pending.toList
+        // DESNOTE(jbarber, 2026-07-20): Size incomplete bitfield units by bits used
+        // (rounded up to a whole byte), not the full declared type width. GCC would keep a
+        // trailing `u32` unit at 32 bits even when only 16 are used; Metrowerks / doldecomp
+        // Melee headers (e.g. StartMeleeRules `x0_*`…`x5_*` then `u8 x6`) expect the tighter
+        // 6-byte layout so later offsetof pads like `pad_x5C[0x60 - 0x5C]` stay correct.
+        // Allocation still splits when a unit of `typeBits` fills; only the last partial unit
+        // shrinks. See https://github.com/doldecomp/melee
+        val storageBits = ((pendingUsedBits + 7) / 8) * 8
         groups += BitmaskFieldGroup(
           name = bitmaskGroupName(bitfields),
           fields = bitfields,
-          storageBits = pendingTypeBits
+          storageBits = storageBits
         )
         pending.clear()
         pendingType = None
@@ -1102,51 +1259,13 @@ object DoldecompIrGenerator {
       )
     }
 
-  private def irStructSizeBytes(struct: IrType.MemoryMappedStruct, wordSizeBits: Int): Int = {
-    val wordSize = Some(wordSizeBits)
-    if (struct.members.exists(_.offsetBytes.isDefined)) {
-      struct.members
-        .flatMap { member =>
-          for {
-            offset <- member.offsetBytes
-            sizeBytes <- irMemberSizeBytes(member, wordSize)
-          } yield offset + sizeBytes
-        }
-        .maxOption
+  private def irStructSizeBytes(struct: IrType.MemoryMappedStruct, wordSizeBits: Int): Int =
+    struct.declaredSizeBits.getOrElse {
+      IrLayout
+        .packStruct(struct, Some(wordSizeBits))
+        .map(_.declaredSizeBits.getOrElse(0))
         .getOrElse(0)
-    } else {
-      val memberBits = struct.members.flatMap(irMemberBitWidth(_, wordSize))
-      if (memberBits.isEmpty) 0 else math.ceil(memberBits.sum.toDouble / 8d).toInt
     }
-  }
-
-  private def irMemberSizeBytes(member: IrMember, wordSize: Option[Int]): Option[Int] =
-    member.readSizeBytes.orElse {
-      irMemberBitWidth(member, wordSize).map(bits => math.ceil(bits.toDouble / 8d).toInt)
-    }
-
-  private def irMemberBitWidth(member: IrMember, wordSize: Option[Int]): Option[Int] = {
-    member.layoutBitWidth.orElse {
-      if (member.isPointer) {
-        wordSize
-      } else {
-        member.primitiveOverride.flatMap(bitsForPrimitive(_, wordSize)).orElse {
-          member.target match {
-            case IrType.Primitive(kind)            => bitsForPrimitive(kind, wordSize)
-            case _: IrType.IntEnum                 => bitsForPrimitive(IrPrimitive.S32, wordSize)
-            case listType: IrType.ListType         => irListBitWidth(member, listType, wordSize)
-            case nested: IrType.MemoryMappedStruct =>
-              Some(irStructSizeBytes(nested, wordSize.getOrElse(32)) * 8)
-            case bitmask: IrType.Bitmask =>
-              bitmask.declaredSizeBits.orElse {
-                Some(bitmask.members.map(_ => 1).sum)
-              }
-            case _ => None
-          }
-        }
-      }
-    }
-  }
 
   private def bitsForPrimitive(kind: IrPrimitive, wordSize: Option[Int]): Option[Int] =
     kind match {
@@ -1167,23 +1286,6 @@ object DoldecompIrGenerator {
       case IrPrimitive.F32      => Some(32)
       case IrPrimitive.F64      => Some(64)
       case IrPrimitive.LongWord => wordSize.orElse(Some(64))
-    }
-
-  private def irListBitWidth(
-      member: IrMember,
-      listType: IrType.ListType,
-      wordSize: Option[Int]
-  ): Option[Int] =
-    member.arrayLength.flatMap { length =>
-      listType.element match {
-        case IrType.Primitive(kind) =>
-          bitsForPrimitive(kind, wordSize).map(_ * length)
-        case _: IrType.IntEnum =>
-          bitsForPrimitive(IrPrimitive.S32, wordSize).map(_ * length)
-        case nested: IrType.MemoryMappedStruct =>
-          Some(irStructSizeBytes(nested, wordSize.getOrElse(32)) * 8 * length)
-        case _ => None
-      }
     }
 
   private final case class HeaderFile(path: Path, raw: String, cdtSource: String) {
@@ -1392,6 +1494,11 @@ object DoldecompIrGenerator {
     // Only Count sentinels are injected — exporting every enumerator as a macro would collide with
     // later redefinitions of the same enum tag (see enum-merge fixture) and OOM ScannerInfo setup.
     // See https://github.com/eclipse-cdt/cdt/blob/main/core/org.eclipse.cdt.core/parser/org/eclipse/cdt/internal/core/dom/parser/ValueFactory.java
+    //
+    // DESNOTE(jbarber, 2026-07-20): Injecting `StatsAttack_Count` (etc.) as a ScannerInfo macro also
+    // expands that identifier in its *defining* enum on reparse, which can drop or empty the typedef
+    // from the final pass. Accumulate every pass and prefer richer bodies in mergeEnumParseResults
+    // so Count sentinels remain available for array-bound lookup (`by_attack_counts[StatsAttack_Count]`).
     def parseAll(macrosForPass: Map[String, String]): List[(String, EnumParseResult)] = {
       val scannerInfo = CHeaderParser.scannerInfoFor(macrosForPass)
       corpus.files.map { file =>
@@ -1402,6 +1509,8 @@ object DoldecompIrGenerator {
 
     var macrosForPass = macros
     var results = parseAll(macrosForPass)
+    val passResults = mutable.ListBuffer.empty[List[(String, EnumParseResult)]]
+    passResults += results
     var pass = 0
     var continue = true
     while (continue && pass < 4) {
@@ -1416,9 +1525,12 @@ object DoldecompIrGenerator {
       } else {
         macrosForPass = nextMacros
         results = parseAll(macrosForPass)
+        passResults += results
       }
     }
-    mergeEnumParseResults(results)
+    // Per-pass merge keeps first-wins across files; across passes prefer richer bodies so a
+    // Count-macro reparse that emptied a defining enum does not erase the earlier harvest.
+    passResults.map(mergeEnumParseResults).reduceLeft(preferRicherEnumPass)
   }
 
   private def countSentinelMacros(results: List[EnumParseResult]): Map[String, String] = {
@@ -1507,6 +1619,43 @@ object DoldecompIrGenerator {
     warnings ++= summarizeNameConflicts("enum", conflicts.map(_.name))
     EnumParseResult(merged.toMap, warnings.toList, conflicts)
   }
+
+  private def preferRicherEnumPass(
+      earlier: EnumParseResult,
+      later: EnumParseResult
+  ): EnumParseResult = {
+    // Later passes resolve more Count-forward initializers; keep them as the baseline and only
+    // restore from earlier when the Count-macro reparse dropped or emptied a defining enum.
+    val merged = mutable.LinkedHashMap.from(later.enums)
+    earlier.enums.foreach { case (name, definition) =>
+      merged.get(name) match {
+        case None =>
+          merged(name) = definition
+        case Some(existing) if existing.values.isEmpty && definition.values.nonEmpty =>
+          merged(name) = definition
+        case Some(existing) if definition.values.size > existing.values.size =>
+          merged(name) = definition
+        case Some(existing)
+            if definition.values.size == existing.values.size &&
+              hasCountSentinel(definition) && !hasCountSentinel(existing) =>
+          merged(name) = definition
+        case _ =>
+          ()
+      }
+    }
+    EnumParseResult(
+      enums = merged.toMap,
+      // Early-pass initializer failures are often fixed once Count macros exist; keep the later
+      // pass's warnings (and conflicts) as the authoritative report.
+      warnings = later.warnings,
+      conflicts = later.conflicts
+    )
+  }
+
+  private def hasCountSentinel(definition: CEnumDefinition): Boolean =
+    definition.values.exists { v =>
+      v.name.endsWith("_Count") || v.name.endsWith("_SelfCount")
+    }
 
   private def speculateMissingIncludePaths(
       headerRoots: List[Path],

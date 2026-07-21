@@ -615,11 +615,36 @@ class HttpRouteIrEmitterCodecSpec extends AnyFunSuite {
     assert(annotated.hcursor.downField("_address").as[String].toOption.contains("0x80400000"))
     assert(
       annotated.hcursor
+        .downField("_offsets")
+        .downField("id")
+        .as[Int]
+        .toOption
+        .contains(0)
+    )
+    assert(
+      annotated.hcursor
+        .downField("_offsets")
+        .downField("pos")
+        .as[Int]
+        .toOption
+        .contains(0x10)
+    )
+    assert(
+      annotated.hcursor
         .downField("pos")
         .downField("_address")
         .as[String]
         .toOption
         .contains("0x80400010")
+    )
+    assert(
+      annotated.hcursor
+        .downField("pos")
+        .downField("_offsets")
+        .downField("x")
+        .as[Int]
+        .toOption
+        .contains(0)
     )
     assert(annotated.hcursor.downField("pos").downField("x").as[Double].toOption.contains(1.0))
     // Pointer slots stay numeric — no struct wrapper / _address on the pointee value.
