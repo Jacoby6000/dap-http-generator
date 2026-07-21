@@ -262,10 +262,23 @@ private[daphttp] final class LocalPipeDapClient(
 
   private def ensureSession: IO[DapFramedSession] =
     IO.delay {
-      connectionLock.synchronized(ownedSession.filter(_.session.isOpen))
+      connectionLock.synchronized(ownedSession)
     }.flatMap {
-      case Some(owned) => IO.pure(owned.session)
-      case None        =>
+      case Some(owned) if owned.session.isOpen =>
+        IO.pure(owned.session)
+      case Some(_) =>
+        invalidateSession *> establishSession.flatMap {
+          case Right(owned) =>
+            IO.delay {
+              connectionLock.synchronized {
+                ownedSession = Some(owned)
+              }
+              owned.session
+            }
+          case Left(error) =>
+            IO.raiseError(new java.io.IOException(error))
+        }
+      case None =>
         establishSession.flatMap {
           case Right(owned) =>
             IO.delay {
@@ -281,10 +294,22 @@ private[daphttp] final class LocalPipeDapClient(
 
   private def tryEstablishSessionUnlocked: IO[Either[String, Unit]] =
     IO.delay {
-      connectionLock.synchronized(ownedSession.exists(_.session.isOpen))
+      connectionLock.synchronized(ownedSession)
     }.flatMap {
-      case true  => IO.pure(Right(()))
-      case false =>
+      case Some(owned) if owned.session.isOpen =>
+        IO.pure(Right(()))
+      case Some(_) =>
+        invalidateSession *> establishSession.flatMap {
+          case Right(owned) =>
+            IO.delay {
+              connectionLock.synchronized {
+                ownedSession = Some(owned)
+              }
+              Right(())
+            }
+          case Left(error) => IO.pure(Left(error))
+        }
+      case None =>
         establishSession.flatMap {
           case Right(owned) =>
             IO.delay {

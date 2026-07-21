@@ -68,7 +68,6 @@ object DapHttpServerMain extends IOApp {
       case Right(config) =>
         for {
           plansRef <- Ref.of[IO, RoutePlansLoadResult](loadPlans(config.smithyPaths))
-          _ <- watchSmithySources(config, plansRef)
           dapClient = DapClients.create(
             config.dapPipe,
             config.dapHost,
@@ -80,6 +79,7 @@ object DapHttpServerMain extends IOApp {
           )
           overlaysRef <- Ref.of[IO, OverlayEngine](OverlayEngine.empty)
           watchService <- RealtimeWatchService.create(dapClient, plansRef, overlaysRef)
+          _ <- watchSmithySources(config, plansRef, overlaysRef, watchService)
           _ <- dapClient.startConnectionManager()
           _ <- watchService.start()
           exit <- EmberServerBuilder
@@ -1896,7 +1896,9 @@ object DapHttpServerMain extends IOApp {
 
   private def watchSmithySources(
       config: Config,
-      plansRef: Ref[IO, RoutePlansLoadResult]
+      plansRef: Ref[IO, RoutePlansLoadResult],
+      overlaysRef: Ref[IO, OverlayEngine],
+      watchService: RealtimeWatchService
   ): IO[Unit] = {
     if (!config.watch) {
       IO.unit
@@ -1912,7 +1914,14 @@ object DapHttpServerMain extends IOApp {
       def loop(lastSeen: Long): IO[Unit] =
         IO.sleep(2.seconds) *> IO.blocking(newestTimestamp(config.smithyPaths)).flatMap { newest =>
           if (newest > lastSeen) {
-            plansRef.set(loadPlans(config.smithyPaths)) *> loop(newest)
+            for {
+              plans <- IO.blocking(loadPlans(config.smithyPaths))
+              _ <- plansRef.set(plans)
+              engine <- overlaysRef.get
+              _ <- overlaysRef.set(OverlayEngine.fromServices(engine.document, plans.services))
+              _ <- watchService.rebindAll
+              _ <- loop(newest)
+            } yield ()
           } else {
             loop(lastSeen)
           }
@@ -2178,10 +2187,11 @@ object DapHttpServerMain extends IOApp {
 
     private def ensureSession(timeoutMs: Int): DapFramedSession =
       connectionLock.synchronized {
-        session.filter(_.isOpen) match {
-          case Some(activeSession) =>
+        session match {
+          case Some(activeSession) if activeSession.isOpen =>
             activeSession
-          case None =>
+          case stale =>
+            if (stale.isDefined) invalidateSessionUnlocked()
             establishSession(timeoutMs, dapConnectTimeoutMs) match {
               case Right(activeSession) =>
                 session = Some(activeSession)
@@ -2194,9 +2204,11 @@ object DapHttpServerMain extends IOApp {
 
     private def tryEstablishSession(): Either[String, Unit] =
       connectionLock.synchronized {
-        session.filter(_.isOpen) match {
-          case Some(_) => Right(())
-          case None    =>
+        session match {
+          case Some(activeSession) if activeSession.isOpen =>
+            Right(())
+          case stale =>
+            if (stale.isDefined) invalidateSessionUnlocked()
             establishSession(dapTimeoutMs, dapConnectTimeoutMs).map { activeSession =>
               session = Some(activeSession)
             }
@@ -2246,10 +2258,14 @@ object DapHttpServerMain extends IOApp {
 
     private def invalidateSession(): Unit =
       connectionLock.synchronized {
-        session.foreach(_.close())
-        session = None
-        DapEventBus.publish(sessionResetTopic, ())
+        invalidateSessionUnlocked()
       }
+
+    private def invalidateSessionUnlocked(): Unit = {
+      session.foreach(_.close())
+      session = None
+      DapEventBus.publish(sessionResetTopic, ())
+    }
 
     private def parseThreadIds(responseBody: Json): List[Int] =
       responseBody.hcursor

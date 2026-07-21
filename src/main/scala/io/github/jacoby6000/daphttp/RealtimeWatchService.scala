@@ -394,13 +394,17 @@ private[daphttp] object WatchPathResolver {
           else {
             val nestPrefix =
               if (path == resolved.parentPath) Nil
-              else
-                path
+              else {
+                val relative = path
                   .stripPrefix(resolved.parentPath + "/")
                   .split("/")
                   .toList
                   .filter(_.nonEmpty)
-                  .dropRight(1)
+                // Keep a trailing numeric index (whole array-element watch); drop only a
+                // trailing field name so overlay patches nest under `$parent/2/...`.
+                if (relative.lastOption.exists(_.forall(_.isDigit))) relative
+                else relative.dropRight(1)
+              }
             val withParentOverlap = parentPlan match {
               case Some(plan) =>
                 expandWithOverlayMapping(

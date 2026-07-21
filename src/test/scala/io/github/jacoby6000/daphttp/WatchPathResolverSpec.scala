@@ -380,4 +380,87 @@ class WatchPathResolverSpec extends AnyFunSuite {
     assert(target.count >= 8)
     assert(target.overlayFields.map(_.segments).contains(List("2", "xy")))
   }
+
+  test("root array element watch nests overlay segments under the index") {
+    import software.amazon.smithy.model.shapes.ShapeId
+    def sid(name: String): ShapeId = ShapeId.from(s"example#$name")
+    val slotId = sid("StaticPlayer")
+    val slot = IrType.MemoryMappedStruct(
+      id = slotId,
+      members = List(
+        IrMember(
+          id = sid("StaticPlayer_x"),
+          name = "x",
+          target = IrType.Primitive(IrPrimitive.U32),
+          staticAddress = None,
+          paddingRepeats = None,
+          isPointer = false,
+          isArray = false,
+          arrayLength = None,
+          endianOverride = None,
+          primitiveOverride = Some(IrPrimitive.U32),
+          offsetBytes = Some(0)
+        )
+      ),
+      declaredSizeBits = Some(4)
+    )
+    val sub = MemberSubRoute.ValueSubRoute(
+      memberName = MemberSubRoute.RootArrayMemberName,
+      baseAddress = 0x80453080L,
+      memberOffsetBytes = 0,
+      isArray = true,
+      arrayLength = Some(6),
+      wordSizeBits = 32,
+      endian = IrEndian.Big,
+      valueType = Some(slot),
+      elementSizeBytes = Some(4),
+      elementStrideBytes = Some(8),
+      decodeCodec = HttpRouteIrEmitter.codecForType(slot, IrEndian.Big, Some(32))
+    )
+    val plan = RoutePlan(
+      path = "/api/MasterHand/player_slots",
+      reads = List(
+        ReadPlan(
+          path = "/api/MasterHand/player_slots",
+          address = 0x80453080L,
+          sizeBytes = 48,
+          decodeType = Some(
+            IrType.ListType(sid("Slots"), slot, bytesAlias = false, bitsAlias = false)
+          ),
+          endian = IrEndian.Big,
+          wordSizeBits = Some(32),
+          decodeCodec = None,
+          cStringPointer = false,
+          arrayLength = Some(6)
+        )
+      ),
+      memberSubRoutes = List(sub)
+    )
+    val document = TypeOverlayDocument(
+      structs = Map(
+        slotId.toString -> OverlayStructDef(
+          List(OverlayMember("wide", "u64"))
+        )
+      )
+    )
+    val engine = OverlayEngine.fromServices(
+      document,
+      List(
+        IrService(
+          name = "MasterHand",
+          wordSizeBits = Some(32),
+          defaultEndian = IrEndian.Big,
+          operations = Nil
+        )
+      )
+    )
+    val resolved =
+      WatchPathResolver.resolve(
+        "/api/MasterHand/player_slots/2",
+        Map(plan.path -> plan),
+        engine
+      )
+    assert(resolved.isRight, resolved)
+    assert(resolved.toOption.get.overlayFields.map(_.segments).contains(List("2", "wide")))
+  }
 }
