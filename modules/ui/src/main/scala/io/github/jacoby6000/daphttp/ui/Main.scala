@@ -45,7 +45,7 @@ final case class OpenTab(
     indexValues: List[Int] = Nil
 )
 
-object Main extends DualDecodeSupport {
+object Main extends DualDecodeSupport with OverlayEditorSupport with WatchClientSupport {
   private var catalog: List[RouteTreeNode] = Nil
   private var visible: List[RouteTreeNode] = Nil
   private val expanded = scala.collection.mutable.Set.empty[String]
@@ -54,8 +54,8 @@ object Main extends DualDecodeSupport {
   private val loadErrors = scala.collection.mutable.Map.empty[String, String]
   private var selected: Option[String] = None
   private var activeQuery: String = ""
-  private var typeCatalog: List[TypeCatalogEntry] = Nil
-  private var overlays: TypeOverlayDocument = TypeOverlayDocument.empty
+  protected var typeCatalog: List[TypeCatalogEntry] = Nil
+  protected var overlays: TypeOverlayDocument = TypeOverlayDocument.empty
 
   /** Open workspace tabs (insertion order). */
   private val openTabs = scala.collection.mutable.LinkedHashMap.empty[String, OpenTab]
@@ -64,10 +64,10 @@ object Main extends DualDecodeSupport {
   private var activeTabPath: Option[String] = None
 
   // Working copies for the active tab (synced via saveActiveTabDraft / restoreActiveTabEditor).
-  private var editingStructId: Option[String] = None
-  private var draftMembers: List[OverlayMember] = Nil
+  protected var editingStructId: Option[String] = None
+  protected var draftMembers: List[OverlayMember] = Nil
   private var lastDecodeType: Option[String] = None
-  private var editorOpen: Boolean = false
+  protected var editorOpen: Boolean = false
 
   /** Json-pointer path → epoch ms when that subtree was last refreshed. */
   private val fieldFreshAt = scala.collection.mutable.Map.empty[String, Double]
@@ -93,13 +93,13 @@ object Main extends DualDecodeSupport {
   protected var patchRafScheduled = false
 
   /** Active realtime watches: HTTP path → server watchId. */
-  private val activeWatches = scala.collection.mutable.Map.empty[String, Int]
+  protected val activeWatches = scala.collection.mutable.Map.empty[String, Int]
 
   /** Source watch path → overlay JSON segment paths co-watched via byte-range overlap. */
-  private val watchOverlaySegments =
+  protected val watchOverlaySegments =
     scala.collection.mutable.Map.empty[String, List[List[String]]]
 
-  private var watchSocket: Option[dom.WebSocket] = None
+  protected var watchSocket: Option[dom.WebSocket] = None
 
   /** Soft ceiling: fields older than this (relative to latest data / now) look distinctly muted. */
   private val StaleAfterMs = FieldFreshness.StaleAfterMs
@@ -110,7 +110,7 @@ object Main extends DualDecodeSupport {
   /** Current index values for `indexTemplate` (or concrete indexed path). */
   private var indexValues: List[Int] = Nil
 
-  private def detailViewPath: Option[String] = activeTabPath
+  protected def detailViewPath: Option[String] = activeTabPath
 
   def main(@unused args: Array[String]): Unit = {
     byId("reload-tree").onclick = (_: MouseEvent) => loadCatalog()
@@ -162,7 +162,7 @@ object Main extends DualDecodeSupport {
     js.timers.setInterval(2000)(refreshVisibleAgeStyles())
   }
 
-  private def loadTypesAndOverlays(): Unit = {
+  protected def loadTypesAndOverlays(): Unit = {
     fetchJson("/types").foreach { json =>
       json.hcursor.downField("types").as[List[TypeCatalogEntry]].foreach { entries =>
         typeCatalog = entries
@@ -504,7 +504,7 @@ object Main extends DualDecodeSupport {
       Some(st)
     } else None
 
-  private def showDetail(path: String, json: Json): Unit = {
+  protected def showDetail(path: String, json: Json): Unit = {
     ensureWorkspaceVisible()
     byId("editor-panel").removeAttribute("hidden")
 
@@ -733,7 +733,7 @@ object Main extends DualDecodeSupport {
       }
     }
 
-  private def persistActiveTabDraft(): Unit =
+  protected def persistActiveTabDraft(): Unit =
     activeTabPath.foreach { path =>
       openTabs.get(path).foreach { tab =>
         openTabs.update(
@@ -833,173 +833,6 @@ object Main extends DualDecodeSupport {
         prepend(btn)
         prepend(watchBtn)
       }
-  }
-
-  private def isOverlaySegmentWatched(basePath: String, segments: List[String]): Boolean =
-    WatchPathMatch.isOverlaySegmentWatched(
-      basePath,
-      segments,
-      activeWatches.keys,
-      watchOverlaySegments
-    )
-
-  private def toggleWatch(httpPath: String): Unit =
-    activeWatches.get(httpPath) match {
-      case Some(watchId) =>
-        deleteJson(s"/watches/$watchId").onComplete {
-          case Success(_) =>
-            activeWatches.remove(httpPath)
-            watchOverlaySegments.remove(httpPath)
-            detailViewPath.foreach(p => payloads.get(p).foreach(showDetail(p, _)))
-            setIndexStatus(s"Stopped watching $httpPath", ok = true)
-          case Failure(err) =>
-            setIndexStatus(err.getMessage, ok = false)
-        }
-      case None =>
-        postJson("/watches", Json.obj("path" -> Json.fromString(httpPath))).onComplete {
-          case Success(json) =>
-            json.hcursor.get[Int]("watchId") match {
-              case Right(watchId) =>
-                activeWatches.update(httpPath, watchId)
-                val overlaySegs = json.hcursor
-                  .downField("overlaySegments")
-                  .as[List[List[String]]]
-                  .getOrElse(Nil)
-                if (overlaySegs.nonEmpty) watchOverlaySegments.update(httpPath, overlaySegs)
-                else watchOverlaySegments.remove(httpPath)
-                detailViewPath.foreach(p => payloads.get(p).foreach(showDetail(p, _)))
-                val overlayNote =
-                  if (overlaySegs.isEmpty) ""
-                  else s" (overlay: ${overlaySegs.map(_.mkString("/")).mkString(", ")})"
-                setIndexStatus(s"Watching $httpPath (#$watchId)$overlayNote", ok = true)
-              case Left(err) =>
-                val msg = json.hcursor
-                  .get[String]("error")
-                  .toOption
-                  .getOrElse(err.message)
-                setIndexStatus(s"Watch failed: $msg", ok = false)
-            }
-          case Failure(err) =>
-            setIndexStatus(err.getMessage, ok = false)
-        }
-    }
-
-  private def connectWatchSocket(): Unit = {
-    watchSocket.foreach { ws =>
-      try ws.close()
-      catch { case _: Throwable => () }
-    }
-    val proto = if (dom.window.location.protocol == "https:") "wss:" else "ws:"
-    val ws = new dom.WebSocket(s"$proto//${dom.window.location.host}/ws")
-    watchSocket = Some(ws)
-    ws.onmessage = { (event: dom.MessageEvent) =>
-      parse(event.data.toString) match {
-        case Right(json) => handleWatchSocketMessage(json)
-        case Left(_)     => ()
-      }
-    }
-    ws.onclose = { (_: dom.CloseEvent) =>
-      watchSocket = None
-      dom.window.setTimeout(() => connectWatchSocket(), 2000.0)
-    }
-    ws.onerror = { (_: dom.Event) =>
-      try ws.close()
-      catch { case _: Throwable => () }
-    }
-  }
-
-  private def handleWatchSocketMessage(json: Json): Unit = {
-    val cursor = json.hcursor
-    cursor.get[String]("type").toOption match {
-      case Some("watchesCleared") =>
-        activeWatches.clear()
-        watchOverlaySegments.clear()
-        detailViewPath.foreach(p => payloads.get(p).foreach(showDetail(p, _)))
-        setIndexStatus("DAP reconnected — watches cleared", ok = false)
-      case Some("watchesRebound") =>
-        syncWatchesFromJsonList(json.hcursor.downField("watches").as[List[Json]].getOrElse(Nil))
-        setIndexStatus("Watches rebound after overlay/model reload", ok = true)
-      case Some("memoryChanged") =>
-        val pathOpt = cursor.get[String]("path").toOption
-        val decodedOpt = cursor.downField("decoded").focus
-        val overlayOpt = cursor.downField("overlayDecoded").focus.filterNot(_.isNull)
-        val overlayUpdates = cursor
-          .downField("overlayUpdates")
-          .as[List[Json]]
-          .toOption
-          .getOrElse(Nil)
-          .flatMap { item =>
-            for {
-              segs <- item.hcursor.get[List[String]]("segments").toOption
-              value <- item.hcursor.downField("decoded").focus
-            } yield segs -> value
-          }
-        (pathOpt, decodedOpt) match {
-          case (Some(watchedPath), Some(decoded)) =>
-            applyWatchUpdate(watchedPath, decoded, overlayOpt, overlayUpdates)
-          case _ =>
-            ()
-        }
-      case _ =>
-        ()
-    }
-  }
-
-  private def applyWatchUpdate(
-      watchedPath: String,
-      decoded: Json,
-      overlay: Option[Json],
-      overlayUpdates: List[(List[String], Json)]
-  ): Unit = {
-    val parents =
-      payloads.keys.filter(base => watchedPath == base || watchedPath.startsWith(base + "/")).toList
-    parents.foreach { basePath =>
-      payloads.get(basePath).foreach { parent =>
-        val segments =
-          if (watchedPath == basePath) Nil
-          else watchedPath.stripPrefix(basePath + "/").split("/").toList.filter(_.nonEmpty)
-        val mergedDecoded =
-          JsonPath.replace(DecodedPayload.extractDecoded(parent), segments, decoded)
-        // DESNOTE(jbarber, 2026-07-20): Member watches send overlayUpdates without a full
-        // overlayDecoded payload. Seed an empty object when needed so byte-mapped overlay
-        // fields still patch in realtime (previously `.map` dropped updates when the parent
-        // had no overlayDecoded yet).
-        val baseOverlay =
-          (
-            DecodedPayload.extractOverlayDecoded(parent).filterNot(_.isNull),
-            overlay.filterNot(_.isNull)
-          ) match {
-            case (_, Some(piece)) if segments.isEmpty =>
-              Some(piece)
-            case (Some(rootOverlay), Some(piece)) =>
-              Some(JsonPath.replace(rootOverlay, segments, piece))
-            case (Some(rootOverlay), None) =>
-              Some(rootOverlay)
-            case (None, Some(piece)) =>
-              Some(JsonPath.replace(Json.obj(), segments, piece))
-            case (None, None) if overlayUpdates.nonEmpty =>
-              Some(Json.obj())
-            case _ =>
-              None
-          }
-        val mergedOverlay =
-          overlayUpdates.foldLeft(baseOverlay) { case (acc, (overlaySegs, value)) =>
-            Some(JsonPath.replace(acc.getOrElse(Json.obj()), overlaySegs, value))
-          }
-        val updated = DecodedPayload.writeDecodedFields(parent, mergedDecoded, mergedOverlay)
-        payloads.update(basePath, updated)
-        bumpRefreshFreshnessAt(basePath, segments, overlayPanel = false)
-        if (overlay.isDefined || overlayUpdates.nonEmpty)
-          bumpRefreshFreshnessAt(basePath, segments, overlayPanel = true)
-        overlayUpdates.foreach { case (overlaySegs, _) =>
-          bumpRefreshFreshnessAt(basePath, overlaySegs, overlayPanel = true)
-        }
-        watchOverlaySegments.getOrElse(watchedPath, Nil).foreach { overlaySegs =>
-          bumpRefreshFreshnessAt(basePath, overlaySegs, overlayPanel = true)
-        }
-        if (detailViewPath.contains(basePath)) patchJsonViews(basePath, segments)
-      }
-    }
   }
 
   protected def makeValueEditable(
@@ -1309,7 +1142,7 @@ object Main extends DualDecodeSupport {
     if (overlay.isDefined) stampFreshnessAt(basePath, Nil, overlayPanel = true)
   }
 
-  private def bumpRefreshFreshnessAt(
+  protected def bumpRefreshFreshnessAt(
       basePath: String,
       segments: List[String],
       overlayPanel: Boolean
@@ -1488,7 +1321,7 @@ object Main extends DualDecodeSupport {
     }
   }
 
-  private def setIndexStatus(message: String, ok: Boolean): Unit = {
+  protected def setIndexStatus(message: String, ok: Boolean): Unit = {
     val status = byId("index-status")
     status.textContent = message
     status.className = "index-status" + (if (message.isEmpty) "" else if (ok) " ok" else " err")
@@ -1502,318 +1335,10 @@ object Main extends DualDecodeSupport {
   private def concretePathForSelection(path: String): String =
     IndexPath.concretePath(path, indexTemplate, indexValues)
 
-  private def loadDraftForStruct(structId: String): Unit = {
-    editingStructId = Some(structId)
-    inputById("edit-struct").value = structId
-    persistActiveTabDraft()
-    setEditorStatus(s"Loading fields for $structId…", ok = true)
-
-    def applyMembers(members: List[OverlayMember]): Unit = {
-      draftMembers =
-        if (members.nonEmpty) members
-        else List(OverlayMember("field0", "u8", isArray = false, None, false))
-      persistActiveTabDraft()
-      renderFieldEditor()
-      setEditorStatus(s"Loaded ${draftMembers.size} field(s).", ok = true)
-    }
-
-    OverlayDocumentOps.membersForStruct(overlays, structId) match {
-      case Some(members) =>
-        applyMembers(members)
-      case None =>
-        fetchJson(s"/types/fields?id=${js.URIUtils.encodeURIComponent(structId)}").onComplete {
-          case Success(json) =>
-            json.hcursor.downField("fields").as[List[OverlayMember]] match {
-              case Right(fields) => applyMembers(fields)
-              case Left(err)     =>
-                setEditorStatus(s"Failed to decode fields: ${err.getMessage}", ok = false)
-                applyMembers(Nil)
-            }
-          case Failure(err) =>
-            setEditorStatus(err.getMessage, ok = false)
-            applyMembers(Nil)
-        }
-    }
-  }
-
-  private def setEditorOpen(open: Boolean): Unit = {
-    editorOpen = open
-    persistActiveTabDraft()
-    val body = byId("detail-body")
-    val editorBody = byId("editor-body")
-    val chevron = byId("editor-chevron")
-    val toggle = byId("editor-toggle")
-    if (open) {
-      body.classList.add("editor-open")
-      editorBody.removeAttribute("hidden")
-      chevron.textContent = "▼"
-      toggle.setAttribute("aria-expanded", "true")
-    } else {
-      body.classList.remove("editor-open")
-      editorBody.setAttribute("hidden", "true")
-      chevron.textContent = "▶"
-      toggle.setAttribute("aria-expanded", "false")
-    }
-  }
-
-  private def renderTypeDatalists(): Unit = {
-    val structList = byId("struct-type-list")
-    val allList = byId("all-type-list")
-    structList.innerHTML = ""
-    allList.innerHTML = ""
-    typeCatalog.foreach { entry =>
-      val opt = dom.document.createElement("option").asInstanceOf[dom.HTMLOptionElement]
-      opt.value = entry.id
-      allList.appendChild(opt)
-      if (entry.kind == "struct") {
-        val structOpt = dom.document.createElement("option").asInstanceOf[dom.HTMLOptionElement]
-        structOpt.value = entry.id
-        structList.appendChild(structOpt)
-      }
-    }
-    overlays.newStructs.foreach { ns =>
-      val id = if (ns.id.contains("#")) ns.id else s"overlay#${ns.id}"
-      val opt = dom.document.createElement("option").asInstanceOf[dom.HTMLOptionElement]
-      opt.value = id
-      structList.appendChild(opt)
-      val opt2 = dom.document.createElement("option").asInstanceOf[dom.HTMLOptionElement]
-      opt2.value = id
-      allList.appendChild(opt2)
-    }
-  }
-
-  private def renderFieldEditor(): Unit = {
-    val list = byId("field-list")
-    list.innerHTML = ""
-    draftMembers.zipWithIndex.foreach { case (member, index) =>
-      val row = el("div")
-      row.className = "field-row"
-      row.setAttribute("data-field-index", index.toString)
-
-      val nameInput = inputEl()
-      nameInput.value = member.name
-      nameInput.placeholder = "name"
-      nameInput.setAttribute("data-role", "name")
-
-      val typeInput = inputEl()
-      typeInput.value = member.typeId
-      typeInput.placeholder = "typeId"
-      typeInput.setAttribute("list", "all-type-list")
-      typeInput.setAttribute("data-role", "typeId")
-
-      val ptr = inputEl()
-      ptr.setAttribute("type", "checkbox")
-      ptr.asInstanceOf[HTMLInputElement].checked = member.isPointer
-      ptr.title = "pointer"
-      ptr.setAttribute("data-role", "pointer")
-
-      val arr = inputEl()
-      arr.setAttribute("type", "checkbox")
-      arr.asInstanceOf[HTMLInputElement].checked = member.isArray
-      arr.title = "array"
-      arr.setAttribute("data-role", "array")
-
-      val len = inputEl()
-      len.className = "len"
-      len.placeholder = "len"
-      len.value = member.arrayLength.map(_.toString).getOrElse("")
-      len.setAttribute("data-role", "len")
-
-      val up = el("button")
-      up.className = "ghost"
-      up.textContent = "↑"
-      up.onclick = (_: MouseEvent) => {
-        syncDraftFromDom()
-        if (index > 0) {
-          val a = draftMembers(index - 1)
-          val b = draftMembers(index)
-          draftMembers = draftMembers.updated(index - 1, b).updated(index, a)
-          persistActiveTabDraft()
-          renderFieldEditor()
-        }
-      }
-
-      val down = el("button")
-      down.className = "ghost"
-      down.textContent = "↓"
-      down.onclick = (_: MouseEvent) => {
-        syncDraftFromDom()
-        if (index < draftMembers.length - 1) {
-          val a = draftMembers(index)
-          val b = draftMembers(index + 1)
-          draftMembers = draftMembers.updated(index, b).updated(index + 1, a)
-          persistActiveTabDraft()
-          renderFieldEditor()
-        }
-      }
-
-      val del = el("button")
-      del.className = "ghost"
-      del.textContent = "✕"
-      del.onclick = (_: MouseEvent) => {
-        syncDraftFromDom()
-        draftMembers = draftMembers.zipWithIndex.collect {
-          case (m, i) if i != index => m
-        }
-        persistActiveTabDraft()
-        renderFieldEditor()
-      }
-
-      row.appendChild(nameInput)
-      row.appendChild(typeInput)
-      row.appendChild(ptr)
-      row.appendChild(arr)
-      row.appendChild(len)
-      row.appendChild(up)
-      row.appendChild(down)
-      row.appendChild(del)
-      list.appendChild(row)
-    }
-  }
-
-  /** Read editor DOM into draftMembers so Apply sees the latest edits. */
-  private def syncDraftFromDom(): Unit = {
-    val list = byId("field-list")
-    val rows = list.querySelectorAll(".field-row")
-    val synced = (0 until rows.length.toInt).flatMap { i =>
-      val row = rows(i).asInstanceOf[HTMLElement]
-      val name = Option(row.querySelector("""[data-role="name"]"""))
-        .map(_.asInstanceOf[HTMLInputElement].value.trim)
-        .getOrElse("")
-      val typeId = Option(row.querySelector("""[data-role="typeId"]"""))
-        .map(_.asInstanceOf[HTMLInputElement].value.trim)
-        .getOrElse("u8")
-      val isPointer = Option(row.querySelector("""[data-role="pointer"]"""))
-        .exists(_.asInstanceOf[HTMLInputElement].checked)
-      val isArray = Option(row.querySelector("""[data-role="array"]"""))
-        .exists(_.asInstanceOf[HTMLInputElement].checked)
-      val arrayLength = Option(row.querySelector("""[data-role="len"]"""))
-        .flatMap(el => Try(el.asInstanceOf[HTMLInputElement].value.trim.toInt).toOption)
-        .filter(_ > 0)
-      if (name.isEmpty && typeId.isEmpty) None
-      else Some(OverlayMember(name, typeId, isArray, arrayLength, isPointer))
-    }.toList
-    if (synced.nonEmpty || rows.length == 0) {
-      draftMembers = synced
-      persistActiveTabDraft()
-    }
-  }
-
-  private def applyOverlay(): Unit = {
-    syncDraftFromDom()
-    val structId = inputById("edit-struct").value.trim
-    if (structId.isEmpty) {
-      setEditorStatus("Select a struct to edit.", ok = false)
-    } else {
-      OverlayDocumentOps.validateDraftMembers(draftMembers) match {
-        case Some(err) =>
-          setEditorStatus(err, ok = false)
-        case None =>
-          editingStructId = Some(structId)
-          persistActiveTabDraft()
-          putOverlays(OverlayDocumentOps.applyStructMembers(overlays, structId, draftMembers))
-      }
-    }
-  }
-
-  private def resetCurrentStruct(): Unit = {
-    editingStructId match {
-      case None =>
-        setEditorStatus("Select a struct to reset.", ok = false)
-      case Some(structId) =>
-        putOverlays(OverlayDocumentOps.removeStructOverlay(overlays, structId))
-    }
-  }
-
-  private def createNewStruct(): Unit = {
-    val raw = inputById("new-struct-id").value.trim
-    OverlayDocumentOps.addNewStruct(
-      overlays,
-      raw,
-      List(OverlayMember("field0", "u8", isArray = false, None, false))
-    ) match {
-      case Left(err) =>
-        setEditorStatus(err, ok = false)
-      case Right((next, id)) =>
-        val members = next.newStructs.find(_.id == id).map(_.members).getOrElse(Nil)
-        overlays = next
-        typeCatalog = typeCatalog :+ TypeCatalogEntry(
-          id,
-          "struct",
-          Some(members.map(_.name)),
-          Some(members)
-        )
-        editingStructId = Some(id)
-        draftMembers = members
-        persistActiveTabDraft()
-        inputById("new-struct-id").value = ""
-        inputById("edit-struct").value = id
-        renderTypeDatalists()
-        renderFieldEditor()
-        setEditorStatus(s"Created $id — edit fields then Apply.", ok = true)
-    }
-  }
-
-  private def putOverlays(document: TypeOverlayDocument): Unit = {
-    setEditorStatus("Saving overlays…", ok = true)
-    putJson("/overlays", document.asJson).onComplete {
-      case Success(json) =>
-        json.as[TypeOverlayDocument] match {
-          case Right(saved) =>
-            overlays = saved
-            setEditorStatus("Overlays applied.", ok = true)
-            loadTypesAndOverlays()
-            syncWatchesFromJsonList(
-              json.hcursor.downField("watches").as[List[Json]].getOrElse(Nil)
-            )
-            json.hcursor
-              .downField("watchErrors")
-              .as[List[String]]
-              .toOption
-              .filter(_.nonEmpty)
-              .foreach { errs =>
-                setEditorStatus(
-                  s"Overlays applied; watch rebind errors: ${errs.mkString("; ")}",
-                  ok = false
-                )
-              }
-            refreshOpenTabPayloads()
-          case Left(err) =>
-            setEditorStatus(s"Bad overlay response: ${err.getMessage}", ok = false)
-        }
-      case Failure(err) =>
-        setEditorStatus(err.getMessage, ok = false)
-    }
-  }
-
-  private def refreshOpenTabPayloads(): Unit = {
+  protected def refreshOpenTabPayloads(): Unit = {
     val paths = openTabs.keys.toList
     if (paths.isEmpty) activeTabPath.orElse(selected).foreach(refreshPath)
     else paths.foreach(refreshPath)
-  }
-
-  private def syncWatchesFromJsonList(watches: List[Json]): Unit = {
-    activeWatches.clear()
-    watchOverlaySegments.clear()
-    watches.foreach { w =>
-      val c = w.hcursor
-      (c.get[String]("path").toOption, c.get[Int]("watchId").toOption) match {
-        case (Some(path), Some(watchId)) =>
-          activeWatches.update(path, watchId)
-          val overlaySegs =
-            c.downField("overlaySegments").as[List[List[String]]].getOrElse(Nil)
-          if (overlaySegs.nonEmpty) watchOverlaySegments.update(path, overlaySegs)
-        case _ =>
-          ()
-      }
-    }
-    detailViewPath.foreach(p => payloads.get(p).foreach(showDetail(p, _)))
-  }
-
-  private def setEditorStatus(message: String, ok: Boolean): Unit = {
-    val elStatus = byId("editor-status")
-    elStatus.textContent = message
-    elStatus.className = if (ok) "ok" else "err"
   }
 
   private def setBanner(message: Option[String]): Unit = {
@@ -1868,10 +1393,10 @@ object Main extends DualDecodeSupport {
   private def searchInput(): HTMLInputElement =
     dom.document.getElementById("route-search").asInstanceOf[HTMLInputElement]
 
-  private def inputById(id: String): HTMLInputElement =
+  protected def inputById(id: String): HTMLInputElement =
     dom.document.getElementById(id).asInstanceOf[HTMLInputElement]
 
-  private def inputEl(): HTMLInputElement =
+  protected def inputEl(): HTMLInputElement =
     dom.document.createElement("input").asInstanceOf[HTMLInputElement]
 
   protected def byId(id: String): HTMLElement =
@@ -1880,7 +1405,7 @@ object Main extends DualDecodeSupport {
   protected def el(tag: String): HTMLElement =
     dom.document.createElement(tag).asInstanceOf[HTMLElement]
 
-  private def fetchJson(path: String): Future[Json] =
+  protected def fetchJson(path: String): Future[Json] =
     dom.fetch(path).toFuture.flatMap { response =>
       response.text().toFuture.map { text =>
         if (!response.ok)
@@ -1892,7 +1417,7 @@ object Main extends DualDecodeSupport {
       }
     }
 
-  private def putJson(path: String, payload: Json): Future[Json] = {
+  protected def putJson(path: String, payload: Json): Future[Json] = {
     val init = new RequestInit {
       method = HttpMethod.PUT
       body = payload.noSpaces
@@ -1910,7 +1435,7 @@ object Main extends DualDecodeSupport {
     }
   }
 
-  private def postJson(path: String, payload: Json): Future[Json] = {
+  protected def postJson(path: String, payload: Json): Future[Json] = {
     val init = new RequestInit {
       method = HttpMethod.POST
       body = payload.noSpaces
@@ -1938,7 +1463,7 @@ object Main extends DualDecodeSupport {
     }
   }
 
-  private def deleteJson(path: String): Future[Json] = {
+  protected def deleteJson(path: String): Future[Json] = {
     val init = new RequestInit {
       method = HttpMethod.DELETE
     }
