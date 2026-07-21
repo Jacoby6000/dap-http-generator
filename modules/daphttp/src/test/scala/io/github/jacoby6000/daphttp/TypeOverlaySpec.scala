@@ -383,7 +383,7 @@ class TypeOverlaySpec extends AnyFunSuite {
       .unsafeRunSync()
     assert(putResponse.status == Status.Ok)
 
-    val loaded = TypeOverlayDocument.load(persistPath).toOption.get
+    val loaded = TypeOverlay.loadDocument(persistPath).toOption.get
     assert(loaded.structs.contains(id("PadDemo").toString))
 
     val getResponse =

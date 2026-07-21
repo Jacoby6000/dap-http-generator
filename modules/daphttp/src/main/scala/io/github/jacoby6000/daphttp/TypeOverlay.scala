@@ -1,7 +1,5 @@
 package io.github.jacoby6000.daphttp
 
-import io.circe.Decoder
-import io.circe.Encoder
 import io.circe.Json
 import io.circe.parser
 import io.circe.syntax._
@@ -14,120 +12,24 @@ import java.nio.file.Path
 import scala.collection.mutable
 import scala.collection.mutable.ListBuffer
 
-/** Client-driven struct reinterpretation overlays (persisted JSON). */
-final case class OverlayMember(
-    name: String,
-    typeId: String,
-    isArray: Boolean = false,
-    arrayLength: Option[Int] = None,
-    isPointer: Boolean = false
-)
-
-final case class OverlayStructDef(members: List[OverlayMember])
-
-final case class OverlayNewStruct(id: String, members: List[OverlayMember])
-
-final case class TypeOverlayDocument(
-    structs: Map[String, OverlayStructDef] = Map.empty,
-    newStructs: List[OverlayNewStruct] = Nil
-)
-
-object TypeOverlayDocument {
-  val empty: TypeOverlayDocument = TypeOverlayDocument()
-
-  implicit val overlayMemberDecoder: Decoder[OverlayMember] = Decoder.instance { c =>
-    for {
-      name <- c.get[String]("name")
-      typeId <- c.get[String]("typeId")
-      isArray <- c.getOrElse[Boolean]("isArray")(false)
-      arrayLength <- c.get[Option[Int]]("arrayLength")
-      isPointer <- c.getOrElse[Boolean]("isPointer")(false)
-    } yield OverlayMember(name, typeId, isArray, arrayLength, isPointer)
-  }
-
-  implicit val overlayMemberEncoder: Encoder[OverlayMember] = Encoder.instance { m =>
-    Json.obj(
-      "name" -> Json.fromString(m.name),
-      "typeId" -> Json.fromString(m.typeId),
-      "isArray" -> Json.fromBoolean(m.isArray),
-      "arrayLength" -> m.arrayLength.fold(Json.Null)(Json.fromInt),
-      "isPointer" -> Json.fromBoolean(m.isPointer)
-    )
-  }
-
-  implicit val overlayStructDefDecoder: Decoder[OverlayStructDef] =
-    Decoder.instance(_.get[List[OverlayMember]]("members").map(OverlayStructDef.apply))
-
-  implicit val overlayStructDefEncoder: Encoder[OverlayStructDef] =
-    Encoder.instance(d => Json.obj("members" -> d.members.asJson))
-
-  implicit val overlayNewStructDecoder: Decoder[OverlayNewStruct] = Decoder.instance { c =>
-    for {
-      id <- c.get[String]("id")
-      members <- c.get[List[OverlayMember]]("members")
-    } yield OverlayNewStruct(id, members)
-  }
-
-  implicit val overlayNewStructEncoder: Encoder[OverlayNewStruct] = Encoder.instance { s =>
-    Json.obj("id" -> Json.fromString(s.id), "members" -> s.members.asJson)
-  }
-
-  implicit val documentDecoder: Decoder[TypeOverlayDocument] = Decoder.instance { c =>
-    for {
-      structs <- c.getOrElse[Map[String, OverlayStructDef]]("structs")(Map.empty)
-      newStructs <- c.getOrElse[List[OverlayNewStruct]]("newStructs")(Nil)
-    } yield TypeOverlayDocument(structs, newStructs)
-  }
-
-  implicit val documentEncoder: Encoder[TypeOverlayDocument] = Encoder.instance { d =>
-    Json.obj(
-      "structs" -> d.structs.asJson,
-      "newStructs" -> d.newStructs.asJson
-    )
-  }
-
-  def load(path: Path): Either[String, TypeOverlayDocument] =
-    if (!Files.exists(path)) Right(empty)
+object TypeOverlay {
+  def loadDocument(path: Path): Either[String, TypeOverlayDocument] =
+    if (!Files.exists(path)) Right(TypeOverlayDocument.empty)
     else {
       val text = new String(Files.readAllBytes(path), StandardCharsets.UTF_8).trim
-      if (text.isEmpty) Right(empty)
+      if (text.isEmpty) Right(TypeOverlayDocument.empty)
       else
         parser.decode[TypeOverlayDocument](text).left.map(_.getMessage)
     }
 
-  def save(path: Path, document: TypeOverlayDocument): Unit = {
+  def saveDocument(path: Path, document: TypeOverlayDocument): Unit = {
     Option(path.getParent).foreach { parent =>
       if (!Files.exists(parent)) Files.createDirectories(parent)
     }
     Files.write(path, document.asJson.spaces2.getBytes(StandardCharsets.UTF_8))
     ()
   }
-}
 
-final case class TypeCatalogEntry(
-    id: String,
-    kind: String,
-    /** Member names (legacy summary). Prefer `fields` for full editor pre-population. */
-    members: Option[List[String]] = None,
-    fields: Option[List[OverlayMember]] = None
-)
-
-object TypeCatalogEntry {
-  implicit val encoder: Encoder[TypeCatalogEntry] = Encoder.instance { e =>
-    implicit val memberEncoder: Encoder[OverlayMember] =
-      TypeOverlayDocument.overlayMemberEncoder
-    Json.obj(
-      Seq(
-        Some("id" -> Json.fromString(e.id)),
-        Some("kind" -> Json.fromString(e.kind)),
-        e.members.map(ms => "members" -> ms.asJson),
-        e.fields.map(fs => "fields" -> fs.asJson)
-      ).flatten: _*
-    )
-  }
-}
-
-object TypeOverlay {
   private val OverlayNamespace = "overlay"
 
   private val PrimitiveByAlias: Map[String, IrPrimitive] = {

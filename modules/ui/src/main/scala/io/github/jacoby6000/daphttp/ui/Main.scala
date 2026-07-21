@@ -1,10 +1,15 @@
 package io.github.jacoby6000.daphttp.ui
 
-import io.circe.Decoder
-import io.circe.Encoder
 import io.circe.Json
 import io.circe.parser.parse
 import io.circe.syntax._
+import io.github.jacoby6000.daphttp.OverlayMember
+import io.github.jacoby6000.daphttp.OverlayNewStruct
+import io.github.jacoby6000.daphttp.OverlayStructDef
+import io.github.jacoby6000.daphttp.RouteTreeNode
+import io.github.jacoby6000.daphttp.RoutesResponse
+import io.github.jacoby6000.daphttp.TypeCatalogEntry
+import io.github.jacoby6000.daphttp.TypeOverlayDocument
 import org.scalajs.dom
 import org.scalajs.dom.HTMLElement
 import org.scalajs.dom.HTMLInputElement
@@ -22,166 +27,11 @@ import scala.util.Failure
 import scala.util.Success
 import scala.util.Try
 
-final case class RouteTreeNode(
-    path: String,
-    kind: String,
-    fetchable: Boolean,
-    member: Option[String],
-    index: Option[Int],
-    arrayLength: Option[Int],
-    address: Option[Long],
-    children: List[RouteTreeNode]
-)
-
-final case class RoutesResponse(
-    routes: List[String],
-    tree: List[RouteTreeNode],
-    errors: List[String]
-)
-
-final case class TypeCatalogEntry(
-    id: String,
-    kind: String,
-    members: Option[List[String]],
-    fields: Option[List[OverlayMemberUi]]
-)
-
-final case class OverlayMemberUi(
-    name: String,
-    typeId: String,
-    isArray: Boolean,
-    arrayLength: Option[Int],
-    isPointer: Boolean
-)
-
-final case class OverlayStructDefUi(members: List[OverlayMemberUi])
-
-final case class OverlayNewStructUi(id: String, members: List[OverlayMemberUi])
-
-final case class TypeOverlayDocumentUi(
-    structs: Map[String, OverlayStructDefUi],
-    newStructs: List[OverlayNewStructUi]
-)
-
-object RouteTreeNode {
-  implicit val decoder: Decoder[RouteTreeNode] = Decoder.instance { c =>
-    for {
-      path <- c.get[String]("path")
-      kind <- c.get[String]("kind")
-      fetchable <- c.get[Boolean]("fetchable")
-      member <- c.get[Option[String]]("member")
-      index <- c.get[Option[Int]]("index")
-      arrayLength <- c.get[Option[Int]]("arrayLength")
-      address <- c
-        .get[Option[String]]("address")
-        .map(_.flatMap(parseAddress))
-      children <- c.get[List[RouteTreeNode]]("children")
-    } yield RouteTreeNode(
-      path,
-      kind,
-      fetchable,
-      member,
-      index,
-      arrayLength,
-      address,
-      children
-    )
-  }
-
-  private def parseAddress(raw: String): Option[Long] = {
-    val trimmed = raw.trim.toLowerCase
-    val hex =
-      if (trimmed.startsWith("0x")) trimmed.drop(2)
-      else trimmed
-    Try(java.lang.Long.parseUnsignedLong(hex, 16)).toOption
-  }
-}
-
-object RoutesResponse {
-  implicit val decoder: Decoder[RoutesResponse] = Decoder.instance { c =>
-    for {
-      routes <- c.get[List[String]]("routes")
-      tree <- c.get[List[RouteTreeNode]]("tree")
-      errors <- c.get[List[String]]("errors")
-    } yield RoutesResponse(routes, tree, errors)
-  }
-}
-
-object TypeCatalogEntry {
-  implicit val decoder: Decoder[TypeCatalogEntry] = Decoder.instance { c =>
-    for {
-      id <- c.get[String]("id")
-      kind <- c.get[String]("kind")
-      members <- c.get[Option[List[String]]]("members")
-      fields <- c.get[Option[List[OverlayMemberUi]]]("fields")
-    } yield TypeCatalogEntry(id, kind, members, fields)
-  }
-}
-
-object OverlayMemberUi {
-  implicit val decoder: Decoder[OverlayMemberUi] = Decoder.instance { c =>
-    for {
-      name <- c.get[String]("name")
-      typeId <- c.get[String]("typeId")
-      isArray <- c.getOrElse[Boolean]("isArray")(false)
-      arrayLength <- c.get[Option[Int]]("arrayLength")
-      isPointer <- c.getOrElse[Boolean]("isPointer")(false)
-    } yield OverlayMemberUi(name, typeId, isArray, arrayLength, isPointer)
-  }
-
-  implicit val encoder: Encoder[OverlayMemberUi] = Encoder.instance { m =>
-    Json.obj(
-      "name" -> Json.fromString(m.name),
-      "typeId" -> Json.fromString(m.typeId),
-      "isArray" -> Json.fromBoolean(m.isArray),
-      "arrayLength" -> m.arrayLength.fold(Json.Null)(Json.fromInt),
-      "isPointer" -> Json.fromBoolean(m.isPointer)
-    )
-  }
-}
-
-object OverlayStructDefUi {
-  implicit val decoder: Decoder[OverlayStructDefUi] =
-    Decoder.instance(_.get[List[OverlayMemberUi]]("members").map(OverlayStructDefUi.apply))
-  implicit val encoder: Encoder[OverlayStructDefUi] =
-    Encoder.instance(d => Json.obj("members" -> d.members.asJson))
-}
-
-object OverlayNewStructUi {
-  implicit val decoder: Decoder[OverlayNewStructUi] = Decoder.instance { c =>
-    for {
-      id <- c.get[String]("id")
-      members <- c.get[List[OverlayMemberUi]]("members")
-    } yield OverlayNewStructUi(id, members)
-  }
-  implicit val encoder: Encoder[OverlayNewStructUi] = Encoder.instance { s =>
-    Json.obj("id" -> Json.fromString(s.id), "members" -> s.members.asJson)
-  }
-}
-
-object TypeOverlayDocumentUi {
-  val empty: TypeOverlayDocumentUi = TypeOverlayDocumentUi(Map.empty, Nil)
-
-  implicit val decoder: Decoder[TypeOverlayDocumentUi] = Decoder.instance { c =>
-    for {
-      structs <- c.getOrElse[Map[String, OverlayStructDefUi]]("structs")(Map.empty)
-      newStructs <- c.getOrElse[List[OverlayNewStructUi]]("newStructs")(Nil)
-    } yield TypeOverlayDocumentUi(structs, newStructs)
-  }
-
-  implicit val encoder: Encoder[TypeOverlayDocumentUi] = Encoder.instance { d =>
-    Json.obj(
-      "structs" -> d.structs.asJson,
-      "newStructs" -> d.newStructs.asJson
-    )
-  }
-}
-
 final case class OpenTab(
     path: String,
     decodeType: Option[String] = None,
     editingStructId: Option[String] = None,
-    draftMembers: List[OverlayMemberUi] = Nil,
+    draftMembers: List[OverlayMember] = Nil,
     editorOpen: Boolean = false,
     indexTemplate: Option[String] = None,
     indexValues: List[Int] = Nil
@@ -197,7 +47,7 @@ object Main {
   private var selected: Option[String] = None
   private var activeQuery: String = ""
   private var typeCatalog: List[TypeCatalogEntry] = Nil
-  private var overlays: TypeOverlayDocumentUi = TypeOverlayDocumentUi.empty
+  private var overlays: TypeOverlayDocument = TypeOverlayDocument.empty
 
   /** Open workspace tabs (insertion order). */
   private val openTabs = scala.collection.mutable.LinkedHashMap.empty[String, OpenTab]
@@ -207,7 +57,7 @@ object Main {
 
   // Working copies for the active tab (synced via saveActiveTabDraft / restoreActiveTabEditor).
   private var editingStructId: Option[String] = None
-  private var draftMembers: List[OverlayMemberUi] = Nil
+  private var draftMembers: List[OverlayMember] = Nil
   private var lastDecodeType: Option[String] = None
   private var editorOpen: Boolean = false
 
@@ -282,7 +132,7 @@ object Main {
     byId("overlay-reset").onclick = (_: MouseEvent) => resetCurrentStruct()
     byId("overlay-add-field").onclick = (_: MouseEvent) => {
       syncDraftFromDom()
-      draftMembers = draftMembers :+ OverlayMemberUi("field", "u8", isArray = false, None, false)
+      draftMembers = draftMembers :+ OverlayMember("field", "u8", isArray = false, None, false)
       persistActiveTabDraft()
       renderFieldEditor()
     }
@@ -312,7 +162,7 @@ object Main {
       }
     }
     fetchJson("/overlays").foreach { json =>
-      json.as[TypeOverlayDocumentUi].foreach { doc =>
+      json.as[TypeOverlayDocument].foreach { doc =>
         overlays = doc
         editingStructId.foreach(id => loadDraftForStruct(id))
       }
@@ -2737,10 +2587,10 @@ object Main {
     persistActiveTabDraft()
     setEditorStatus(s"Loading fields for $structId…", ok = true)
 
-    def applyMembers(members: List[OverlayMemberUi]): Unit = {
+    def applyMembers(members: List[OverlayMember]): Unit = {
       draftMembers =
         if (members.nonEmpty) members
-        else List(OverlayMemberUi("field0", "u8", isArray = false, None, false))
+        else List(OverlayMember("field0", "u8", isArray = false, None, false))
       persistActiveTabDraft()
       renderFieldEditor()
       setEditorStatus(s"Loaded ${draftMembers.size} field(s).", ok = true)
@@ -2759,7 +2609,7 @@ object Main {
       case None =>
         fetchJson(s"/types/fields?id=${js.URIUtils.encodeURIComponent(structId)}").onComplete {
           case Success(json) =>
-            json.hcursor.downField("fields").as[List[OverlayMemberUi]] match {
+            json.hcursor.downField("fields").as[List[OverlayMember]] match {
               case Right(fields) => applyMembers(fields)
               case Left(err)     =>
                 setEditorStatus(s"Failed to decode fields: ${err.getMessage}", ok = false)
@@ -2927,7 +2777,7 @@ object Main {
         .flatMap(el => Try(el.asInstanceOf[HTMLInputElement].value.trim.toInt).toOption)
         .filter(_ > 0)
       if (name.isEmpty && typeId.isEmpty) None
-      else Some(OverlayMemberUi(name, typeId, isArray, arrayLength, isPointer))
+      else Some(OverlayMember(name, typeId, isArray, arrayLength, isPointer))
     }.toList
     if (synced.nonEmpty || rows.length == 0) {
       draftMembers = synced
@@ -2948,7 +2798,7 @@ object Main {
       editingStructId = Some(structId)
       persistActiveTabDraft()
       val updatedStructs =
-        overlays.structs + (structId -> OverlayStructDefUi(draftMembers))
+        overlays.structs + (structId -> OverlayStructDef(draftMembers))
       val updatedNew =
         overlays.newStructs.map { ns =>
           val fullId = if (ns.id.contains("#")) ns.id else s"overlay#${ns.id}"
@@ -2980,9 +2830,9 @@ object Main {
       if (overlays.newStructs.exists(ns => ns.id == raw || ns.id == id)) {
         setEditorStatus(s"$id already exists.", ok = false)
       } else {
-        val members = List(OverlayMemberUi("field0", "u8", isArray = false, None, false))
+        val members = List(OverlayMember("field0", "u8", isArray = false, None, false))
         val next = overlays.copy(
-          newStructs = overlays.newStructs :+ OverlayNewStructUi(id, members)
+          newStructs = overlays.newStructs :+ OverlayNewStruct(id, members)
         )
         overlays = next
         typeCatalog = typeCatalog :+ TypeCatalogEntry(
@@ -3003,11 +2853,11 @@ object Main {
     }
   }
 
-  private def putOverlays(document: TypeOverlayDocumentUi): Unit = {
+  private def putOverlays(document: TypeOverlayDocument): Unit = {
     setEditorStatus("Saving overlays…", ok = true)
     putJson("/overlays", document.asJson).onComplete {
       case Success(json) =>
-        json.as[TypeOverlayDocumentUi] match {
+        json.as[TypeOverlayDocument] match {
           case Right(saved) =>
             overlays = saved
             setEditorStatus("Overlays applied.", ok = true)

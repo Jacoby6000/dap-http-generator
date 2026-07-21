@@ -1,37 +1,6 @@
 package io.github.jacoby6000.daphttp
 
-import io.circe.Encoder
-import io.circe.Json
-
-/** Tree of HTTP data routes for the HTML UI (1:1 with addressable API paths). */
-final case class RouteTreeNode(
-    path: String,
-    kind: String,
-    fetchable: Boolean,
-    member: Option[String] = None,
-    index: Option[Int] = None,
-    arrayLength: Option[Int] = None,
-    address: Option[Long] = None,
-    children: List[RouteTreeNode] = Nil
-)
-
-object RouteTreeNode {
-  implicit lazy val encoder: Encoder[RouteTreeNode] = Encoder.instance { node =>
-    Json.obj(
-      "path" -> Json.fromString(node.path),
-      "kind" -> Json.fromString(node.kind),
-      "fetchable" -> Json.fromBoolean(node.fetchable),
-      "member" -> node.member.map(Json.fromString).getOrElse(Json.Null),
-      "index" -> node.index.map(Json.fromInt).getOrElse(Json.Null),
-      "arrayLength" -> node.arrayLength.map(Json.fromInt).getOrElse(Json.Null),
-      "address" -> node.address
-        .map(addr => Json.fromString(f"0x$addr%x"))
-        .getOrElse(Json.Null),
-      "children" -> Json.fromValues(node.children.map(encoder(_)))
-    )
-  }
-}
-
+/** Tree builders for HTTP data routes (uses shared [[RouteTreeNode]] wire model). */
 object RouteTree {
   def fromPlans(routes: Map[String, RoutePlan]): List[RouteTreeNode] =
     routes.toList.sortBy(_._1).map { case (basePath, plan) =>

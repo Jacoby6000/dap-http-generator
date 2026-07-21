@@ -112,17 +112,22 @@ flowchart LR
 ### Modules
 
 - **root / daphttp (JVM)** — under `modules/daphttp/`; CLI, IR pipeline, http4s server
-  (`io.github.jacoby6000.daphttp.Cli`). HTTP routes compose as
+  (`io.github.jacoby6000.daphttp.Cli`). Depends on cross-compiled `api-models` for HTTP wire
+  types. HTTP routes compose as
   `DapProxyRoutes <+> WebAppRoutes <+> ApiRoutes` (DAP runtime under `/dap-proxy`,
   explorer/catalog/watches/ws at the root, generated data under `/api`).
   Path matching for GET/watches lives in `RoutePathResolver`; single-region DAP
   read/decode is shared via `MemoryDecodeService`. Smithy assembly is
   `SmithyModelLoader` (used by Cli). Process entry is `Cli` only; `DapHttpServerMain` is the
   HTTP/DAP runtime library (routes, clients, decode), not a second `IOApp`.
-- **ui (Scala.js)** — browser explorer under `modules/ui/`; `Compile / resourceGenerators`
-  copies `fastOptJS` + `index.html` into `web/` resources served at `/` and `/assets/main.js`.
-  The explorer keeps the full `/routes` catalog in memory but only renders search results in the
-  left panel (name/struct/field substring, or `0x…` address match against tree node addresses).
+- **api-models (JVM + JS)** — under `modules/api-models/`; Circe transport models shared by
+  server and explorer (`RouteTreeNode`, `RoutesResponse`, overlay document types,
+  `TypeCatalogEntry`). No IR or DAP runtime.
+- **ui (Scala.js)** — browser explorer under `modules/ui/`; depends on `api-models` JS.
+  `Compile / resourceGenerators` copies `fastOptJS` + `index.html` into `web/` resources
+  served at `/` and `/assets/main.js`. The explorer keeps the full `/routes` catalog in memory
+  but only renders search results in the left panel (name/struct/field substring, or `0x…`
+  address match against tree node addresses).
 
 ### HTTP surface
 

@@ -224,7 +224,7 @@ private[daphttp] object WebAppRoutes {
                         for {
                           _ <- overlaysRef.set(engine)
                           _ <- IO.blocking {
-                            overlayPersistPath.foreach(TypeOverlayDocument.save(_, normalized))
+                            overlayPersistPath.foreach(TypeOverlay.saveDocument(_, normalized))
                           }
                           rebindResult <-
                             if (watchService != null) watchService.rebindAll

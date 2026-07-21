@@ -22,9 +22,26 @@ lazy val smithyVersion = "1.72.0"
 lazy val declineVersion = "2.4.1"
 lazy val circeVersion = "0.14.16"
 
+lazy val apiModels = crossProject(JSPlatform, JVMPlatform)
+  .crossType(CrossType.Pure)
+  .in(file("modules/api-models"))
+  .settings(
+    name := "dap-http-api-models",
+    // DESNOTE(jbarber, 2026-07-21): Wire models only — no IR, DAP, or UI state. Shared by
+    // the JVM server and Scala.js explorer so /routes /overlays /types JSON stays in sync.
+    libraryDependencies ++= Seq(
+      "io.circe" %%% "circe-core" % circeVersion,
+      "io.circe" %%% "circe-parser" % circeVersion
+    )
+  )
+
+lazy val apiModelsJVM = apiModels.jvm
+lazy val apiModelsJS = apiModels.js
+
 lazy val ui = project
   .in(file("modules/ui"))
   .enablePlugins(ScalaJSPlugin)
+  .dependsOn(apiModels.js)
   .settings(
     name := "dap-http-ui",
     scalaJSUseMainModuleInitializer := true,
@@ -45,6 +62,7 @@ lazy val ui = project
   )
 
 lazy val root = (project in file("modules/daphttp"))
+  .dependsOn(apiModels.jvm)
   .settings(
     name := "dap-http-generator",
     libraryDependencies ++= Seq(

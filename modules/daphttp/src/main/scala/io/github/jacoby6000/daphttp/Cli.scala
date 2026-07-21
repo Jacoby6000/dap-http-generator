@@ -352,7 +352,7 @@ object Cli
           case None =>
             TypeOverlayDocument.empty
           case Some(path) =>
-            TypeOverlayDocument.load(path) match {
+            TypeOverlay.loadDocument(path) match {
               case Right(doc) => doc
               case Left(err)  =>
                 System.err.println(s"Failed to load overlays from $path: $err")
