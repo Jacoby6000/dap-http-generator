@@ -29,12 +29,6 @@ object DoldecompIrGenerator {
       pointerDepth: Int
   )
 
-  private final case class MergedNamedMap[A](
-      values: Map[String, A],
-      warnings: List[String],
-      conflicts: List[NamedConflict] = Nil
-  )
-
   def generateFromPaths(
       symbolsPath: Path,
       headerRoots: List[Path],
@@ -59,27 +53,28 @@ object DoldecompIrGenerator {
       wordSizeBits: Int = 32,
       extraDataSections: Set[String] = Set.empty
   ): IrGenerationResult = {
-    val corpus = loadCorpus(headerRoots)
+    val corpus = CheadersCorpus.load(headerRoots)
     DapHttpLoggers.irSourceDoldecomp.info(
       "Generating IR from {} symbol(s) across {} header root(s) ({} source file(s))",
       Integer.valueOf(symbols.size),
       Integer.valueOf(headerRoots.size),
       Integer.valueOf(corpus.files.size)
     )
-    val macroLoad = loadAllMacros(corpus)
+    val macroLoad = CheadersTypeCorpus.loadAllMacros(corpus)
     val allMacros = CHeaderParser.builtInMacros ++ macroLoad.values
     // Enums before types: Count-sentinel iteration stays enum-only. Array bounds that use
     // enumerator names (e.g. jobjs[HUD_PLACE_MAX]) resolve via arrayConstants lookup — never by
     // injecting every enumerator into ScannerInfo (that OOM'd Melee-scale corpora).
-    val enumParse = loadEnums(corpus, allMacros)
+    val enumParse = CheadersEnumCorpus.load(corpus, allMacros)
     val enums = enumParse.enums
-    val arrayConstants = enumeratorIntConstants(enums)
-    val macrosForTypes = allMacros ++ countMacrosFromEnums(enums).filter { case (name, _) =>
-      !allMacros.contains(name)
-    }
-    val typeCorpus = loadTypeCorpus(corpus, macrosForTypes, arrayConstants)
+    val arrayConstants = CheadersEnumCorpus.enumeratorIntConstants(enums)
+    val macrosForTypes =
+      allMacros ++ CheadersEnumCorpus.countMacrosFromEnums(enums).filter { case (name, _) =>
+        !allMacros.contains(name)
+      }
+    val typeCorpus = CheadersTypeCorpus.load(corpus, macrosForTypes, arrayConstants)
     val headerStructs = typeCorpus.structs.values
-    val structMemberOffsets = loadStructMemberOffsets(corpus)
+    val structMemberOffsets = CheadersCorpus.loadStructMemberOffsets(corpus)
     val globalDeclarations = typeCorpus.globals
     val fieldInitializerLengths = typeCorpus.fieldInitializerLengths
     val typedefs = typeCorpus.typedefs.values
@@ -1269,374 +1264,11 @@ object DoldecompIrGenerator {
         .getOrElse(0)
     }
 
-  private final case class HeaderFile(path: Path, raw: String, cdtSource: String) {
-    def isHeader: Boolean = path.toString.endsWith(".h")
-    def isCSource: Boolean = path.toString.endsWith(".c")
-  }
-
-  private final case class HeaderCorpus(files: Vector[HeaderFile])
-
-  private final case class TypeCorpus(
-      structs: MergedNamedMap[IASTCompositeTypeSpecifier],
-      typedefs: MergedNamedMap[String],
-      globals: Map[String, GlobalVariableDeclaration],
-      fieldInitializerLengths: Map[(String, String), Int]
-  )
-
-  private def loadCorpus(headerRoots: List[Path]): HeaderCorpus = {
-    val paths = headerRoots.flatMap(collectSourceFiles).distinct.sortBy(_.toString)
-    HeaderCorpus(
-      paths.map { path =>
-        val raw = new String(Files.readAllBytes(path))
-        val isC = path.toString.endsWith(".c")
-        HeaderFile(path, raw, CHeaderParser.prepareCdtSource(raw, neutralizeHeavyContent = isC))
-      }.toVector
-    )
-  }
-
-  private def loadStructMemberOffsets(corpus: HeaderCorpus): Map[(String, String), Int] =
-    // Offset comments must be read from raw source — stripped CDT input removes them.
-    corpus.files.flatMap(file => CHeaderOffsetParser.parse(file.raw).toList).toMap
-
+  /** @deprecated Prefer [[CheadersTypeCorpus.mergeGlobalDeclarations]]; kept for existing tests. */
   private[daphttp] def mergeGlobalDeclarations(
       declarations: List[GlobalVariableDeclaration]
-  ): GlobalVariableDeclaration = {
-    // DESNOTE(jbarber, 2026-07-19): Files.walk order is not stable across environments, so never
-    // take "first declaration wins" for lengths/pointer depth. Prefer non-static definitions with
-    // explicit array metadata; array-ness and pointerDepth come from that primary so a mismatched
-    // forward declaration cannot change the preferred definition's route shape.
-    def preference(d: GlobalVariableDeclaration): (Boolean, Boolean, Boolean, Boolean, String) =
-      (
-        !d.isStatic,
-        d.declaratorLength.isDefined,
-        d.initializerLength.isDefined,
-        d.typeName.nonEmpty,
-        d.typeName
-      )
-    val ordered = declarations.sortBy(preference)(
-      Ordering
-        .Tuple5(
-          Ordering.Boolean,
-          Ordering.Boolean,
-          Ordering.Boolean,
-          Ordering.Boolean,
-          Ordering.String
-        )
-        .reverse
-    )
-    val primary = ordered.head
-    val compatibleArrayDeclarations =
-      if (primary.isArray) ordered.filter(d => d.isArray && d.pointerDepth == primary.pointerDepth)
-      else Nil
-    GlobalVariableDeclaration(
-      name = primary.name,
-      typeName = ordered.map(_.typeName).find(_.nonEmpty).getOrElse(primary.typeName),
-      isArray = primary.isArray,
-      declaratorLength = compatibleArrayDeclarations.flatMap(_.declaratorLength).headOption,
-      initializerLength = compatibleArrayDeclarations.flatMap(_.initializerLength).headOption,
-      pointerDepth = primary.pointerDepth,
-      isStatic = primary.isStatic
-    )
-  }
-
-  private def loadAllMacros(corpus: HeaderCorpus): MergedNamedMap[String] = {
-    val entries = corpus.files.flatMap { file =>
-      CHeaderParser
-        .extractMacros(file.cdtSource, alreadyStripped = true)
-        .toList
-        .map { case (name, value) => (name, value, file.path.toString) }
-    }.toList
-    mergeNamedEntries(entries, "macro", (a: String, b: String) => a == b)
-  }
-
-  private def loadTypeCorpus(
-      corpus: HeaderCorpus,
-      macros: Map[String, String],
-      arrayConstants: Map[String, Int]
-  ): TypeCorpus = {
-    // DESNOTE(jbarber, 2026-07-20): .c sources are neutralized (no huge initializers / bodies) before
-    // CDT, so retaining struct ASTs from them is safe; skipping .c structs broke fixtures that define
-    // types in .c and would miss real TU-local types.
-    val scannerInfo = CHeaderParser.scannerInfoFor(macros)
-    val structEntries =
-      mutable.ListBuffer.empty[(String, IASTCompositeTypeSpecifier, String)]
-    val typedefEntries = mutable.ListBuffer.empty[(String, String, String)]
-    val globalEntries = mutable.ListBuffer.empty[GlobalVariableDeclaration]
-    corpus.files.foreach { file =>
-      val parsed =
-        CHeaderParser.parseDeclarations(
-          file.cdtSource,
-          scannerInfo,
-          arrayConstants,
-          alreadyStripped = true
-        )
-      val source = file.path.toString
-      structEntries ++= parsed.structs.map { case (name, spec) => (name, spec, source) }
-      typedefEntries ++= parsed.typedefs.map { case (name, target) => (name, target, source) }
-      globalEntries ++= parsed.globals
-    }
-    val structs = mergeNamedEntries(structEntries.toList, "struct", structDefinitionsEquivalent)
-    val typedefs =
-      mergeNamedEntries(typedefEntries.toList, "typedef", (a: String, b: String) => a == b)
-    val globals = globalEntries.toList
-      .groupBy(_.name)
-      .view
-      .mapValues(mergeGlobalDeclarations)
-      .toMap
-    // Field-initializer lengths need real initializer ASTs. Only re-parse small .c files without
-    // neutralization so Melee data objects (often MBs) are skipped.
-    val maxFieldInitBytes = 64 * 1024
-    val fieldInitScanner = CHeaderParser.scannerInfoFor(macros)
-    val fieldInitializerLengths = corpus.files.iterator
-      .filter(file => file.isCSource && file.raw.length <= maxFieldInitBytes)
-      .flatMap { file =>
-        val forInits = CHeaderParser.stripComments(file.raw)
-        CHeaderParser
-          .parseStructFieldInitializerLengths(
-            forInits,
-            structs.values,
-            fieldInitScanner,
-            alreadyStripped = true
-          )
-          .toList
-      }
-      .toList
-      .groupBy(_._1)
-      .view
-      .mapValues(_.map(_._2).max)
-      .toMap
-    TypeCorpus(structs, typedefs, globals, fieldInitializerLengths)
-  }
-
-  private def mergeNamedEntries[A](
-      entries: List[(String, A, String)],
-      kind: String,
-      equivalent: (A, A) => Boolean
-  ): MergedNamedMap[A] = {
-    val conflictIgnored = mutable.LinkedHashMap.empty[String, mutable.ListBuffer[String]]
-    val keptSource = mutable.LinkedHashMap.empty[String, String]
-    val merged = mutable.LinkedHashMap.empty[String, A]
-    entries.foreach { case (name, value, source) =>
-      merged.get(name) match {
-        case None =>
-          merged(name) = value
-          keptSource(name) = source
-        case Some(existing) if equivalent(existing, value) =>
-          ()
-        case Some(_) =>
-          conflictIgnored.getOrElseUpdate(name, mutable.ListBuffer.empty).append(source)
-      }
-    }
-    val conflicts = conflictIgnored.toList.map { case (name, ignored) =>
-      NamedConflict(
-        name = name,
-        keptSource = keptSource.getOrElse(name, "<unknown>"),
-        ignoredSources = ignored.toList.distinct
-      )
-    }
-    MergedNamedMap(
-      merged.toMap,
-      summarizeNameConflicts(kind, conflicts.map(_.name)),
-      conflicts
-    )
-  }
-
-  private def summarizeNameConflicts(kind: String, names: List[String]): List[String] =
-    if (names.isEmpty) {
-      Nil
-    } else {
-      val sample = names.take(20).mkString(", ")
-      val suffix = if (names.size > 20) s", … (${names.size - 20} more)" else ""
-      List(
-        s"Conflicting $kind definitions for ${names.size} name(s); keeping first: $sample$suffix."
-      )
-    }
-
-  private def structDefinitionsEquivalent(
-      left: IASTCompositeTypeSpecifier,
-      right: IASTCompositeTypeSpecifier
-  ): Boolean =
-    structFieldSignature(left) == structFieldSignature(right)
-
-  private def structFieldSignature(composite: IASTCompositeTypeSpecifier): List[String] =
-    CHeaderParser.extractFields(composite).map { field =>
-      val fieldName =
-        Option(field.declarator.getName).map(_.toString).getOrElse("")
-      s"${field.typeName}|$fieldName|${field.bitFieldWidth}|${field.unionGroup}|${field.offsetBytes}"
-    }
-
-  private def loadEnums(
-      corpus: HeaderCorpus,
-      macros: Map[String, String]
-  ): EnumParseResult = {
-    // DESNOTE(jbarber, 2026-07-20): Character motion enums form a dependency chain
-    // (ftCo_MS_Count → ftMh_MS_Count → ftCh_MS_Count). Iterate: parse → harvest Count sentinels that
-    // appear before any failed initializer in their enum → reparse until macros stabilize (capped).
-    // Only Count sentinels are injected — exporting every enumerator as a macro would collide with
-    // later redefinitions of the same enum tag (see enum-merge fixture) and OOM ScannerInfo setup.
-    // See https://github.com/eclipse-cdt/cdt/blob/main/core/org.eclipse.cdt.core/parser/org/eclipse/cdt/internal/core/dom/parser/ValueFactory.java
-    //
-    // DESNOTE(jbarber, 2026-07-20): Injecting `StatsAttack_Count` (etc.) as a ScannerInfo macro also
-    // expands that identifier in its *defining* enum on reparse, which can drop or empty the typedef
-    // from the final pass. Accumulate every pass and prefer richer bodies in mergeEnumParseResults
-    // so Count sentinels remain available for array-bound lookup (`by_attack_counts[StatsAttack_Count]`).
-    def parseAll(macrosForPass: Map[String, String]): List[(String, EnumParseResult)] = {
-      val scannerInfo = CHeaderParser.scannerInfoFor(macrosForPass)
-      corpus.files.map { file =>
-        file.path.toString ->
-          CHeaderParser.parseEnums(file.cdtSource, scannerInfo, alreadyStripped = true)
-      }.toList
-    }
-
-    var macrosForPass = macros
-    var results = parseAll(macrosForPass)
-    val passResults = mutable.ListBuffer.empty[List[(String, EnumParseResult)]]
-    passResults += results
-    var pass = 0
-    var continue = true
-    while (continue && pass < 4) {
-      pass += 1
-      val warningCount = results.map(_._2.warnings.size).sum
-      // Accumulate onto macrosForPass — never rebuild from the original `macros` alone, or a later
-      // harvest that omits an earlier Count (because that enumerator name is now a macro in its
-      // defining file) would drop dependencies needed by consumers.
-      val nextMacros = macrosForPass ++ countSentinelMacros(results.map(_._2))
-      if (nextMacros == macrosForPass || warningCount == 0) {
-        continue = false
-      } else {
-        macrosForPass = nextMacros
-        results = parseAll(macrosForPass)
-        passResults += results
-      }
-    }
-    // Per-pass merge keeps first-wins across files; across passes prefer richer bodies so a
-    // Count-macro reparse that emptied a defining enum does not erase the earlier harvest.
-    passResults.map(mergeEnumParseResults).reduceLeft(preferRicherEnumPass)
-  }
-
-  private def countSentinelMacros(results: List[EnumParseResult]): Map[String, String] = {
-    // DESNOTE(jbarber, 2026-07-20): Only export Count sentinels that appear before any failed
-    // initializer in the same enum. Masterhand's ftMh_MS_Count is valid even when SelfCount fails
-    // on a missing ftCo_MS_Count; Captain's Count is not, because an earlier initializer failed.
-    val failedKeys = results
-      .flatMap(_.warnings)
-      .flatMap(warning => warning.split(':').headOption.map(_.trim).filter(_.nonEmpty))
-      .toSet
-    results
-      .flatMap(_.enums.toList)
-      .flatMap { case (enumName, definition) =>
-        var seenFailure = false
-        definition.values.flatMap { value =>
-          if (failedKeys.contains(s"$enumName.${value.name}")) {
-            seenFailure = true
-          }
-          if (
-            !seenFailure && (value.name.endsWith("_Count") || value.name.endsWith("_SelfCount"))
-          ) {
-            Some(value.name -> value.value.toString)
-          } else {
-            None
-          }
-        }
-      }
-      .toMap
-  }
-
-  private def countMacrosFromEnums(enums: Map[String, CEnumDefinition]): Map[String, String] =
-    enums.values
-      .flatMap(_.values)
-      .foldLeft(Map.empty[String, String]) { (acc, value) =>
-        if (
-          acc.contains(value.name) ||
-          !(value.name.endsWith("_Count") || value.name.endsWith("_SelfCount"))
-        ) {
-          acc
-        } else {
-          acc + (value.name -> value.value.toString)
-        }
-      }
-
-  private def enumeratorIntConstants(enums: Map[String, CEnumDefinition]): Map[String, Int] =
-    // Post-hoc array-bound lookup table — not fed into ScannerInfo.
-    enums.values
-      .flatMap(_.values)
-      .foldLeft(Map.empty[String, Int]) { (acc, value) =>
-        if (acc.contains(value.name)) acc else acc + (value.name -> value.value)
-      }
-
-  private def mergeEnumParseResults(
-      results: List[(String, EnumParseResult)]
-  ): EnumParseResult = {
-    val warnings = mutable.ListBuffer.empty[String]
-    warnings ++= results.flatMap(_._2.warnings)
-    val conflictIgnored = mutable.LinkedHashMap.empty[String, mutable.ListBuffer[String]]
-    val keptSource = mutable.LinkedHashMap.empty[String, String]
-    val merged = mutable.LinkedHashMap.empty[String, CEnumDefinition]
-    results.foreach { case (source, result) =>
-      result.enums.foreach { case (name, definition) =>
-        merged.get(name) match {
-          case None =>
-            merged(name) = definition
-            keptSource(name) = source
-          case Some(existing) if existing.values == definition.values =>
-            ()
-          case Some(existing) if existing.values.isEmpty && definition.values.nonEmpty =>
-            merged(name) = definition
-            keptSource(name) = source
-          case Some(existing) if existing.values.nonEmpty && definition.values.isEmpty =>
-            warnings += s"$name: Ignoring empty enum redefinition."
-          case Some(_) =>
-            conflictIgnored.getOrElseUpdate(name, mutable.ListBuffer.empty).append(source)
-        }
-      }
-    }
-    val conflicts = conflictIgnored.toList.map { case (name, ignored) =>
-      NamedConflict(
-        name = name,
-        keptSource = keptSource.getOrElse(name, "<unknown>"),
-        ignoredSources = ignored.toList.distinct
-      )
-    }
-    warnings ++= summarizeNameConflicts("enum", conflicts.map(_.name))
-    EnumParseResult(merged.toMap, warnings.toList, conflicts)
-  }
-
-  private def preferRicherEnumPass(
-      earlier: EnumParseResult,
-      later: EnumParseResult
-  ): EnumParseResult = {
-    // Later passes resolve more Count-forward initializers; keep them as the baseline and only
-    // restore from earlier when the Count-macro reparse dropped or emptied a defining enum.
-    val merged = mutable.LinkedHashMap.from(later.enums)
-    earlier.enums.foreach { case (name, definition) =>
-      merged.get(name) match {
-        case None =>
-          merged(name) = definition
-        case Some(existing) if existing.values.isEmpty && definition.values.nonEmpty =>
-          merged(name) = definition
-        case Some(existing) if definition.values.size > existing.values.size =>
-          merged(name) = definition
-        case Some(existing)
-            if definition.values.size == existing.values.size &&
-              hasCountSentinel(definition) && !hasCountSentinel(existing) =>
-          merged(name) = definition
-        case _ =>
-          ()
-      }
-    }
-    EnumParseResult(
-      enums = merged.toMap,
-      // Early-pass initializer failures are often fixed once Count macros exist; keep the later
-      // pass's warnings (and conflicts) as the authoritative report.
-      warnings = later.warnings,
-      conflicts = later.conflicts
-    )
-  }
-
-  private def hasCountSentinel(definition: CEnumDefinition): Boolean =
-    definition.values.exists { v =>
-      v.name.endsWith("_Count") || v.name.endsWith("_SelfCount")
-    }
+  ): GlobalVariableDeclaration =
+    CheadersTypeCorpus.mergeGlobalDeclarations(declarations)
 
   private def speculateMissingIncludePaths(
       headerRoots: List[Path],
@@ -1719,33 +1351,6 @@ object DoldecompIrGenerator {
         stream.close()
       }
     }
-  }
-
-  private def collectSourceFiles(root: Path): List[Path] = {
-    if (!Files.exists(root)) {
-      Nil
-    } else if (Files.isRegularFile(root) && isSourceFile(root)) {
-      List(root)
-    } else if (Files.isDirectory(root)) {
-      val stream = Files.walk(root)
-      try {
-        stream
-          .iterator()
-          .asScala
-          .filter(path => Files.isRegularFile(path) && isSourceFile(path))
-          .toList
-          .sortBy(_.toString)
-      } finally {
-        stream.close()
-      }
-    } else {
-      Nil
-    }
-  }
-
-  private def isSourceFile(path: Path): Boolean = {
-    val name = path.toString
-    name.endsWith(".h") || name.endsWith(".c")
   }
 
   private def collectReachableStructs(
