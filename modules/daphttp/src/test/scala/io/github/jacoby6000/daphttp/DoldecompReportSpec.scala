@@ -39,6 +39,21 @@ class DoldecompReportSpec extends AnyFunSuite {
     }
   }
 
+  test("other warnings omit messages already listed in the summary") {
+    val reportPath = Files.createTempFile("dap-report-dedupe", ".md")
+    try {
+      val shared = "Foo.x: offset comment 0x8 disagrees with type-packed layout 0x4"
+      val diagnostics = IrDiagnostics(otherWarnings = List(shared, "only-in-other"))
+      val text = Files.readString(DoldecompReport.write(reportPath, diagnostics, List(shared)))
+      val otherSection = text.split("## Other warnings", 2)(1)
+      assert(otherSection.contains("only-in-other"))
+      assert(!otherSection.contains(shared))
+      assert(text.contains(shared)) // still present under Summary warnings
+    } finally {
+      val _ = Files.deleteIfExists(reportPath)
+    }
+  }
+
   test("SectionFilter exposes detailed code-section skip lists for reports") {
     val symbols = List(
       DoldecompSymbol(

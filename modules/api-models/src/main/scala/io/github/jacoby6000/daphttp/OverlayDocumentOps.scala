@@ -44,8 +44,21 @@ object OverlayDocumentOps {
   def removeStructOverlay(
       document: TypeOverlayDocument,
       structId: String
-  ): TypeOverlayDocument =
-    document.copy(structs = document.structs - structId)
+  ): TypeOverlayDocument = {
+    val normalized = normalizeNewStructId(structId)
+    document.copy(
+      structs = document.structs - structId,
+      // DESNOTE(jbarber, 2026-07-21): Apply dual-writes newStruct edits into `structs` and
+      // `newStructs`. Reset must drop the matching newStruct too — clearing only `structs`
+      // leaves the applied members via the newStructs fallback, so reinterpretation never
+      // reverts. For client-created types there is no IR source; removing the entry is the
+      // reset.
+      newStructs = document.newStructs.filterNot { ns =>
+        val id = normalizeNewStructId(ns.id)
+        id == normalized || ns.id == structId
+      }
+    )
+  }
 
   def addNewStruct(
       document: TypeOverlayDocument,

@@ -99,10 +99,11 @@ object DoldecompReport {
     }
 
     out.append("## Other warnings\n\n")
-    if (diagnostics.otherWarnings.isEmpty) {
+    val otherOnly = diagnostics.otherWarnings.filterNot(summaryWarnings.toSet.contains)
+    if (otherOnly.isEmpty) {
       out.append("(none)\n\n")
     } else {
-      diagnostics.otherWarnings.foreach(warning => out.append(s"- $warning\n"))
+      otherOnly.foreach(warning => out.append(s"- $warning\n"))
       out.append("\n")
     }
 

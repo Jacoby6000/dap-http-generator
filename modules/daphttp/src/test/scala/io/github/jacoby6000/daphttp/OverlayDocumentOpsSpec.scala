@@ -61,4 +61,22 @@ final class OverlayDocumentOpsSpec extends AnyFunSuite {
     assert(OverlayDocumentOps.addNewStruct(doc, "overlay#Foo", List(member)).isLeft)
     assert(OverlayDocumentOps.addNewStruct(doc, "Foo", List(member)).isLeft)
   }
+
+  test("removeStructOverlay clears structs and matching newStructs") {
+    val doc = TypeOverlayDocument(
+      structs = Map(
+        "game#S" -> OverlayStructDef(List(member)),
+        "overlay#N" -> OverlayStructDef(List(member.copy(name = "z")))
+      ),
+      newStructs = List(OverlayNewStruct("overlay#N", List(member.copy(name = "z"))))
+    )
+    val afterNew = OverlayDocumentOps.removeStructOverlay(doc, "overlay#N")
+    assert(!afterNew.structs.contains("overlay#N"))
+    assert(afterNew.newStructs.isEmpty)
+    assert(afterNew.structs.contains("game#S"))
+
+    val afterIr = OverlayDocumentOps.removeStructOverlay(doc, "game#S")
+    assert(!afterIr.structs.contains("game#S"))
+    assert(afterIr.newStructs.size == 1)
+  }
 }
