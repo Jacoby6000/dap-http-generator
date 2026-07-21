@@ -108,6 +108,52 @@ object IrLayout {
     if (align <= 1) value
     else (value + align - 1) & ~(align - 1)
 
+  /** Assign missing member offsets consistently for decode and write paths.
+    *
+    * Prefer full [[packMembers]]. If packing fails on mixed IR, fail soft by honoring any explicit
+    * offsets and placing the rest with natural alignment.
+    */
+  def ensureMemberOffsets(
+      structure: IrType.Struct,
+      wordSize: Option[Int],
+      errors: ListBuffer[String]
+  ): IrType.Struct =
+    structure match {
+      case m: IrType.MemoryMappedStruct if m.members.forall(_.offsetBytes.isEmpty) =>
+        packMembers(m.members, wordSize) match {
+          case Right((members, sizeof)) =>
+            m.copy(
+              members = members,
+              declaredSizeBits = m.declaredSizeBits.orElse(Some(sizeof))
+            )
+          case Left(errs) =>
+            errors ++= errs
+            m
+        }
+      case m: IrType.MemoryMappedStruct if m.members.exists(_.offsetBytes.isEmpty) =>
+        packMembers(m.members, wordSize) match {
+          case Right((members, sizeof)) =>
+            m.copy(
+              members = members,
+              declaredSizeBits = m.declaredSizeBits.orElse(Some(sizeof))
+            )
+          case Left(errs) =>
+            errors ++= errs
+            var current = 0
+            val filled = m.members.map { member =>
+              val align = memberAlignmentBytes(member, wordSize, errors).getOrElse(1)
+              val offset = member.offsetBytes.getOrElse(alignUp(current, align))
+              memberSizeBytes(member, wordSize, errors).foreach { size =>
+                current = math.max(current, offset + size)
+              }
+              member.copy(offsetBytes = Some(offset))
+            }
+            m.copy(members = filled)
+        }
+      case other =>
+        other
+    }
+
   def memberSizeBytes(
       member: IrMember,
       wordSize: Option[Int],

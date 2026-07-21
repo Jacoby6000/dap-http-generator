@@ -689,43 +689,7 @@ object HttpRouteIrEmitter {
       wordSize: Option[Int],
       errors: ListBuffer[String]
   ): IrType.Struct =
-    structure match {
-      case m: IrType.MemoryMappedStruct if m.members.forall(_.offsetBytes.isEmpty) =>
-        IrLayout.packMembers(m.members, wordSize) match {
-          case Right((members, sizeof)) =>
-            m.copy(
-              members = members,
-              declaredSizeBits = m.declaredSizeBits.orElse(Some(sizeof))
-            )
-          case Left(errs) =>
-            errors ++= errs
-            m
-        }
-      case m: IrType.MemoryMappedStruct if m.members.exists(_.offsetBytes.isEmpty) =>
-        // Prefer full type packing; if that fails (e.g. an unsized member), fail soft by
-        // honoring explicit offsets and placing the rest with natural alignment.
-        IrLayout.packMembers(m.members, wordSize) match {
-          case Right((members, sizeof)) =>
-            m.copy(
-              members = members,
-              declaredSizeBits = m.declaredSizeBits.orElse(Some(sizeof))
-            )
-          case Left(errs) =>
-            errors ++= errs
-            var current = 0
-            val filled = m.members.map { member =>
-              val align = IrLayout.memberAlignmentBytes(member, wordSize, errors).getOrElse(1)
-              val offset = member.offsetBytes.getOrElse(IrLayout.alignUp(current, align))
-              IrLayout.memberSizeBytes(member, wordSize, errors).foreach { size =>
-                current = math.max(current, offset + size)
-              }
-              member.copy(offsetBytes = Some(offset))
-            }
-            m.copy(members = filled)
-        }
-      case other =>
-        other
-    }
+    IrLayout.ensureMemberOffsets(structure, wordSize, errors)
 
   private def memberSizeBytes(
       member: IrMember,

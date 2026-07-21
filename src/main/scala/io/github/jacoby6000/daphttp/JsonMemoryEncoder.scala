@@ -4,6 +4,7 @@ import io.circe.Json
 import scodec.bits.BitVector
 
 import java.nio.charset.StandardCharsets
+import scala.collection.mutable.ListBuffer
 
 /** Encodes leaf JSON values to memory bytes for DAP `writeMemory`. */
 object JsonMemoryEncoder {
@@ -51,15 +52,13 @@ object JsonMemoryEncoder {
       segments: List[String],
       wordSizeBits: Option[Int]
   ): Either[String, (IrType, IrMember, Int)] = {
-    def pack(struct: IrType.Struct): Either[String, IrType.Struct] =
-      if (struct.members.forall(_.offsetBytes.isDefined)) Right(struct)
-      else
-        IrLayout.packMembers(struct.members.map(_.copy(offsetBytes = None)), wordSizeBits) match {
-          case Left(errs) =>
-            Left(errs.mkString("; "))
-          case Right((members, _)) =>
-            Right(copyStruct(struct, members))
-        }
+    def pack(struct: IrType.Struct): Either[String, IrType.Struct] = {
+      val errors = ListBuffer.empty[String]
+      val packed = IrLayout.ensureMemberOffsets(struct, wordSizeBits, errors)
+      if (packed.members.exists(_.offsetBytes.isEmpty) && errors.nonEmpty)
+        Left(errors.toList.distinct.mkString("; "))
+      else Right(packed)
+    }
 
     def go(
         current: IrType,
@@ -136,16 +135,6 @@ object JsonMemoryEncoder {
 
     go(root, segments, 0, None)
   }
-
-  private def copyStruct(struct: IrType.Struct, members: List[IrMember]): IrType.Struct =
-    struct match {
-      case b: IrType.Bitmask =>
-        b.copy(members = members)
-      case m: IrType.MemoryMappedStruct =>
-        m.copy(members = members)
-      case e: IrType.EnclosingStruct =>
-        e.copy(members = members)
-    }
 
   private def arrayStrideBytes(member: IrMember, wordSize: Option[Int]): Option[Int] = {
     val layout =

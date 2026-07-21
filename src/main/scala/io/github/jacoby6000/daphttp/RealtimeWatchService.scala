@@ -2,6 +2,7 @@ package io.github.jacoby6000.daphttp
 
 import cats.effect.IO
 import cats.effect.Ref
+import cats.effect.std.Mutex
 import cats.syntax.all._
 import fs2.concurrent.Topic
 import io.circe.Json
@@ -55,9 +56,13 @@ private[daphttp] final class RealtimeWatchService(
     bindingsRef: Ref[IO, Map[Int, WatchBinding]],
     updates: Topic[IO, WatchUpdate],
     cleared: Topic[IO, Unit],
-    rebound: Topic[IO, List[WatchBinding]]
+    rebound: Topic[IO, List[WatchBinding]],
+    bindLock: Mutex[IO]
 ) {
   def subscribe(path: String): IO[Either[String, WatchBinding]] =
+    bindLock.lock.surround(subscribeUnlocked(path))
+
+  private def subscribeUnlocked(path: String): IO[Either[String, WatchBinding]] =
     for {
       plans <- plansRef.get
       engine <- overlaysRef.get
@@ -89,11 +94,13 @@ private[daphttp] final class RealtimeWatchService(
     } yield result
 
   def cancel(watchId: Int): IO[Either[String, Unit]] =
-    dapClient.realtimeWatchCancel(watchId).flatMap {
-      case Left(error) =>
-        IO.pure(Left(error))
-      case Right(_) =>
-        bindingsRef.update(_ - watchId).as(Right(()))
+    bindLock.lock.surround {
+      dapClient.realtimeWatchCancel(watchId).flatMap {
+        case Left(error) =>
+          IO.pure(Left(error))
+        case Right(_) =>
+          bindingsRef.update(_ - watchId).as(Right(()))
+      }
     }
 
   def list: IO[List[WatchBinding]] =
@@ -119,24 +126,26 @@ private[daphttp] final class RealtimeWatchService(
     * clients can refresh watchIds.
     */
   def rebindAll: IO[(List[WatchBinding], List[String])] =
-    for {
-      // Clear local bindings before cancel so in-flight memoryChanged events cannot decode
-      // against watches that are already being torn down.
-      current <- bindingsRef.getAndSet(Map.empty)
-      paths = current.values.toList.sortBy(_.watchId).map(_.path)
-      _ <- current.keys.toList.traverse_ { id =>
-        dapClient.realtimeWatchCancel(id).attempt.void
-      }
-      results <- paths.traverse { path =>
-        subscribe(path).map {
-          case Right(binding) => Right(binding)
-          case Left(error)    => Left(s"$path: $error")
+    bindLock.lock.surround {
+      for {
+        // Clear local bindings before cancel so in-flight memoryChanged events cannot decode
+        // against watches that are already being torn down.
+        current <- bindingsRef.getAndSet(Map.empty)
+        paths = current.values.toList.sortBy(_.watchId).map(_.path)
+        _ <- current.keys.toList.traverse_ { id =>
+          dapClient.realtimeWatchCancel(id).attempt.void
         }
-      }
-      ok = results.collect { case Right(b) => b }
-      errors = results.collect { case Left(e) => e }
-      _ <- rebound.publish1(ok).void
-    } yield (ok, errors)
+        results <- paths.traverse { path =>
+          subscribeUnlocked(path).map {
+            case Right(binding) => Right(binding)
+            case Left(error)    => Left(s"$path: $error")
+          }
+        }
+        ok = results.collect { case Right(b) => b }
+        errors = results.collect { case Left(e) => e }
+        _ <- rebound.publish1(ok).void
+      } yield (ok, errors)
+    }
 
   private def handleMemoryChanged(event: MemoryChangedEvent): IO[Unit] =
     bindingsRef.get.flatMap { bindings =>
@@ -269,16 +278,18 @@ private[daphttp] final class RealtimeWatchService(
       }
 
   private def clearAllLocal: IO[Unit] =
-    for {
-      bindings <- bindingsRef.get
-      // Best-effort cancel on the adapter before dropping local state. On a hard disconnect
-      // cancels fail harmlessly; on soft reset this avoids orphaned remote watches.
-      _ <- bindings.keys.toList.traverse_ { id =>
-        dapClient.realtimeWatchCancel(id).attempt.void
-      }
-      _ <- bindingsRef.set(Map.empty)
-      _ <- cleared.publish1(())
-    } yield ()
+    bindLock.lock.surround {
+      for {
+        bindings <- bindingsRef.get
+        // Best-effort cancel on the adapter before dropping local state. On a hard disconnect
+        // cancels fail harmlessly; on soft reset this avoids orphaned remote watches.
+        _ <- bindings.keys.toList.traverse_ { id =>
+          dapClient.realtimeWatchCancel(id).attempt.void
+        }
+        _ <- bindingsRef.set(Map.empty)
+        _ <- cleared.publish1(())
+      } yield ()
+    }
 }
 
 private[daphttp] object RealtimeWatchService {
@@ -292,6 +303,7 @@ private[daphttp] object RealtimeWatchService {
       updates <- Topic[IO, WatchUpdate]
       cleared <- Topic[IO, Unit]
       rebound <- Topic[IO, List[WatchBinding]]
+      bindLock <- Mutex[IO]
     } yield new RealtimeWatchService(
       dapClient,
       plansRef,
@@ -299,7 +311,8 @@ private[daphttp] object RealtimeWatchService {
       bindings,
       updates,
       cleared,
-      rebound
+      rebound,
+      bindLock
     )
 }
 
