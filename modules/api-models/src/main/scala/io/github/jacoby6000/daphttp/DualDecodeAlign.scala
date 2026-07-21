@@ -1,4 +1,4 @@
-package io.github.jacoby6000.daphttp.ui
+package io.github.jacoby6000.daphttp
 
 import io.circe.Json
 import io.circe.JsonObject

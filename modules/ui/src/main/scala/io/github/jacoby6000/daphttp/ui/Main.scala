@@ -3,6 +3,9 @@ package io.github.jacoby6000.daphttp.ui
 import io.circe.Json
 import io.circe.parser.parse
 import io.circe.syntax._
+import io.github.jacoby6000.daphttp.DapAddress
+import io.github.jacoby6000.daphttp.DualChild
+import io.github.jacoby6000.daphttp.DualDecodeAlign
 import io.github.jacoby6000.daphttp.OverlayMember
 import io.github.jacoby6000.daphttp.OverlayNewStruct
 import io.github.jacoby6000.daphttp.OverlayStructDef
@@ -227,7 +230,7 @@ object Main {
   private def filterCatalog(nodes: List[RouteTreeNode], query: String): List[RouteTreeNode] = {
     val trimmed = query.trim
     if (trimmed.toLowerCase.startsWith("0x")) {
-      parseHexAddress(trimmed) match {
+      DapAddress.parse(trimmed) match {
         case None =>
           setBanner(Some(s"Invalid address query: $trimmed"))
           Nil
@@ -265,12 +268,6 @@ object Main {
     path.contains(needle) ||
     member.exists(_.contains(needle)) ||
     path.split('/').exists(_.contains(needle))
-  }
-
-  private def parseHexAddress(raw: String): Option[Long] = {
-    val hex = raw.trim.toLowerCase.stripPrefix("0x")
-    if (hex.isEmpty || !hex.forall(c => c.isDigit || (c >= 'a' && c <= 'f'))) None
-    else Try(java.lang.Long.parseUnsignedLong(hex, 16)).toOption
   }
 
   private def expandAllTree(): Unit = {
@@ -406,7 +403,7 @@ object Main {
     node.address.foreach { addr =>
       val addrEl = el("span")
       addrEl.className = "kind address"
-      addrEl.textContent = f" 0x$addr%x"
+      addrEl.textContent = s" ${DapAddress.format(addr)}"
       label.appendChild(addrEl)
     }
     val kind = el("span")
@@ -1024,20 +1021,12 @@ object Main {
     else Nil
   }
 
-  private def parseHexAddressUi(raw: String): Option[Long] = {
-    val hex = raw.trim.toLowerCase.stripPrefix("0x")
-    if (hex.isEmpty || !hex.forall(c => c.isDigit || (c >= 'a' && c <= 'f'))) None
-    else
-      try Some(java.lang.Long.parseUnsignedLong(hex, 16))
-      catch { case _: NumberFormatException => None }
-  }
-
   private def structAbsoluteAddress(json: Option[Json]): Option[Long] =
     json
       .flatMap(_.asObject)
       .flatMap(_("_address"))
       .flatMap(_.asString)
-      .flatMap(parseHexAddressUi)
+      .flatMap(DapAddress.parse)
 
   private def memberAbsoluteAddress(
       parentJson: Option[Json],
@@ -1445,206 +1434,6 @@ object Main {
     root
   }
 
-  // Kept for any single-pane fallbacks; dual view is the primary decode UI.
-  private def setJsonView(
-      id: String,
-      json: Json,
-      rootOpen: Boolean,
-      basePath: String,
-      overlayPanel: Boolean
-  ): Unit = {
-    val host = byId(id)
-    host.innerHTML = ""
-    host.className = "json-view"
-    host.appendChild(
-      renderJsonNode(
-        json,
-        forceOpen = rootOpen,
-        key = None,
-        basePath = basePath,
-        segments = Nil,
-        fetchable = cachedFetchablePaths,
-        overlayPanel = overlayPanel,
-        absoluteAddress = structAbsoluteAddress(Some(json))
-      )
-    )
-  }
-
-  private def renderJsonNode(
-      json: Json,
-      forceOpen: Boolean,
-      key: Option[HTMLElement],
-      basePath: String,
-      segments: List[String],
-      fetchable: Set[String],
-      overlayPanel: Boolean,
-      absoluteAddress: Option[Long]
-  ): HTMLElement = {
-    val resolvedAddr = structAbsoluteAddress(Some(json)).orElse(absoluteAddress)
-    json.arrayOrObject(
-      or = {
-        val row = el("div")
-        row.className = "jv-line jv-leaf"
-        applyAgeAttributes(row, basePath, segments, overlayPanel)
-        key.foreach(row.appendChild)
-        val leaf = el("span")
-        leaf.className = jsonPrimitiveClass(json)
-        leaf.textContent = jsonPrimitiveText(json)
-        row.appendChild(leaf)
-        makeValueEditable(leaf, resolvedAddr, segments, overlayPanel, json)
-        appendFieldActions(row, basePath, segments, fetchable, overlayPanel)
-        row
-      },
-      jsonArray = arr =>
-        renderJsonComposite(
-          forceOpen = forceOpen,
-          openPunct = "[",
-          closePunct = "]",
-          preview = if (arr.isEmpty) "[]" else s"[${arr.size}]",
-          key = key,
-          basePath = basePath,
-          segments = segments,
-          fetchable = fetchable,
-          overlayPanel = overlayPanel,
-          parentJson = Some(json),
-          absoluteAddress = resolvedAddr,
-          children = arr.toList.zipWithIndex.map { case (value, index) =>
-            (index.toString, value, segments :+ index.toString)
-          }
-        ),
-      jsonObject = obj =>
-        renderJsonComposite(
-          forceOpen = forceOpen,
-          openPunct = "{",
-          closePunct = "}",
-          preview = if (obj.isEmpty) "{}" else s"{${obj.size}}",
-          key = key,
-          basePath = basePath,
-          segments = segments,
-          fetchable = fetchable,
-          overlayPanel = overlayPanel,
-          parentJson = Some(json),
-          absoluteAddress = resolvedAddr,
-          children = obj.toList.collect {
-            case (name, value) if !DualDecodeAlign.isMetaKey(name) =>
-              (name, value, segments :+ name)
-          }
-        )
-    )
-  }
-
-  private def renderJsonComposite(
-      forceOpen: Boolean,
-      openPunct: String,
-      closePunct: String,
-      preview: String,
-      key: Option[HTMLElement],
-      basePath: String,
-      segments: List[String],
-      fetchable: Set[String],
-      overlayPanel: Boolean,
-      parentJson: Option[Json],
-      absoluteAddress: Option[Long],
-      children: List[(String, Json, List[String])]
-  ): HTMLElement = {
-    val pathKey = stampKey(basePath, segments, overlayPanel)
-    val isOpen = forceOpen || jsonExpanded.contains(pathKey)
-    val root = el("div")
-    root.className = if (isOpen) "jv-composite" else "jv-composite collapsed"
-
-    val line = el("div")
-    line.className = if (children.isEmpty) "jv-line jv-leaf" else "jv-line"
-    applyAgeAttributes(line, basePath, segments, overlayPanel)
-
-    lazy val twist = {
-      val t = el("span")
-      t.className = "jv-twist"
-      t.textContent = if (isOpen) "▼" else "▶"
-      line.appendChild(t)
-      t
-    }
-    if (children.nonEmpty) twist
-
-    val openMark = el("span")
-    openMark.className = "jv-punct jv-open"
-    openMark.textContent = openPunct
-
-    val previewEl = el("span")
-    previewEl.className = "jv-preview"
-    previewEl.textContent = preview
-
-    key.foreach(line.appendChild)
-    line.appendChild(openMark)
-    line.appendChild(previewEl)
-    appendFieldActions(line, basePath, segments, fetchable, overlayPanel)
-    root.appendChild(line)
-
-    if (children.isEmpty) {
-      openMark.className = "jv-punct"
-      openMark.textContent = openPunct + closePunct
-      previewEl.textContent = ""
-    } else {
-      var built = false
-      def ensureChildren(): Unit =
-        if (!built) {
-          built = true
-          val childUl = el("ul")
-          childUl.className = "jv-children"
-          children.foreach { case (name, value, childSegments) =>
-            val keyEl = el("span")
-            keyEl.className = "jv-key"
-            keyEl.textContent = name
-            val childAddr =
-              memberAbsoluteAddress(parentJson, absoluteAddress, Some(name), Some(value))
-            val li = el("li")
-            li.appendChild(
-              renderJsonNode(
-                value,
-                forceOpen = false,
-                key = Some(keyEl),
-                basePath = basePath,
-                segments = childSegments,
-                fetchable = fetchable,
-                overlayPanel = overlayPanel,
-                absoluteAddress = childAddr
-              )
-            )
-            childUl.appendChild(li)
-          }
-          root.appendChild(childUl)
-
-          val closeLine = el("div")
-          closeLine.className = "jv-line jv-close"
-          val closeMark = el("span")
-          closeMark.className = "jv-punct"
-          closeMark.textContent = closePunct
-          closeLine.appendChild(closeMark)
-          root.appendChild(closeLine)
-        }
-
-      if (isOpen) ensureChildren()
-
-      val toggle = (_: MouseEvent) => {
-        val collapsed = root.classList.toggle("collapsed")
-        if (collapsed) {
-          jsonExpanded.remove(pathKey)
-          twist.textContent = "▶"
-        } else {
-          jsonExpanded.add(pathKey)
-          ensureChildren()
-          twist.textContent = "▼"
-        }
-      }
-      twist.onclick = toggle
-      openMark.onclick = toggle
-      previewEl.onclick = toggle
-      previewEl.style.cursor = "pointer"
-      openMark.style.cursor = "pointer"
-    }
-
-    root
-  }
-
   private def appendFieldActions(
       row: HTMLElement,
       basePath: String,
@@ -1873,7 +1662,7 @@ object Main {
     else {
       val addr = address.get
       leafEl.style.cursor = "text"
-      leafEl.title = f"Double-click to edit (0x$addr%x)"
+      leafEl.title = s"Double-click to edit (${DapAddress.format(addr)})"
       leafEl.ondblclick = { (e: MouseEvent) =>
         e.stopPropagation()
         e.preventDefault()
@@ -2002,13 +1791,13 @@ object Main {
       case Some(dt) =>
         val writeSegs = segments.filterNot(DualDecodeAlign.isMetaKey)
         val body = Json.obj(
-          "address" -> Json.fromString(f"0x$address%x"),
+          "address" -> Json.fromString(DapAddress.format(address)),
           "value" -> value,
           "decodeType" -> Json.fromString(dt),
           "segments" -> writeSegs.asJson,
           "overlay" -> Json.fromBoolean(overlayPanel)
         )
-        setIndexStatus(f"Writing 0x$address%x…", ok = true)
+        setIndexStatus(s"Writing ${DapAddress.format(address)}…", ok = true)
         // DESNOTE(jbarber, 2026-07-21): writeMemory moved from PUT /memory to
         // POST /dap-proxy/writeMemory (DAP-shaped). Keep POST; putJson is for /overlays.
         postJson("/dap-proxy/writeMemory", body).onComplete {
@@ -2020,7 +1809,7 @@ object Main {
               detailViewPath.foreach(p => payloads.get(p).foreach(showDetail(p, _)))
               onCompleteResult(false)
             } else {
-              setIndexStatus(f"Wrote 0x$address%x", ok = true)
+              setIndexStatus(s"Wrote ${DapAddress.format(address)}", ok = true)
               detailViewPath.foreach(refreshPath)
               onCompleteResult(true)
             }

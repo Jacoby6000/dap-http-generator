@@ -4,8 +4,6 @@ import io.circe.Decoder
 import io.circe.Encoder
 import io.circe.Json
 
-import scala.util.Try
-
 /** Tree of HTTP data routes for the HTML UI (1:1 with addressable API paths). */
 final case class RouteTreeNode(
     path: String,
@@ -28,7 +26,7 @@ object RouteTreeNode {
       "index" -> node.index.map(Json.fromInt).getOrElse(Json.Null),
       "arrayLength" -> node.arrayLength.map(Json.fromInt).getOrElse(Json.Null),
       "address" -> node.address
-        .map(addr => Json.fromString(f"0x$addr%x"))
+        .map(addr => Json.fromString(DapAddress.format(addr)))
         .getOrElse(Json.Null),
       "children" -> Json.fromValues(node.children.map(encoder(_)))
     )
@@ -42,7 +40,7 @@ object RouteTreeNode {
       member <- c.get[Option[String]]("member")
       index <- c.get[Option[Int]]("index")
       arrayLength <- c.get[Option[Int]]("arrayLength")
-      address <- c.get[Option[String]]("address").map(_.flatMap(parseAddress))
+      address <- c.get[Option[String]]("address").map(_.flatMap(DapAddress.parse))
       children <- c.get[List[RouteTreeNode]]("children")
     } yield RouteTreeNode(
       path,
@@ -54,14 +52,6 @@ object RouteTreeNode {
       address,
       children
     )
-  }
-
-  private def parseAddress(raw: String): Option[Long] = {
-    val trimmed = raw.trim.toLowerCase
-    val hex =
-      if (trimmed.startsWith("0x")) trimmed.drop(2)
-      else trimmed
-    Try(java.lang.Long.parseUnsignedLong(hex, 16)).toOption
   }
 }
 
