@@ -23,7 +23,7 @@ lazy val declineVersion = "2.4.1"
 lazy val circeVersion = "0.14.16"
 
 lazy val ui = project
-  .in(file("ui"))
+  .in(file("modules/ui"))
   .enablePlugins(ScalaJSPlugin)
   .settings(
     name := "dap-http-ui",
@@ -44,7 +44,7 @@ lazy val ui = project
     )
   )
 
-lazy val root = (project in file("."))
+lazy val root = (project in file("modules/daphttp"))
   .settings(
     name := "dap-http-generator",
     libraryDependencies ++= Seq(

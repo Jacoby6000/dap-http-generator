@@ -45,7 +45,7 @@ Server subcommands (`smithy`, `cheaders`) share these flags:
 
 ### Custom C/DAP traits
 
-Traits are defined in `src/main/smithy/dap-http-traits.smithy`:
+Traits are defined in `modules/daphttp/src/main/smithy/dap-http-traits.smithy`:
 
 - `@dapStruct` marks structures that should be decoded from DAP bytes.
 - `@bitmask` marks a structure as a bitmask.
@@ -246,7 +246,7 @@ sbt test
 
 ### Logging
 
-Logging uses SLF4J with Logback. Configure levels in `src/main/resources/logback.xml`:
+Logging uses SLF4J with Logback. Configure levels in `modules/daphttp/src/main/resources/logback.xml`:
 
 | Logger | Layer |
 |--------|-------|
