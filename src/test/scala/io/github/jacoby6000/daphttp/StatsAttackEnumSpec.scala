@@ -1,6 +1,7 @@
 package io.github.jacoby6000.daphttp
 
 import org.scalatest.funsuite.AnyFunSuite
+
 import java.nio.file.Files
 
 class StatsAttackEnumSpec extends AnyFunSuite {

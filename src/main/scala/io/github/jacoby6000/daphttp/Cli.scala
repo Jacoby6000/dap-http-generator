@@ -398,9 +398,6 @@ object Cli
       overlaysRef <- Ref.of[IO, OverlayEngine](
         OverlayEngine.fromServices(overlayDocument, plans.services)
       )
-      _ <-
-        if (watch && watchPaths.nonEmpty) startSmithyWatcher(watchPaths, plansRef)
-        else IO.unit
       dapClient = DapClients.create(
         config.dapPipe,
         config.dapHost,
@@ -411,6 +408,10 @@ object Cli
         config.dapConnectRetryMs
       )
       watchService <- RealtimeWatchService.create(dapClient, plansRef, overlaysRef)
+      _ <-
+        if (watch && watchPaths.nonEmpty)
+          startSmithyWatcher(watchPaths, plansRef, overlaysRef, watchService)
+        else IO.unit
       _ <- dapClient.startConnectionManager()
       _ <- watchService.start()
       exit <- EmberServerBuilder
@@ -441,7 +442,9 @@ object Cli
 
   private def startSmithyWatcher(
       paths: List[Path],
-      plansRef: Ref[IO, RoutePlansLoadResult]
+      plansRef: Ref[IO, RoutePlansLoadResult],
+      overlaysRef: Ref[IO, OverlayEngine],
+      watchService: RealtimeWatchService
   ): IO[Unit] = {
     def newestTimestamp: Long =
       paths
@@ -454,7 +457,15 @@ object Cli
     def loop(lastSeen: Long): IO[Unit] =
       IO.sleep(2.seconds) *> IO.blocking(newestTimestamp).flatMap { newest =>
         if (newest > lastSeen)
-          IO.blocking(loadSmithyPlans(paths)).flatMap(plansRef.set) *> loop(newest)
+          IO.blocking(loadSmithyPlans(paths)).flatMap { plans =>
+            for {
+              _ <- plansRef.set(plans)
+              engine <- overlaysRef.get
+              _ <- overlaysRef.set(OverlayEngine.fromServices(engine.document, plans.services))
+              _ <- watchService.rebindAll
+              _ <- loop(newest)
+            } yield ()
+          }
         else
           loop(lastSeen)
       }

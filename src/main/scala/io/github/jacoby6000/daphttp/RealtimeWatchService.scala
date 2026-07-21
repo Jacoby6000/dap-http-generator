@@ -2,6 +2,7 @@ package io.github.jacoby6000.daphttp
 
 import cats.effect.IO
 import cats.effect.Ref
+import cats.syntax.all._
 import fs2.concurrent.Topic
 import io.circe.Json
 import scodec.Codec
@@ -107,6 +108,22 @@ private[daphttp] final class RealtimeWatchService(
     for {
       _ <- dapClient.memoryChanged.evalMap(handleMemoryChanged).compile.drain.start
       _ <- dapClient.sessionResets.evalMap(_ => clearAllLocal).compile.drain.start
+    } yield ()
+
+  /** Cancel and re-subscribe every active watch so DAP regions / overlay field maps match the
+    * current overlay document (and refreshed IR after smithy --watch).
+    */
+  def rebindAll: IO[Unit] =
+    for {
+      current <- bindingsRef.get
+      paths = current.values.toList.sortBy(_.watchId).map(_.path)
+      _ <- current.keys.toList.traverse_ { id =>
+        dapClient.realtimeWatchCancel(id).attempt.void
+      }
+      _ <- bindingsRef.set(Map.empty)
+      _ <- paths.traverse_ { path =>
+        subscribe(path).attempt.void
+      }
     } yield ()
 
   private def handleMemoryChanged(event: MemoryChangedEvent): IO[Unit] =
@@ -241,6 +258,12 @@ private[daphttp] final class RealtimeWatchService(
 
   private def clearAllLocal: IO[Unit] =
     for {
+      bindings <- bindingsRef.get
+      // Best-effort cancel on the adapter before dropping local state. On a hard disconnect
+      // cancels fail harmlessly; on soft reset this avoids orphaned remote watches.
+      _ <- bindings.keys.toList.traverse_ { id =>
+        dapClient.realtimeWatchCancel(id).attempt.void
+      }
       _ <- bindingsRef.set(Map.empty)
       _ <- cleared.publish1(())
     } yield ()
@@ -355,13 +378,23 @@ private[daphttp] object WatchPathResolver {
           if (resolved.isPointerSlot)
             Right(base)
           else {
+            val nestPrefix =
+              if (path == resolved.parentPath) Nil
+              else
+                path
+                  .stripPrefix(resolved.parentPath + "/")
+                  .split("/")
+                  .toList
+                  .filter(_.nonEmpty)
+                  .dropRight(1)
             val withParentOverlap = parentPlan match {
               case Some(plan) =>
                 expandWithOverlayMapping(
                   base,
                   plan,
                   resolved.sourceOffsetInParent,
-                  overlayEngine
+                  overlayEngine,
+                  nestPrefix
                 )
               case None =>
                 base
@@ -406,24 +439,37 @@ private[daphttp] object WatchPathResolver {
 
   /** Expand the DAP watch region to cover overlay members that overlap the source member, and
     * attach per-field overlay decode plans for WS updates.
+    *
+    * @param nestPrefix
+    *   path segments from the parent route to the enclosing struct (e.g. `List("0")` when watching
+    *   `$parent/0/y`), prepended to overlay field names so UI patches land under the correct array
+    *   element.
     */
   private def expandWithOverlayMapping(
       base: WatchTarget,
       plan: RoutePlan,
       sourceOffsetInStruct: Int,
-      overlayEngine: OverlayEngine
+      overlayEngine: OverlayEngine,
+      nestPrefix: List[String]
   ): WatchTarget = {
     val wordSize = base.wordSizeBits
     val parentType = plan.reads.headOption.flatMap(_.decodeType)
-    val structBase =
+    val routeBase =
       plan.reads.headOption.map(_.address).getOrElse(base.address - sourceOffsetInStruct)
-    parentType match {
-      case Some(sourceStruct: IrType.Struct)
-          if TypeOverlay.affectsDecode(
-            sourceStruct,
-            overlayEngine.document,
-            overlayEngine.typeIndex
-          ) =>
+
+    def expandForStruct(
+        sourceStruct: IrType.Struct,
+        offsetInStruct: Int,
+        structAbsoluteBase: Long
+    ): WatchTarget =
+      if (
+        !TypeOverlay.affectsDecode(
+          sourceStruct,
+          overlayEngine.document,
+          overlayEngine.typeIndex
+        )
+      ) base
+      else
         TypeOverlay.rewriteType(
           sourceStruct,
           overlayEngine.document,
@@ -437,7 +483,7 @@ private[daphttp] object WatchPathResolver {
               case overlayStruct: IrType.Struct =>
                 OverlayFieldMapping.overlappingOverlaySpansInRange(
                   overlayStruct,
-                  sourceOffsetInStruct,
+                  offsetInStruct,
                   base.sourceCount,
                   wordSize
                 ) match {
@@ -445,7 +491,7 @@ private[daphttp] object WatchPathResolver {
                     base
                   case Right(overlaySpans) =>
                     val ranges =
-                      (sourceOffsetInStruct, base.sourceCount) ::
+                      (offsetInStruct, base.sourceCount) ::
                         overlaySpans.map(s => (s.offset, s.size))
                     OverlayFieldMapping.unionRange(ranges) match {
                       case None =>
@@ -459,16 +505,16 @@ private[daphttp] object WatchPathResolver {
                               OverlayWatchField(
                                 offsetInWatch = span.offset - unionStart,
                                 size = span.size,
-                                segments = List(span.name),
+                                segments = nestPrefix :+ span.name,
                                 codec = codec,
                                 irType = Some(span.irType)
                               )
                             }
                         }
                         base.copy(
-                          address = structBase + unionStart.toLong,
+                          address = structAbsoluteBase + unionStart.toLong,
                           count = unionSize,
-                          sourceOffsetInWatch = sourceOffsetInStruct - unionStart,
+                          sourceOffsetInWatch = offsetInStruct - unionStart,
                           overlayFields = fields
                         )
                     }
@@ -476,6 +522,36 @@ private[daphttp] object WatchPathResolver {
               case _ =>
                 base
             }
+        }
+
+    parentType match {
+      case Some(sourceStruct: IrType.Struct) =>
+        expandForStruct(sourceStruct, sourceOffsetInStruct, routeBase)
+      case Some(list: IrType.ListType) =>
+        list.element match {
+          case elemStruct: IrType.Struct =>
+            val stride = plan.memberSubRoutes
+              .collectFirst {
+                case v: MemberSubRoute.ValueSubRoute
+                    if v.memberName == MemberSubRoute.RootArrayMemberName && v.isArray =>
+                  v.elementStrideBytes
+                    .orElse(v.elementSizeBytes)
+                    .getOrElse(0)
+              }
+              .filter(_ > 0)
+              .orElse(
+                HttpRouteIrEmitter.sizeBytesForType(elemStruct, wordSize).toOption.filter(_ > 0)
+              )
+              .getOrElse(0)
+            if (stride <= 0) base
+            else {
+              val index = sourceOffsetInStruct / stride
+              val offsetInElem = sourceOffsetInStruct % stride
+              val elemBase = routeBase + index.toLong * stride.toLong
+              expandForStruct(elemStruct, offsetInElem, elemBase)
+            }
+          case _ =>
+            base
         }
       case _ =>
         base

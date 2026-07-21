@@ -54,8 +54,9 @@ Run with `sbt "run <subcommand> ..."`. Standard build/lint/test commands are doc
   sockets; Ember idle is also raised to 5 minutes. Watching a source field expands the DAP region
   to cover overlapping overlay members (byte-range mapping); `/ws` `memoryChanged` includes
   `overlayUpdates` and the UI patches those overlay fields in realtime (seeding `overlayDecoded`
-  when needed) and marks them as watched. After `PUT /overlays` / Apply, active watches are
-  re-subscribed so mappings match the new document. UI ◎/◉ toggles watches next
+  when needed) and marks them as watched. After `PUT /overlays` / Apply, the server rebinds
+  active watches (and returns the updated list on the PUT response) so mappings match the new
+  document; `smithy --watch` also rebuilds the overlay engine and rebinds. UI ◎/◉ toggles watches next
   to fetchable JSON fields.
 
 ### IR pipeline
@@ -181,7 +182,8 @@ flowchart LR
   `pointerAddress` on pointer sub-routes still names where the pointer slot itself was read.
   Parent-struct decode also follows non-function pointer members (and pointer arrays): each
   address is read and decoded into the field (NULL → `null`). Char pointers still become
-  C strings; function pointers stay as raw address numbers.
+  C strings; function pointers stay as raw address numbers. Follow depth is capped and
+  previously visited pointee addresses are skipped so pointer cycles cannot hang decode.
 - Member `@size(N)` (also structure `@size`) round-trips doldecomp symbol `size:` as
   `IrMember.readSizeBytes` through `cheaders-smithy` → `smithy`. Structure `@size` still means
   declared structure width; on members it is the explicit DAP read width.

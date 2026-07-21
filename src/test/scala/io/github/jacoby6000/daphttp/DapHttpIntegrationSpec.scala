@@ -356,6 +356,10 @@ class DapHttpIntegrationSpec extends AnyFunSuite {
         assert(
           regsDecoded == Json.obj(
             "_address" -> Json.fromString("0x2000"),
+            "_offsets" -> Json.obj(
+              "lo" -> Json.fromInt(0),
+              "hi" -> Json.fromInt(2)
+            ),
             "lo" -> Json.fromLong(0x5678L),
             "hi" -> Json.fromLong(0x9abcL)
           )

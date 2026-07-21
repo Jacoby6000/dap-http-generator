@@ -119,6 +119,8 @@ private[daphttp] object MemberPathResolver {
       case Some(p: MemberSubRoute.PointerSubRoute) =>
         val wordBytes = p.wordSizeBits / 8
         parts.drop(1) match {
+          case Nil if p.isArray =>
+            Left(s"Array pointer '${p.memberName}' requires a numeric index")
           case Nil =>
             val addr = p.baseAddress + p.memberOffsetBytes.toLong
             Right(

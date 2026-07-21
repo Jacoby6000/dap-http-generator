@@ -3006,11 +3006,11 @@ object Main {
             overlays = saved
             setEditorStatus("Overlays applied.", ok = true)
             loadTypesAndOverlays()
-            // DESNOTE(jbarber, 2026-07-20): Watch bindings capture overlay field maps at
-            // subscribe time. Re-subscribe after Apply so source watches expand to the new
-            // overlapping overlay members and keep them updated over /ws. Refresh every open
-            // tab path so overlay panes stay current across the workspace.
-            resubscribeAllWatches(() => refreshOpenTabPayloads())
+            // DESNOTE(jbarber, 2026-07-21): PUT /overlays rebinds watches server-side; sync
+            // local watchIds / overlaySegments from the response instead of cancel+POST
+            // (which would duplicate DAP watches).
+            syncWatchesFromOverlayPut(json)
+            refreshOpenTabPayloads()
           case Left(err) =>
             setEditorStatus(s"Bad overlay response: ${err.getMessage}", ok = false)
         }
@@ -3025,42 +3025,26 @@ object Main {
     else paths.foreach(refreshPath)
   }
 
-  /** Cancel and re-create every active watch so overlay segment maps match the current document. */
-  private def resubscribeAllWatches(onDone: () => Unit): Unit = {
-    val paths = activeWatches.keys.toList
-    if (paths.isEmpty) {
-      onDone()
-    } else {
-      val cancels = Future.sequence(paths.flatMap { path =>
-        activeWatches.get(path).map { watchId =>
-          deleteJson(s"/watches/$watchId").transform {
-            case Success(_) => Success(path)
-            case Failure(_) => Success(path)
-          }
-        }
-      })
-      cancels.onComplete { _ =>
-        activeWatches.clear()
-        watchOverlaySegments.clear()
-        val subscribes = Future.sequence(paths.map { path =>
-          postJson("/watches", Json.obj("path" -> Json.fromString(path))).map { json =>
-            json.hcursor.get[Int]("watchId").toOption.foreach { watchId =>
-              activeWatches.update(path, watchId)
-              val overlaySegs = json.hcursor
-                .downField("overlaySegments")
-                .as[List[List[String]]]
-                .getOrElse(Nil)
-              if (overlaySegs.nonEmpty) watchOverlaySegments.update(path, overlaySegs)
-            }
-            path
-          }
-        })
-        subscribes.onComplete { _ =>
-          detailViewPath.foreach(p => payloads.get(p).foreach(showDetail(p, _)))
-          onDone()
+  private def syncWatchesFromOverlayPut(json: Json): Unit = {
+    activeWatches.clear()
+    watchOverlaySegments.clear()
+    json.hcursor
+      .downField("watches")
+      .as[List[Json]]
+      .getOrElse(Nil)
+      .foreach { w =>
+        val c = w.hcursor
+        (c.get[String]("path").toOption, c.get[Int]("watchId").toOption) match {
+          case (Some(path), Some(watchId)) =>
+            activeWatches.update(path, watchId)
+            val overlaySegs =
+              c.downField("overlaySegments").as[List[List[String]]].getOrElse(Nil)
+            if (overlaySegs.nonEmpty) watchOverlaySegments.update(path, overlaySegs)
+          case _ =>
+            ()
         }
       }
-    }
+    detailViewPath.foreach(p => payloads.get(p).foreach(showDetail(p, _)))
   }
 
   private def setEditorStatus(message: String, ok: Boolean): Unit = {

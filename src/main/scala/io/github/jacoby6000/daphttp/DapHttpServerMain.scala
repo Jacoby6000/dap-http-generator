@@ -7,6 +7,7 @@ import cats.effect.IOApp
 import cats.effect.Ref
 import com.comcast.ip4s.Host
 import com.comcast.ip4s.Port
+import fs2.Pipe
 import io.circe.Json
 import io.circe.syntax._
 import org.http4s.HttpRoutes
@@ -25,7 +26,6 @@ import org.http4s.headers.`Content-Type`
 import org.http4s.implicits._
 import org.http4s.server.websocket.WebSocketBuilder2
 import org.http4s.websocket.WebSocketFrame
-import fs2.Pipe
 import scodec.bits.BitVector
 import software.amazon.smithy.model.Model
 import software.amazon.smithy.model.shapes.ShapeId
@@ -195,7 +195,8 @@ object DapHttpServerMain extends IOApp {
                     "watchId" -> Json.fromInt(w.watchId),
                     "path" -> Json.fromString(w.path),
                     "address" -> Json.fromString(f"0x${w.address}%x"),
-                    "count" -> Json.fromInt(w.count)
+                    "count" -> Json.fromInt(w.count),
+                    "overlaySegments" -> w.overlayFields.map(f => f.segments.asJson).asJson
                   )
                 )
                 .asJson
@@ -333,11 +334,36 @@ object DapHttpServerMain extends IOApp {
                         BadRequest(Json.obj("errors" -> validationErrors.asJson))
                       else {
                         val engine = OverlayEngine.fromServices(normalized, plans.services)
-                        overlaysRef.set(engine) *>
-                          IO.blocking {
+                        for {
+                          _ <- overlaysRef.set(engine)
+                          _ <- IO.blocking {
                             overlayPersistPath.foreach(TypeOverlayDocument.save(_, normalized))
-                          } *>
-                          Ok(normalized.asJson)
+                          }
+                          _ <- if (watchService != null) watchService.rebindAll else IO.unit
+                          watches <-
+                            if (watchService != null) watchService.list
+                            else IO.pure(List.empty[WatchBinding])
+                          response <- Ok(
+                            normalized.asJson.mapObject(
+                              _.add(
+                                "watches",
+                                watches
+                                  .map(w =>
+                                    Json.obj(
+                                      "watchId" -> Json.fromInt(w.watchId),
+                                      "path" -> Json.fromString(w.path),
+                                      "address" -> Json.fromString(f"0x${w.address}%x"),
+                                      "count" -> Json.fromInt(w.count),
+                                      "overlaySegments" -> w.overlayFields
+                                        .map(f => f.segments.asJson)
+                                        .asJson
+                                    )
+                                  )
+                                  .asJson
+                              )
+                            )
+                          )
+                        } yield response
                       }
                   } yield response
               }
@@ -694,14 +720,15 @@ object DapHttpServerMain extends IOApp {
     val decoded = Try(Base64.getDecoder.decode(base64Data)).toOption
       .flatMap(bytes => prep.codec.decode(BitVector(bytes)).toOption.map(_.value))
       .getOrElse(Json.Null)
-    resolveDecodedPointers(prep.irType, decoded, dapClient, wordSizeBits, endian).map { resolved =>
-      HttpRouteIrEmitter.annotateDecodedAddresses(
-        prep.irType,
-        resolved,
-        address,
-        wordSizeBits
-      )
-    }
+    resolveDecodedPointers(prep.irType, decoded, dapClient, wordSizeBits, endian, Set.empty, 0)
+      .map { resolved =>
+        HttpRouteIrEmitter.annotateDecodedAddresses(
+          prep.irType,
+          resolved,
+          address,
+          wordSizeBits
+        )
+      }
   }
 
   private def truncateBase64ToBytes(base64Data: String, sizeBytes: Int): String =
@@ -776,7 +803,9 @@ object DapHttpServerMain extends IOApp {
                           decoded,
                           dapClient,
                           Some(chain.wordSizeBits),
-                          chain.endian
+                          chain.endian,
+                          Set.empty,
+                          0
                         ).map { resolved =>
                           HttpRouteIrEmitter.annotateDecodedAddresses(
                             struct,
@@ -880,7 +909,9 @@ object DapHttpServerMain extends IOApp {
                   decoded,
                   dapClient,
                   Some(resolved.wordSizeBits),
-                  resolved.endian
+                  resolved.endian,
+                  Set.empty,
+                  0
                 ).map { withPtrs =>
                   HttpRouteIrEmitter.annotateDecodedAddresses(
                     struct,
@@ -1007,7 +1038,9 @@ object DapHttpServerMain extends IOApp {
                     decoded,
                     dapClient,
                     Some(sub.wordSizeBits),
-                    sub.endian
+                    sub.endian,
+                    Set.empty,
+                    0
                   ).map { resolved =>
                     HttpRouteIrEmitter.annotateDecodedAddresses(
                       struct,
@@ -1161,7 +1194,9 @@ object DapHttpServerMain extends IOApp {
                           decoded,
                           dapClient,
                           Some(sub.wordSizeBits),
-                          sub.endian
+                          sub.endian,
+                          Set.empty,
+                          0
                         ).map { resolved =>
                           HttpRouteIrEmitter.annotateDecodedAddresses(
                             struct,
@@ -1360,7 +1395,9 @@ object DapHttpServerMain extends IOApp {
             decoded,
             dapClient,
             readPlan.wordSizeBits,
-            readPlan.endian
+            readPlan.endian,
+            Set.empty,
+            0
           ).map { resolved =>
             HttpRouteIrEmitter.annotateDecodedAddresses(
               irType,
@@ -1380,11 +1417,13 @@ object DapHttpServerMain extends IOApp {
       decoded: Json,
       dapClient: DapClient,
       wordSizeBits: Option[Int],
-      endian: IrEndian
+      endian: IrEndian,
+      visited: Set[Long],
+      depth: Int
   ): IO[Json] =
     irType match {
       case struct: IrType.Struct =>
-        resolveStructPointers(struct, decoded, dapClient, wordSizeBits, endian)
+        resolveStructPointers(struct, decoded, dapClient, wordSizeBits, endian, visited, depth)
       case listType: IrType.ListType =>
         listType.element match {
           case struct: IrType.Struct =>
@@ -1393,7 +1432,15 @@ object DapHttpServerMain extends IOApp {
                 elements
                   .foldLeft(IO.pure(Vector.empty[Json])) { (accIO, element) =>
                     accIO.flatMap { acc =>
-                      resolveStructPointers(struct, element, dapClient, wordSizeBits, endian)
+                      resolveStructPointers(
+                        struct,
+                        element,
+                        dapClient,
+                        wordSizeBits,
+                        endian,
+                        visited,
+                        depth
+                      )
                         .map(acc :+ _)
                     }
                   }
@@ -1416,7 +1463,9 @@ object DapHttpServerMain extends IOApp {
       decoded: Json,
       dapClient: DapClient,
       wordSizeBits: Option[Int],
-      endian: IrEndian
+      endian: IrEndian,
+      visited: Set[Long],
+      depth: Int
   ): IO[Json] =
     struct.members.foldLeft(IO.pure(decoded)) { (accIO, member) =>
       accIO.flatMap { json =>
@@ -1474,7 +1523,9 @@ object DapHttpServerMain extends IOApp {
                                 pointeeType,
                                 dapClient,
                                 wordSizeBits,
-                                memberEndian
+                                memberEndian,
+                                visited,
+                                depth
                               ).map(vec :+ _)
                             case None =>
                               IO.pure(vec :+ element)
@@ -1495,7 +1546,9 @@ object DapHttpServerMain extends IOApp {
                       pointeeType,
                       dapClient,
                       wordSizeBits,
-                      memberEndian
+                      memberEndian,
+                      visited,
+                      depth
                     ).map { resolved =>
                       json.mapObject(_.add(member.name, resolved))
                     }
@@ -1509,7 +1562,15 @@ object DapHttpServerMain extends IOApp {
             case nested: IrType.Struct if !member.isPointer =>
               json.hcursor.downField(member.name).focus match {
                 case Some(nestedJson) =>
-                  resolveStructPointers(nested, nestedJson, dapClient, wordSizeBits, memberEndian)
+                  resolveStructPointers(
+                    nested,
+                    nestedJson,
+                    dapClient,
+                    wordSizeBits,
+                    memberEndian,
+                    visited,
+                    depth
+                  )
                     .map { resolved =>
                       json.mapObject(_.add(member.name, resolved))
                     }
@@ -1538,17 +1599,26 @@ object DapHttpServerMain extends IOApp {
         None
     }
 
+  // DESNOTE(jbarber, 2026-07-21): Melee graphs can form pointer cycles (e.g. self / back
+  // links). Bound follow depth and visited addresses so decode cannot hang or blow the stack.
+  private val MaxPointerFollowDepth = 8
+
   private def dereferencePointer(
       rawAddr: Long,
       pointeeType: IrType,
       dapClient: DapClient,
       wordSizeBits: Option[Int],
-      endian: IrEndian
+      endian: IrEndian,
+      visited: Set[Long],
+      depth: Int
   ): IO[Json] = {
     val addr = maskToWordSize(rawAddr, wordSizeBits)
     if (addr == 0L) {
       IO.pure(Json.Null)
+    } else if (depth >= MaxPointerFollowDepth || visited.contains(addr)) {
+      IO.pure(Json.fromLong(rawAddr))
     } else {
+      val nextVisited = visited + addr
       (
         HttpRouteIrEmitter.sizeBytesForType(pointeeType, wordSizeBits),
         HttpRouteIrEmitter.compileCodec(pointeeType, endian, wordSizeBits)
@@ -1561,16 +1631,23 @@ object DapHttpServerMain extends IOApp {
               val decoded = Try(Base64.getDecoder.decode(data)).toOption
                 .flatMap(bytes => codec.decode(BitVector(bytes)).toOption.map(_.value))
                 .getOrElse(Json.Null)
-              resolveDecodedPointers(pointeeType, decoded, dapClient, wordSizeBits, endian).map {
-                resolved =>
-                  markPointerPointee(
-                    HttpRouteIrEmitter.annotateDecodedAddresses(
-                      pointeeType,
-                      resolved,
-                      addr,
-                      wordSizeBits
-                    )
+              resolveDecodedPointers(
+                pointeeType,
+                decoded,
+                dapClient,
+                wordSizeBits,
+                endian,
+                nextVisited,
+                depth + 1
+              ).map { resolved =>
+                markPointerPointee(
+                  HttpRouteIrEmitter.annotateDecodedAddresses(
+                    pointeeType,
+                    resolved,
+                    addr,
+                    wordSizeBits
                   )
+                )
               }
           }
         case _ =>
