@@ -27,7 +27,7 @@ object HttpRouteIrEmitter {
         case Some(wordSizeBits) =>
           service.operations.foreach { operation =>
             // DESNOTE(jbarber, 2026-07-18): All generated data routes live under /api so the
-            // HTML UI and meta endpoints (/health, /routes, /resume) can share the same host
+            // HTML UI and meta endpoints (/health, /routes, /dap-proxy) can share the same host
             // without colliding. Normalize here so hand-built IR in tests stays consistent
             // even if a generator forgot ApiRoutes.normalize.
             val httpPath = ApiRoutes.normalize(operation.routePath)

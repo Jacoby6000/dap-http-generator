@@ -398,7 +398,7 @@ class DapHttpServerMainSpec extends AnyFunSuite {
     assert(DapHttpServerMain.maskToWordSize(address, Some(64)) == address)
   }
 
-  test("POST /resume issues a DAP continue request") {
+  test("POST /dap-proxy/continue issues a DAP continue request") {
     import cats.effect.IO
     import cats.effect.Ref
     import cats.effect.unsafe.implicits.global
@@ -406,6 +406,7 @@ class DapHttpServerMainSpec extends AnyFunSuite {
     import org.http4s.Method.POST
     import org.http4s.Request
     import org.http4s.Status
+    import org.http4s.circe._
     import org.http4s.implicits._
 
     val resumed = new java.util.concurrent.atomic.AtomicBoolean(false)
@@ -413,8 +414,9 @@ class DapHttpServerMainSpec extends AnyFunSuite {
       override def readMemory(address: Long, sizeBytes: Int): IO[Either[String, String]] =
         IO.pure(Right(""))
 
-      override def continueExecution(): IO[Either[String, Json]] =
+      override def continueExecution(threadId: Option[Int] = None): IO[Either[String, Json]] =
         IO {
+          val _ = threadId
           resumed.set(true)
           Right(Json.obj("allThreadsContinued" -> Json.True))
         }
@@ -422,19 +424,20 @@ class DapHttpServerMainSpec extends AnyFunSuite {
 
     val plansRef = Ref.unsafe[IO, RoutePlansLoadResult](RoutePlansLoadResult(Map.empty, Nil))
     val app = HttpLoggingMiddleware(DapHttpServerMain.routes(plansRef, dapClient).orNotFound)
-    val response = app.run(Request[IO](POST, uri"/resume")).unsafeRunSync()
+    val response =
+      app.run(Request[IO](POST, uri"/dap-proxy/continue").withEntity(Json.obj())).unsafeRunSync()
 
     assert(response.status == Status.Ok)
     assert(resumed.get())
   }
 
-  test("PUT /memory encodes a field and issues DAP writeMemory") {
+  test("POST /dap-proxy/writeMemory encodes a field and issues DAP writeMemory") {
     import cats.effect.IO
     import cats.effect.Ref
     import cats.effect.unsafe.implicits.global
     import io.circe.Json
     import io.circe.syntax._
-    import org.http4s.Method.PUT
+    import org.http4s.Method.POST
     import org.http4s.Request
     import org.http4s.Status
     import org.http4s.circe._
@@ -446,8 +449,10 @@ class DapHttpServerMainSpec extends AnyFunSuite {
       override def readMemory(address: Long, sizeBytes: Int): IO[Either[String, String]] =
         IO.pure(Right(""))
 
-      override def continueExecution(): IO[Either[String, Json]] =
+      override def continueExecution(threadId: Option[Int] = None): IO[Either[String, Json]] = {
+        val _ = threadId
         IO.pure(Right(Json.obj()))
+      }
 
       override def writeMemory(address: Long, dataBase64: String): IO[Either[String, Int]] =
         IO {
@@ -518,7 +523,7 @@ class DapHttpServerMainSpec extends AnyFunSuite {
       "overlay" -> Json.False
     )
     val response = app
-      .run(Request[IO](PUT, uri"/memory").withEntity(body))
+      .run(Request[IO](POST, uri"/dap-proxy/writeMemory").withEntity(body))
       .unsafeRunSync()
 
     assert(response.status == Status.Ok)

@@ -331,8 +331,10 @@ class TypeOverlaySpec extends AnyFunSuite {
           }.toArray
           Right(Base64.getEncoder.encodeToString(bytes))
         }
-      override def continueExecution(): IO[Either[String, Json]] =
+      override def continueExecution(threadId: Option[Int] = None): IO[Either[String, Json]] = {
+        val _ = threadId
         IO.pure(Right(Json.obj()))
+      }
     }
 
     val app =

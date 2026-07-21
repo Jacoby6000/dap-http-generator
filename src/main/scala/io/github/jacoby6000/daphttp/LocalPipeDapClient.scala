@@ -192,41 +192,47 @@ private[daphttp] final class LocalPipeDapClient(
       }
     }.handleError(error => Left(error.getMessage))
 
-  override def continueExecution(): IO[Either[String, Json]] =
+  override def continueExecution(threadId: Option[Int] = None): IO[Either[String, Json]] =
     withSessionLock {
       ensureSession.flatMap { activeSession =>
-        val threadIdIO =
-          IO.interruptible(
-            activeSession.sendRequest(
-              command = "threads",
-              arguments = None,
-              timeoutMs = math.min(dapTimeoutMs, 2000)
-            )
-          ).timeout(math.min(dapTimeoutMs, 2000).millis)
-            .map(_.toOption.flatMap(json => parseThreadIds(json).headOption).getOrElse(1))
-            .handleError { _ =>
-              DapHttpLoggers.dap.debug("threads unavailable; continuing with threadId=1")
-              1
-            }
+        val threadIdIO = threadId match {
+          case Some(id) => IO.pure(id)
+          case None     =>
+            IO.interruptible(
+              activeSession.sendRequest(
+                command = "threads",
+                arguments = None,
+                timeoutMs = math.min(dapTimeoutMs, 2000)
+              )
+            ).timeout(math.min(dapTimeoutMs, 2000).millis)
+              .map(_.toOption.flatMap(json => parseThreadIds(json).headOption).getOrElse(1))
+              .handleError { _ =>
+                DapHttpLoggers.dap.debug("threads unavailable; continuing with threadId=1")
+                1
+              }
+        }
 
-        threadIdIO.flatMap { threadId =>
+        threadIdIO.flatMap { resolvedThreadId =>
           DapHttpLoggers.dap.info("continue pipe={}", path)
           IO.interruptible {
             activeSession
               .sendRequest(
                 command = "continue",
-                arguments = Some(Json.obj("threadId" -> Json.fromInt(threadId))),
+                arguments = Some(Json.obj("threadId" -> Json.fromInt(resolvedThreadId))),
                 timeoutMs = dapContinueTimeoutMs
               )
               .map { response =>
-                DapHttpLoggers.dap.info("continue threadId={} succeeded", Integer.valueOf(threadId))
+                DapHttpLoggers.dap.info(
+                  "continue threadId={} succeeded",
+                  Integer.valueOf(resolvedThreadId)
+                )
                 response
               }
               .left
               .map { error =>
                 DapHttpLoggers.dap.warn(
                   "continue threadId={} failed: {}",
-                  Integer.valueOf(threadId),
+                  Integer.valueOf(resolvedThreadId),
                   error
                 )
                 error

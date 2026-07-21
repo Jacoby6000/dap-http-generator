@@ -108,6 +108,8 @@ flowchart LR
 ### Modules
 
 - **root (JVM)** — CLI, IR pipeline, http4s server (`io.github.jacoby6000.daphttp.Cli`).
+  HTTP routes compose as `DapProxyRoutes <+> WebAppRoutes <+> ApiRoutes` (DAP runtime under
+  `/dap-proxy`, explorer/catalog/watches/ws at the root, generated data under `/api`).
 - **ui (Scala.js)** — browser explorer under `ui/`; `Compile / resourceGenerators` copies
   `fastOptJS` + `index.html` into `web/` resources served at `/` and `/assets/main.js`. The
   explorer keeps the full `/routes` catalog in memory but only renders search results in the left
@@ -125,8 +127,9 @@ flowchart LR
 | `GET /types/fields?id=` | Full field descriptors for one struct (editor pre-population) |
 | `GET /overlays` | Current type-overlay document (`structs` + `newStructs`) |
 | `PUT /overlays` | Replace overlays (validate; persist when `--overlays` was set) |
-| `PUT /memory` | Write a leaf field via DAP `writeMemory` (`address`, `value`, `decodeType`, `segments`, optional `overlay`) |
-| `POST /resume` | DAP `continue` |
+| `POST /dap-proxy/continue` | DAP `continue` (optional `{ "threadId": N }`) |
+| `POST /dap-proxy/readMemory` | DAP `readMemory` (`memoryReference`, `count`, optional `offset`) |
+| `POST /dap-proxy/writeMemory` | DAP `writeMemory` (`memoryReference`+`data`) or typed leaf write (`address`+`value`+`decodeType`+`segments`) |
 | `POST /watches` | Subscribe to realtime memory for a data path (`{ "path": "/api/…" }`) |
 | `DELETE /watches/{id}` | Cancel a realtime watch |
 | `GET /watches` | List active watches |
@@ -137,7 +140,9 @@ flowchart LR
 
 - `scalafmtOnCompile := true`, so `sbt compile` will reformat sources in place.
 - Generated data routes are always under `/api` (`ApiRoutes.normalize`). Meta UI endpoints stay at
-  the root so they never collide with a Smithy service named `api`.
+  the root so they never collide with a Smithy service named `api`. DAP runtime commands live under
+  `/dap-proxy` (`DapProxyRoutes`) and mirror DAP request names (`continue`, `readMemory`,
+  `writeMemory`).
 - The `/health` and `/routes` endpoints work without a debugger. On startup the server immediately
   tries to connect to the DAP adapter (TCP or `--dap-pipe`; 1s TCP connect timeout per attempt,
   retrying every 5s until connected). Generated **data** routes reuse that persistent session
@@ -224,7 +229,7 @@ flowchart LR
   stays paired across renames. Missing sides show "—". Followed pointer pointees carry `_pointer`
   and show a ⌖ control that opens that value as a root tab (fetches the member route when
   available). Double-click a leaf value (with a known absolute address) to edit it; Enter writes
-  via `PUT /memory` → DAP `writeMemory`, then refreshes the tab. Object metadata keys (`_address`,
+  via `POST /dap-proxy/writeMemory` → DAP `writeMemory`, then refreshes the tab. Object metadata keys (`_address`,
   `_offsets`, `_pointer`) are not treated as fields. Realtime watch updates patch leaf values in
   place (full rebuild only on shape change) so ◎ toggles stay clickable while watches stream.
   Fields that map to a

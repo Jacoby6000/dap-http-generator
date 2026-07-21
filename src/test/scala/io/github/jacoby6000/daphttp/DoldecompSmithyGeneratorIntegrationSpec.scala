@@ -636,8 +636,10 @@ class DoldecompSmithyGeneratorIntegrationSpec extends AnyFunSuite {
       override def readMemory(address: Long, sizeBytes: Int): IO[Either[String, String]] =
         IO.pure(Right(Base64.getEncoder.encodeToString(readBytes(address, sizeBytes))))
 
-      override def continueExecution(): IO[Either[String, Json]] =
+      override def continueExecution(threadId: Option[Int] = None): IO[Either[String, Json]] = {
+        val _ = threadId
         IO.pure(Right(Json.obj()))
+      }
     }
 
     val plansRef = Ref.unsafe[IO, RoutePlansLoadResult](plans)
@@ -966,8 +968,10 @@ class DoldecompSmithyGeneratorIntegrationSpec extends AnyFunSuite {
       override def readMemory(address: Long, sizeBytes: Int): IO[Either[String, String]] =
         IO.pure(Right(Base64.getEncoder.encodeToString(readBytes(address, sizeBytes))))
 
-      override def continueExecution(): IO[Either[String, Json]] =
+      override def continueExecution(threadId: Option[Int] = None): IO[Either[String, Json]] = {
+        val _ = threadId
         IO.pure(Right(Json.obj()))
+      }
     }
 
     val plansRef = Ref.unsafe[IO, RoutePlansLoadResult](plans)
@@ -1097,8 +1101,10 @@ class DoldecompSmithyGeneratorIntegrationSpec extends AnyFunSuite {
             )
           )
         )
-      override def continueExecution(): IO[Either[String, Json]] =
+      override def continueExecution(threadId: Option[Int] = None): IO[Either[String, Json]] = {
+        val _ = threadId
         IO.pure(Right(Json.obj()))
+      }
     }
 
     val plansRef = Ref.unsafe[IO, RoutePlansLoadResult](plans)

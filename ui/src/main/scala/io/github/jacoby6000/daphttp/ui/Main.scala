@@ -2159,17 +2159,18 @@ object Main {
           "overlay" -> Json.fromBoolean(overlayPanel)
         )
         setIndexStatus(f"Writing 0x$address%x…", ok = true)
-        putJson("/memory", body).onComplete {
+        putJson("/dap-proxy/writeMemory", body).onComplete {
           case Success(resp) =>
-            resp.hcursor.get[String]("error").toOption match {
-              case Some(err) =>
-                setIndexStatus(s"Write failed: $err", ok = false)
-                detailViewPath.foreach(p => payloads.get(p).foreach(showDetail(p, _)))
-                onCompleteResult(false)
-              case None =>
-                setIndexStatus(f"Wrote 0x$address%x", ok = true)
-                detailViewPath.foreach(refreshPath)
-                onCompleteResult(true)
+            if (resp.hcursor.get[Boolean]("success").toOption.contains(false)) {
+              val err =
+                resp.hcursor.get[String]("message").getOrElse("writeMemory failed")
+              setIndexStatus(s"Write failed: $err", ok = false)
+              detailViewPath.foreach(p => payloads.get(p).foreach(showDetail(p, _)))
+              onCompleteResult(false)
+            } else {
+              setIndexStatus(f"Wrote 0x$address%x", ok = true)
+              detailViewPath.foreach(refreshPath)
+              onCompleteResult(true)
             }
           case Failure(err) =>
             setIndexStatus(s"Write failed: ${err.getMessage}", ok = false)
