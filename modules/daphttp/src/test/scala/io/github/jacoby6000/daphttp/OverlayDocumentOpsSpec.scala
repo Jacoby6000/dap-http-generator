@@ -49,6 +49,16 @@ final class OverlayDocumentOpsSpec extends AnyFunSuite {
       case Right((created, id)) =>
         assert(id == "overlay#Foo")
         assert(OverlayDocumentOps.addNewStruct(created, "Foo", List(member)).isLeft)
+        assert(OverlayDocumentOps.addNewStruct(created, "overlay#Foo", List(member)).isLeft)
     }
+  }
+
+  test("addNewStruct rejects unqualified id when overlay# form already exists") {
+    val doc = TypeOverlayDocument(
+      structs = Map.empty,
+      newStructs = List(OverlayNewStruct("Foo", List(member)))
+    )
+    assert(OverlayDocumentOps.addNewStruct(doc, "overlay#Foo", List(member)).isLeft)
+    assert(OverlayDocumentOps.addNewStruct(doc, "Foo", List(member)).isLeft)
   }
 }

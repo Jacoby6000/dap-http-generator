@@ -54,7 +54,7 @@ object OverlayDocumentOps {
   ): Either[String, (TypeOverlayDocument, String)] = {
     val id = normalizeNewStructId(rawId)
     if (rawId.trim.isEmpty) Left("Enter a name for the new struct.")
-    else if (document.newStructs.exists(ns => ns.id == rawId.trim || ns.id == id))
+    else if (document.newStructs.exists(ns => normalizeNewStructId(ns.id) == id))
       Left(s"$id already exists.")
     else
       Right(

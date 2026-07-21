@@ -163,6 +163,9 @@ flowchart LR
 ### Non-obvious caveats
 
 - `scalafmtOnCompile := true`, so `sbt compile` will reformat sources in place.
+- Pin `sbt-scalafix` to `0.14.5` (not 0.14.6/0.14.7): those versions intermittently fail
+  `scalafixAll` while sbt copies test-resource fixtures (`Unable to load symbol table: …/*.tmp`).
+  See https://github.com/scalacenter/scalafix/issues/2469.
 - Generated data routes are always under `/api` (`ApiRoutes.normalize`). Meta UI endpoints stay at
   the root so they never collide with a Smithy service named `api`. DAP runtime commands live under
   `/dap-proxy` (`DapProxyRoutes`) and mirror DAP request names (`continue`, `readMemory`,
