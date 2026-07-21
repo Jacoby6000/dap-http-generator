@@ -113,7 +113,8 @@ flowchart LR
   explorer/catalog/watches/ws at the root, generated data under `/api`).
   Path matching for GET/watches lives in `RoutePathResolver`; single-region DAP
   read/decode is shared via `MemoryDecodeService`. Smithy assembly is
-  `SmithyModelLoader` (used by Cli and `DapHttpServerMain`).
+  `SmithyModelLoader` (used by Cli). Process entry is `Cli` only; `DapHttpServerMain` is the
+  HTTP/DAP runtime library (routes, clients, decode), not a second `IOApp`.
 - **ui (Scala.js)** — browser explorer under `modules/ui/`; `Compile / resourceGenerators`
   copies `fastOptJS` + `index.html` into `web/` resources served at `/` and `/assets/main.js`.
   The explorer keeps the full `/routes` catalog in memory but only renders search results in the

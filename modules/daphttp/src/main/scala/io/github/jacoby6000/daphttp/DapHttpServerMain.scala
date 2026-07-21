@@ -1,20 +1,14 @@
 package io.github.jacoby6000.daphttp
 
-import cats.effect.ExitCode
 import cats.effect.IO
-import cats.effect.IOApp
 import cats.effect.Ref
 import cats.syntax.all._
-import com.comcast.ip4s.Host
-import com.comcast.ip4s.Port
 import io.circe.Json
 import io.circe.syntax._
 import org.http4s.HttpRoutes
 import org.http4s.Response
 import org.http4s.circe.CirceEntityCodec._
 import org.http4s.dsl.io._
-import org.http4s.ember.server.EmberServerBuilder
-import org.http4s.implicits._
 import org.http4s.server.websocket.WebSocketBuilder2
 import scodec.bits.BitVector
 import software.amazon.smithy.model.Model
@@ -24,108 +18,18 @@ import java.io.BufferedOutputStream
 import java.net.InetSocketAddress
 import java.net.Socket
 import java.nio.charset.StandardCharsets
-import java.nio.file.Files
 import java.nio.file.Path
-import java.nio.file.Paths
 import java.util.Base64
 import scala.concurrent.duration._
 import scala.util.Try
 
-object DapHttpServerMain extends IOApp {
-  private final case class Config(
-      smithyPaths: List[Path],
-      dapPipe: Option[Path],
-      dapHost: String,
-      dapPort: Int,
-      dapTimeoutMs: Int,
-      dapContinueTimeoutMs: Int,
-      dapConnectTimeoutMs: Int,
-      dapConnectRetryMs: Int,
-      bindHost: String,
-      bindPort: Int,
-      watch: Boolean
-  )
-
-  override def run(args: List[String]): IO[ExitCode] = {
-    parseArgs(args) match {
-      case Left(error) =>
-        IO.println(error).as(ExitCode.Error)
-      case Right(config) =>
-        for {
-          plansRef <- Ref.of[IO, RoutePlansLoadResult](loadPlans(config.smithyPaths))
-          dapClient = DapClients.create(
-            config.dapPipe,
-            config.dapHost,
-            config.dapPort,
-            config.dapTimeoutMs,
-            config.dapContinueTimeoutMs,
-            config.dapConnectTimeoutMs,
-            config.dapConnectRetryMs
-          )
-          overlaysRef <- Ref.of[IO, OverlayEngine](OverlayEngine.empty)
-          watchService <- RealtimeWatchService.create(dapClient, plansRef, overlaysRef)
-          _ <- watchSmithySources(config, plansRef, overlaysRef, watchService)
-          _ <- dapClient.startConnectionManager()
-          _ <- watchService.start()
-          exit <- EmberServerBuilder
-            .default[IO]
-            .withHost(Host.fromString(config.bindHost).getOrElse(Host.fromString("0.0.0.0").get))
-            .withPort(Port.fromInt(config.bindPort).getOrElse(Port.fromInt(8080).get))
-            // DESNOTE(jbarber, 2026-07-20): Default Ember idle is 60s, which drops quiet /ws
-            // sockets. Server Ping frames keep them alive; this is a safety margin for brief gaps.
-            .withIdleTimeout(5.minutes)
-            .withHttpWebSocketApp { wsBuilder =>
-              HttpLoggingMiddleware(
-                routes(plansRef, dapClient, overlaysRef, None, watchService, wsBuilder).orNotFound
-              )
-            }
-            .build
-            .use(_ => IO.never)
-            .as(ExitCode.Success)
-        } yield exit
-    }
-  }
-
-  private def parseArgs(args: List[String]): Either[String, Config] = {
-    val values = args.flatMap { arg =>
-      arg.split("=", 2).toList match {
-        case key :: value :: Nil if key.startsWith("--") => Some(key.drop(2) -> value)
-        case _                                           => None
-      }
-    }.toMap
-
-    val smithyPaths = values
-      .get("smithy")
-      .map(_.split(",").toList.filter(_.nonEmpty).map(Paths.get(_)))
-      .getOrElse(Nil)
-
-    if (smithyPaths.isEmpty) {
-      Left("Missing required --smithy=/path/a,/path/b argument.")
-    } else {
-      Right(
-        Config(
-          smithyPaths = smithyPaths,
-          dapPipe = values.get("dapPipe").map(Paths.get(_)),
-          dapHost = values.getOrElse("dapHost", "127.0.0.1"),
-          dapPort = values.get("dapPort").flatMap(v => Try(v.toInt).toOption).getOrElse(4711),
-          dapTimeoutMs =
-            values.get("dapTimeoutMs").flatMap(v => Try(v.toInt).toOption).getOrElse(5000),
-          dapContinueTimeoutMs = values
-            .get("dapContinueTimeoutMs")
-            .flatMap(v => Try(v.toInt).toOption)
-            .getOrElse(30000),
-          dapConnectTimeoutMs =
-            values.get("dapConnectTimeoutMs").flatMap(v => Try(v.toInt).toOption).getOrElse(1000),
-          dapConnectRetryMs =
-            values.get("dapConnectRetryMs").flatMap(v => Try(v.toInt).toOption).getOrElse(5000),
-          bindHost = values.getOrElse("bindHost", "0.0.0.0"),
-          bindPort = values.get("bindPort").flatMap(v => Try(v.toInt).toOption).getOrElse(8080),
-          watch = values.get("watch").forall(_.toBooleanOption.getOrElse(true))
-        )
-      )
-    }
-  }
-
+/** HTTP/DAP runtime library (route planning, memory decode, DAP clients).
+  *
+  * DESNOTE(jbarber, 2026-07-21): Process entry is [[Cli]] only. This object used to be a second
+  * `IOApp` with a flat `--smithy=` arg parser that duplicated Ember/watch bootstrap; that path is
+  * removed so lifecycle stays in one place.
+  */
+object DapHttpServerMain {
   private[daphttp] def routes(
       plansRef: Ref[IO, RoutePlansLoadResult],
       dapClient: DapClient
@@ -747,17 +651,6 @@ object DapHttpServerMain extends IOApp {
       }
     }
 
-  private def loadPlans(smithyPaths: List[Path]): RoutePlansLoadResult =
-    loadModel(smithyPaths) match {
-      case Left(errors) =>
-        RoutePlansLoadResult(Map.empty, errors)
-      case Right(model) =>
-        buildRoutePlansFromModel(model)
-    }
-
-  private def loadModel(smithyPaths: List[Path]): Either[List[String], Model] =
-    SmithyModelLoader.load(smithyPaths)
-
   def buildRoutePlansFromModel(model: Model): RoutePlansLoadResult =
     SmithyIrGenerator.generateFromModel(model) match {
       case Left(errors) =>
@@ -1183,42 +1076,6 @@ object DapHttpServerMain extends IOApp {
       case None          => IO.pure(Json.Null)
       case Some(address) =>
         readNullTerminatedCString(dapClient, address).map(Json.fromString)
-    }
-  }
-
-  private def watchSmithySources(
-      config: Config,
-      plansRef: Ref[IO, RoutePlansLoadResult],
-      overlaysRef: Ref[IO, OverlayEngine],
-      watchService: RealtimeWatchService
-  ): IO[Unit] = {
-    if (!config.watch) {
-      IO.unit
-    } else {
-      def newestTimestamp(paths: List[Path]): Long =
-        paths
-          .flatMap(SmithyModelLoader.collectSmithyFiles)
-          .flatMap(path => Try(Files.getLastModifiedTime(path).toMillis).toOption)
-          .sorted
-          .lastOption
-          .getOrElse(0L)
-
-      def loop(lastSeen: Long): IO[Unit] =
-        IO.sleep(2.seconds) *> IO.blocking(newestTimestamp(config.smithyPaths)).flatMap { newest =>
-          if (newest > lastSeen) {
-            for {
-              plans <- IO.blocking(loadPlans(config.smithyPaths))
-              _ <- plansRef.set(plans)
-              engine <- overlaysRef.get
-              _ <- overlaysRef.set(OverlayEngine.fromServices(engine.document, plans.services))
-              _ <- watchService.rebindAll
-              _ <- loop(newest)
-            } yield ()
-          } else {
-            loop(lastSeen)
-          }
-        }
-      IO.blocking(newestTimestamp(config.smithyPaths)).flatMap(ts => loop(ts).start.void)
     }
   }
 

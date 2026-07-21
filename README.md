@@ -4,8 +4,7 @@ Use Smithy models to define read-only HTTP servers that proxy debugger memory vi
 
 ## Entrypoint
 
-The runnable jar uses `io.github.jacoby6000.daphttp.Cli` (Decline CLI). A legacy flat-argument
-entrypoint also exists at `io.github.jacoby6000.daphttp.DapHttpServerMain`.
+The runnable entrypoint is `io.github.jacoby6000.daphttp.Cli` (Decline CLI).
 
 ### CLI subcommands
 
@@ -223,17 +222,6 @@ sbt "run cheaders-smithy \
   --output /absolute/path/to/generated.smithy"
 
 sbt "run smithy --smithy /absolute/path/to/generated.smithy --bind-port 8080"
-```
-
-Legacy flat-argument entrypoint:
-
-```bash
-sbt "runMain io.github.jacoby6000.daphttp.DapHttpServerMain \
-  --smithy=/absolute/path/to/models \
-  --dapHost=127.0.0.1 \
-  --dapPort=4711 \
-  --bindPort=8080 \
-  --watch=true"
 ```
 
 ### Formatting, linting, and tests
