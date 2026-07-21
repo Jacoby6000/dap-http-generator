@@ -55,8 +55,9 @@ Run with `sbt "run <subcommand> ..."`. Standard build/lint/test commands are doc
   to cover overlapping overlay members (byte-range mapping); `/ws` `memoryChanged` includes
   `overlayUpdates` and the UI patches those overlay fields in realtime (seeding `overlayDecoded`
   when needed) and marks them as watched. After `PUT /overlays` / Apply, the server rebinds
-  active watches (and returns the updated list on the PUT response) so mappings match the new
-  document; `smithy --watch` also rebuilds the overlay engine and rebinds. UI ◎/◉ toggles watches next
+  active watches (and returns the updated list on the PUT response; failures appear as
+  `watchErrors`) so mappings match the new document. Smithy `--watch` rebuilds the overlay
+  engine, rebinds, and pushes `watchesRebound` on `/ws` so clients refresh watchIds. UI ◎/◉ toggles watches next
   to fetchable JSON fields.
 
 ### IR pipeline

@@ -1930,6 +1930,9 @@ object Main {
         watchOverlaySegments.clear()
         detailViewPath.foreach(p => payloads.get(p).foreach(showDetail(p, _)))
         setIndexStatus("DAP reconnected — watches cleared", ok = false)
+      case Some("watchesRebound") =>
+        syncWatchesFromJsonList(json.hcursor.downField("watches").as[List[Json]].getOrElse(Nil))
+        setIndexStatus("Watches rebound after overlay/model reload", ok = true)
       case Some("memoryChanged") =>
         val pathOpt = cursor.get[String]("path").toOption
         val decodedOpt = cursor.downField("decoded").focus
@@ -3006,10 +3009,20 @@ object Main {
             overlays = saved
             setEditorStatus("Overlays applied.", ok = true)
             loadTypesAndOverlays()
-            // DESNOTE(jbarber, 2026-07-21): PUT /overlays rebinds watches server-side; sync
-            // local watchIds / overlaySegments from the response instead of cancel+POST
-            // (which would duplicate DAP watches).
-            syncWatchesFromOverlayPut(json)
+            syncWatchesFromJsonList(
+              json.hcursor.downField("watches").as[List[Json]].getOrElse(Nil)
+            )
+            json.hcursor
+              .downField("watchErrors")
+              .as[List[String]]
+              .toOption
+              .filter(_.nonEmpty)
+              .foreach { errs =>
+                setEditorStatus(
+                  s"Overlays applied; watch rebind errors: ${errs.mkString("; ")}",
+                  ok = false
+                )
+              }
             refreshOpenTabPayloads()
           case Left(err) =>
             setEditorStatus(s"Bad overlay response: ${err.getMessage}", ok = false)
@@ -3025,25 +3038,21 @@ object Main {
     else paths.foreach(refreshPath)
   }
 
-  private def syncWatchesFromOverlayPut(json: Json): Unit = {
+  private def syncWatchesFromJsonList(watches: List[Json]): Unit = {
     activeWatches.clear()
     watchOverlaySegments.clear()
-    json.hcursor
-      .downField("watches")
-      .as[List[Json]]
-      .getOrElse(Nil)
-      .foreach { w =>
-        val c = w.hcursor
-        (c.get[String]("path").toOption, c.get[Int]("watchId").toOption) match {
-          case (Some(path), Some(watchId)) =>
-            activeWatches.update(path, watchId)
-            val overlaySegs =
-              c.downField("overlaySegments").as[List[List[String]]].getOrElse(Nil)
-            if (overlaySegs.nonEmpty) watchOverlaySegments.update(path, overlaySegs)
-          case _ =>
-            ()
-        }
+    watches.foreach { w =>
+      val c = w.hcursor
+      (c.get[String]("path").toOption, c.get[Int]("watchId").toOption) match {
+        case (Some(path), Some(watchId)) =>
+          activeWatches.update(path, watchId)
+          val overlaySegs =
+            c.downField("overlaySegments").as[List[List[String]]].getOrElse(Nil)
+          if (overlaySegs.nonEmpty) watchOverlaySegments.update(path, overlaySegs)
+        case _ =>
+          ()
       }
+    }
     detailViewPath.foreach(p => payloads.get(p).foreach(showDetail(p, _)))
   }
 

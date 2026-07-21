@@ -207,14 +207,15 @@ private[daphttp] object MemberPathResolver {
           Left(s"Unable to determine size for nested path ${segments.mkString("/")}")
         else {
           val tpe = effectiveType(leafType, member)
+          val memberEndian = member.endianOverride.getOrElse(endian)
           Right(
             ResolvedMemberRead(
               address = address,
               sizeBytes = size,
-              endian = member.endianOverride.getOrElse(endian),
+              endian = memberEndian,
               wordSizeBits = wordSizeBits,
               valueType = Some(tpe),
-              decodeCodec = HttpRouteIrEmitter.codecForType(tpe, endian, Some(wordSizeBits)),
+              decodeCodec = HttpRouteIrEmitter.codecForType(tpe, memberEndian, Some(wordSizeBits)),
               sourceOffsetInParent = (address - parentAddr).toInt,
               parentPath = basePath
             )

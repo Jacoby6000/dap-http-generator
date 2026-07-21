@@ -268,6 +268,30 @@ object DapHttpServerMain extends IOApp {
             }
           )
           .merge(
+            watchService.reboundStream.map { watches =>
+              WebSocketFrame.Text(
+                Json
+                  .obj(
+                    "type" -> Json.fromString("watchesRebound"),
+                    "watches" -> watches
+                      .map(w =>
+                        Json.obj(
+                          "watchId" -> Json.fromInt(w.watchId),
+                          "path" -> Json.fromString(w.path),
+                          "address" -> Json.fromString(f"0x${w.address}%x"),
+                          "count" -> Json.fromInt(w.count),
+                          "overlaySegments" -> w.overlayFields
+                            .map(f => f.segments.asJson)
+                            .asJson
+                        )
+                      )
+                      .asJson
+                  )
+                  .noSpaces
+              )
+            }
+          )
+          .merge(
             fs2.Stream
               .awakeEvery[IO](20.seconds)
               .as(WebSocketFrame.Ping())
@@ -339,13 +363,13 @@ object DapHttpServerMain extends IOApp {
                           _ <- IO.blocking {
                             overlayPersistPath.foreach(TypeOverlayDocument.save(_, normalized))
                           }
-                          _ <- if (watchService != null) watchService.rebindAll else IO.unit
-                          watches <-
-                            if (watchService != null) watchService.list
-                            else IO.pure(List.empty[WatchBinding])
+                          rebindResult <-
+                            if (watchService != null) watchService.rebindAll
+                            else IO.pure((List.empty[WatchBinding], List.empty[String]))
+                          (watches, watchErrors) = rebindResult
                           response <- Ok(
-                            normalized.asJson.mapObject(
-                              _.add(
+                            normalized.asJson.mapObject { obj =>
+                              val withWatches = obj.add(
                                 "watches",
                                 watches
                                   .map(w =>
@@ -361,7 +385,9 @@ object DapHttpServerMain extends IOApp {
                                   )
                                   .asJson
                               )
-                            )
+                              if (watchErrors.isEmpty) withWatches
+                              else withWatches.add("watchErrors", watchErrors.asJson)
+                            }
                           )
                         } yield response
                       }
@@ -1735,7 +1761,8 @@ object DapHttpServerMain extends IOApp {
           case Right((leafType, member, _relativeOffset)) =>
             // Client supplies the absolute field address (from `_address` + `_offsets`).
             val _ = _relativeOffset
-            JsonMemoryEncoder.encode(leafType, value, endian, wordSize, Some(member)) match {
+            val memberEndian = member.endianOverride.getOrElse(endian)
+            JsonMemoryEncoder.encode(leafType, value, memberEndian, wordSize, Some(member)) match {
               case Left(err) =>
                 BadRequest(Json.obj("error" -> Json.fromString(err)))
               case Right(bytes) =>

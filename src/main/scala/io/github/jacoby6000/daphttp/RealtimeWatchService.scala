@@ -54,7 +54,8 @@ private[daphttp] final class RealtimeWatchService(
     overlaysRef: Ref[IO, OverlayEngine],
     bindingsRef: Ref[IO, Map[Int, WatchBinding]],
     updates: Topic[IO, WatchUpdate],
-    cleared: Topic[IO, Unit]
+    cleared: Topic[IO, Unit],
+    rebound: Topic[IO, List[WatchBinding]]
 ) {
   def subscribe(path: String): IO[Either[String, WatchBinding]] =
     for {
@@ -104,6 +105,9 @@ private[daphttp] final class RealtimeWatchService(
   def clearedStream: fs2.Stream[IO, Unit] =
     cleared.subscribe(32)
 
+  def reboundStream: fs2.Stream[IO, List[WatchBinding]] =
+    rebound.subscribe(32)
+
   def start(): IO[Unit] =
     for {
       _ <- dapClient.memoryChanged.evalMap(handleMemoryChanged).compile.drain.start
@@ -111,9 +115,10 @@ private[daphttp] final class RealtimeWatchService(
     } yield ()
 
   /** Cancel and re-subscribe every active watch so DAP regions / overlay field maps match the
-    * current overlay document (and refreshed IR after smithy --watch).
+    * current overlay document (and refreshed IR after smithy --watch). Publishes rebound so WS
+    * clients can refresh watchIds.
     */
-  def rebindAll: IO[Unit] =
+  def rebindAll: IO[(List[WatchBinding], List[String])] =
     for {
       current <- bindingsRef.get
       paths = current.values.toList.sortBy(_.watchId).map(_.path)
@@ -121,10 +126,16 @@ private[daphttp] final class RealtimeWatchService(
         dapClient.realtimeWatchCancel(id).attempt.void
       }
       _ <- bindingsRef.set(Map.empty)
-      _ <- paths.traverse_ { path =>
-        subscribe(path).attempt.void
+      results <- paths.traverse { path =>
+        subscribe(path).map {
+          case Right(binding) => Right(binding)
+          case Left(error)    => Left(s"$path: $error")
+        }
       }
-    } yield ()
+      ok = results.collect { case Right(b) => b }
+      errors = results.collect { case Left(e) => e }
+      _ <- rebound.publish1(ok).void
+    } yield (ok, errors)
 
   private def handleMemoryChanged(event: MemoryChangedEvent): IO[Unit] =
     bindingsRef.get.flatMap { bindings =>
@@ -279,13 +290,15 @@ private[daphttp] object RealtimeWatchService {
       bindings <- Ref.of[IO, Map[Int, WatchBinding]](Map.empty)
       updates <- Topic[IO, WatchUpdate]
       cleared <- Topic[IO, Unit]
+      rebound <- Topic[IO, List[WatchBinding]]
     } yield new RealtimeWatchService(
       dapClient,
       plansRef,
       overlaysRef,
       bindings,
       updates,
-      cleared
+      cleared,
+      rebound
     )
 }
 
