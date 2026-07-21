@@ -125,8 +125,10 @@ flowchart LR
   server and explorer (`RouteTreeNode`, `RoutesResponse`, overlay document types,
   `TypeCatalogEntry`), plus shared helpers `DualDecodeAlign` (source/overlay JSON row
   alignment), `DapAddress` (parse/format `0x…` memory addresses), `IndexPath`
-  (`{index}` template substitute/resolve for the explorer index bar), and
-  `WatchPathMatch` (realtime watch / overlay-segment coverage). No IR or DAP runtime.
+  (`{index}` template substitute/resolve for the explorer index bar),
+  `WatchPathMatch` (realtime watch / overlay-segment coverage), `JsonPath` /
+  `DecodedPayload` / `FetchableRoutePath` (explorer JSON path and envelope helpers).
+  No IR or DAP runtime.
 - **ui (Scala.js)** — browser explorer under `modules/ui/`; depends on `api-models` JS.
   `Compile / resourceGenerators` copies `fastOptJS` + `index.html` into `web/` resources
   served at `/` and `/assets/main.js`. The explorer keeps the full `/routes` catalog in memory

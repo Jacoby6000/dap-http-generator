@@ -4,9 +4,12 @@ import io.circe.Json
 import io.circe.parser.parse
 import io.circe.syntax._
 import io.github.jacoby6000.daphttp.DapAddress
+import io.github.jacoby6000.daphttp.DecodedPayload
 import io.github.jacoby6000.daphttp.DualChild
 import io.github.jacoby6000.daphttp.DualDecodeAlign
+import io.github.jacoby6000.daphttp.FetchableRoutePath
 import io.github.jacoby6000.daphttp.IndexPath
+import io.github.jacoby6000.daphttp.JsonPath
 import io.github.jacoby6000.daphttp.OverlayMember
 import io.github.jacoby6000.daphttp.OverlayNewStruct
 import io.github.jacoby6000.daphttp.OverlayStructDef
@@ -300,16 +303,20 @@ object Main {
     fetchJson(path).onComplete {
       case Success(json) =>
         loading.remove(path)
-        if (decodeFailed(json)) {
-          loadErrors.update(path, decodeErrorMessage(json))
+        if (DecodedPayload.decodeFailed(json)) {
+          loadErrors.update(path, DecodedPayload.decodeErrorMessage(json))
           selected = Some(path)
           renderResults()
           // Errors do not open tabs — keep tree error badge; leave workspace as-is.
-          if (openTabs.isEmpty) showErrorDetail(path, decodeErrorMessage(json))
+          if (openTabs.isEmpty) showErrorDetail(path, DecodedPayload.decodeErrorMessage(json))
           setIndexStatus(s"End of chain / decode failed at $path", ok = false)
         } else {
           payloads.update(path, json)
-          bumpRefreshFreshness(path, extractDecoded(json), extractOverlayDecoded(json))
+          bumpRefreshFreshness(
+            path,
+            DecodedPayload.extractDecoded(json),
+            DecodedPayload.extractOverlayDecoded(json)
+          )
           val openedNew = !openTabs.contains(path)
           if (openedNew) {
             selected = Some(path)
@@ -832,7 +839,11 @@ object Main {
 
   private def repaintJsonViews(basePath: String): Unit =
     payloads.get(basePath).foreach { payload =>
-      setDualDecodeView(basePath, extractDecoded(payload), extractOverlayDecoded(payload))
+      setDualDecodeView(
+        basePath,
+        DecodedPayload.extractDecoded(payload),
+        DecodedPayload.extractOverlayDecoded(payload)
+      )
     }
 
   // DESNOTE(jbarber, 2026-07-20): Rapid watch updates used to call setDualDecodeView and
@@ -869,8 +880,8 @@ object Main {
 
   private def flushPatchJsonViews(basePath: String, focusSegments: List[String]): Unit =
     payloads.get(basePath).foreach { payload =>
-      val source = extractDecoded(payload)
-      val overlay = extractOverlayDecoded(payload)
+      val source = DecodedPayload.extractDecoded(payload)
+      val overlay = DecodedPayload.extractOverlayDecoded(payload)
       if (
         dualLineByStamp.isEmpty ||
         !patchDualDecodeView(basePath, source, overlay, focusSegments)
@@ -993,17 +1004,7 @@ object Main {
       stampKey(basePath, overlaySegments, overlayPanel = true)
 
   private def getAtPath(json: Json, segments: List[String]): Option[Json] =
-    segments.foldLeft(Option(json)) { (acc, seg) =>
-      acc.flatMap { j =>
-        j.asObject
-          .flatMap(_.apply(seg))
-          .orElse(
-            j.asArray.flatMap { arr =>
-              Try(seg.toInt).toOption.flatMap(i => arr.lift(i))
-            }
-          )
-      }
-    }
+    JsonPath.get(json, segments)
 
   private def dualObjectFieldCount(obj: io.circe.JsonObject): Int =
     obj.keys.count(k => !DualDecodeAlign.isMetaKey(k))
@@ -1346,8 +1347,9 @@ object Main {
           built = true
           val kids = payloads.get(basePath) match {
             case Some(payload) =>
-              val srcAt = getAtPath(extractDecoded(payload), sourceSegments)
-              val ovAt = extractOverlayDecoded(payload).flatMap(getAtPath(_, overlaySegments))
+              val srcAt = getAtPath(DecodedPayload.extractDecoded(payload), sourceSegments)
+              val ovAt =
+                DecodedPayload.extractOverlayDecoded(payload).flatMap(getAtPath(_, overlaySegments))
               alignDualChildren(srcAt, ovAt)
             case None =>
               children
@@ -1614,21 +1616,25 @@ object Main {
         val segments =
           if (watchedPath == basePath) Nil
           else watchedPath.stripPrefix(basePath + "/").split("/").toList.filter(_.nonEmpty)
-        val mergedDecoded = replaceAtPath(extractDecoded(parent), segments, decoded)
+        val mergedDecoded =
+          JsonPath.replace(DecodedPayload.extractDecoded(parent), segments, decoded)
         // DESNOTE(jbarber, 2026-07-20): Member watches send overlayUpdates without a full
         // overlayDecoded payload. Seed an empty object when needed so byte-mapped overlay
         // fields still patch in realtime (previously `.map` dropped updates when the parent
         // had no overlayDecoded yet).
         val baseOverlay =
-          (extractOverlayDecoded(parent).filterNot(_.isNull), overlay.filterNot(_.isNull)) match {
+          (
+            DecodedPayload.extractOverlayDecoded(parent).filterNot(_.isNull),
+            overlay.filterNot(_.isNull)
+          ) match {
             case (_, Some(piece)) if segments.isEmpty =>
               Some(piece)
             case (Some(rootOverlay), Some(piece)) =>
-              Some(replaceAtPath(rootOverlay, segments, piece))
+              Some(JsonPath.replace(rootOverlay, segments, piece))
             case (Some(rootOverlay), None) =>
               Some(rootOverlay)
             case (None, Some(piece)) =>
-              Some(replaceAtPath(Json.obj(), segments, piece))
+              Some(JsonPath.replace(Json.obj(), segments, piece))
             case (None, None) if overlayUpdates.nonEmpty =>
               Some(Json.obj())
             case _ =>
@@ -1636,9 +1642,9 @@ object Main {
           }
         val mergedOverlay =
           overlayUpdates.foldLeft(baseOverlay) { case (acc, (overlaySegs, value)) =>
-            Some(replaceAtPath(acc.getOrElse(Json.obj()), overlaySegs, value))
+            Some(JsonPath.replace(acc.getOrElse(Json.obj()), overlaySegs, value))
           }
-        val updated = writeDecodedFields(parent, mergedDecoded, mergedOverlay)
+        val updated = DecodedPayload.writeDecodedFields(parent, mergedDecoded, mergedOverlay)
         payloads.update(basePath, updated)
         bumpRefreshFreshnessAt(basePath, segments, overlayPanel = false)
         if (overlay.isDefined || overlayUpdates.nonEmpty)
@@ -1887,47 +1893,8 @@ object Main {
       basePath: String,
       segments: List[String],
       fetchable: Set[String]
-  ): Option[String] = {
-    if (segments.exists(_.startsWith("_"))) None
-    else {
-      val path =
-        if (segments.isEmpty) basePath
-        else segments.foldLeft(basePath)((p, s) => s"$p/$s")
-      if (isFetchablePath(path, fetchable)) Some(path)
-      else if (nestedUnderFetchableAncestor(basePath, segments, fetchable)) Some(path)
-      else None
-    }
-  }
-
-  private def isFetchablePath(path: String, fetchable: Set[String]): Boolean =
-    fetchable.contains(path) ||
-      fetchable.exists(template =>
-        template.contains("{index}") && concreteMatchesTemplate(path, template)
-      )
-
-  /** Fields nested under a fetchable ancestor (e.g. `…/player_slots/0/x` under `…/0`). */
-  private def nestedUnderFetchableAncestor(
-      basePath: String,
-      segments: List[String],
-      fetchable: Set[String]
-  ): Boolean =
-    segments.inits.toList
-      .drop(1) // exclude the full path (already checked)
-      .exists { prefix =>
-        prefix.nonEmpty && {
-          val ancestor = prefix.foldLeft(basePath)((p, s) => s"$p/$s")
-          isFetchablePath(ancestor, fetchable)
-        }
-      }
-
-  private def concreteMatchesTemplate(concrete: String, template: String): Boolean = {
-    val cParts = concrete.split('/').toList
-    val tParts = template.split('/').toList
-    cParts.length == tParts.length && cParts.zip(tParts).forall {
-      case (c, "{index}") => c.nonEmpty && c.forall(_.isDigit)
-      case (c, t)         => c == t
-    }
-  }
+  ): Option[String] =
+    FetchableRoutePath.httpPathForField(basePath, segments, fetchable)
 
   private def refreshJsonField(
       basePath: String,
@@ -1941,8 +1908,8 @@ object Main {
       case Success(json) =>
         fieldLoading.remove(httpPath)
         val errorOpt = json.hcursor.get[String]("error").toOption
-        if (errorOpt.isDefined || decodeFailed(json)) {
-          val err = errorOpt.getOrElse(decodeErrorMessage(json))
+        if (errorOpt.isDefined || DecodedPayload.decodeFailed(json)) {
+          val err = errorOpt.getOrElse(DecodedPayload.decodeErrorMessage(json))
           setIndexStatus(s"Field refresh failed: $err", ok = false)
           setFieldRefreshBusy(httpPath, busy = false)
         } else {
@@ -1952,17 +1919,20 @@ object Main {
               setIndexStatus(s"Parent payload missing for $basePath", ok = false)
               setFieldRefreshBusy(httpPath, busy = false)
             case Some(parent) =>
-              val fieldDecoded = extractDecoded(json)
-              val fieldOverlay = extractOverlayDecoded(json)
+              val fieldDecoded = DecodedPayload.extractDecoded(json)
+              val fieldOverlay = DecodedPayload.extractOverlayDecoded(json)
               val mergedDecoded =
-                replaceAtPath(extractDecoded(parent), segments, fieldDecoded)
+                JsonPath.replace(DecodedPayload.extractDecoded(parent), segments, fieldDecoded)
               val mergedOverlay =
-                (extractOverlayDecoded(parent), fieldOverlay) match {
+                (DecodedPayload.extractOverlayDecoded(parent), fieldOverlay) match {
                   case (Some(rootOverlay), Some(piece)) =>
-                    Some(replaceAtPath(rootOverlay, segments, piece))
+                    Some(JsonPath.replace(rootOverlay, segments, piece))
                   case (rootOverlay, _) => rootOverlay
                 }
-              payloads.update(basePath, writeDecodedFields(parent, mergedDecoded, mergedOverlay))
+              payloads.update(
+                basePath,
+                DecodedPayload.writeDecodedFields(parent, mergedDecoded, mergedOverlay)
+              )
               bumpRefreshFreshnessAt(basePath, segments, overlayPanel = false)
               if (fieldOverlay.isDefined)
                 bumpRefreshFreshnessAt(basePath, segments, overlayPanel = true)
@@ -2106,73 +2076,6 @@ object Main {
     }
   }
 
-  private def extractDecoded(json: Json): Json =
-    json.hcursor
-      .downField("reads")
-      .downArray
-      .downField("decoded")
-      .focus
-      .orElse(json.hcursor.downField("decoded").focus)
-      .getOrElse(json)
-
-  private def extractOverlayDecoded(json: Json): Option[Json] =
-    json.hcursor
-      .downField("reads")
-      .downArray
-      .downField("overlayDecoded")
-      .focus
-      .orElse(json.hcursor.downField("overlayDecoded").focus)
-
-  private def replaceAtPath(json: Json, segments: List[String], value: Json): Json =
-    segments match {
-      case Nil          => value
-      case head :: tail =>
-        json.asObject match {
-          case Some(obj) =>
-            val child = obj(head).getOrElse(Json.Null)
-            Json.fromJsonObject(obj.add(head, replaceAtPath(child, tail, value)))
-          case None =>
-            json.asArray match {
-              case Some(arr) =>
-                Try(head.toInt).toOption match {
-                  case Some(index) if index >= 0 && index < arr.size =>
-                    Json.fromValues(arr.updated(index, replaceAtPath(arr(index), tail, value)))
-                  case _ => json
-                }
-              case None => json
-            }
-        }
-    }
-
-  private def writeDecodedFields(
-      payload: Json,
-      decoded: Json,
-      overlay: Option[Json]
-  ): Json =
-    payload.hcursor.downField("reads").as[Vector[Json]] match {
-      case Right(reads) if reads.nonEmpty =>
-        val head = reads.head
-        var updatedHead = head.mapObject(_.add("decoded", decoded))
-        overlay match {
-          case Some(od) =>
-            updatedHead = updatedHead.mapObject(_.add("overlayDecoded", od))
-          case None =>
-            if (head.hcursor.downField("overlayDecoded").succeeded)
-              updatedHead = updatedHead.mapObject(_.remove("overlayDecoded"))
-        }
-        payload.mapObject(_.add("reads", Json.fromValues(updatedHead +: reads.tail)))
-      case _ =>
-        var obj = payload.mapObject(_.add("decoded", decoded))
-        overlay match {
-          case Some(od) =>
-            obj.mapObject(_.add("overlayDecoded", od))
-          case None =>
-            if (payload.hcursor.downField("overlayDecoded").succeeded)
-              obj.mapObject(_.remove("overlayDecoded"))
-            else obj
-        }
-    }
-
   private def jsonPrimitiveClass(json: Json): String =
     if (json.isNull) "jv-null"
     else if (json.isBoolean) "jv-bool"
@@ -2294,23 +2197,6 @@ object Main {
 
   private def concretePathForSelection(path: String): String =
     IndexPath.concretePath(path, indexTemplate, indexValues)
-
-  private def decodeFailed(json: Json): Boolean = {
-    val cursor = json.hcursor
-    val hasError = cursor.get[String]("error").toOption.exists(_.nonEmpty)
-    val decodedFocus = cursor
-      .downField("decoded")
-      .focus
-      .orElse(cursor.downField("reads").downArray.downField("decoded").focus)
-    hasError || decodedFocus.exists(_.isNull)
-  }
-
-  private def decodeErrorMessage(json: Json): String =
-    json.hcursor
-      .get[String]("error")
-      .toOption
-      .filter(_.nonEmpty)
-      .getOrElse("Decode returned null / empty result.")
 
   private def loadDraftForStruct(structId: String): Unit = {
     editingStructId = Some(structId)
