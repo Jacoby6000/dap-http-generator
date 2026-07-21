@@ -354,7 +354,7 @@ object HttpRouteIrEmitter {
         if size > 0 && readPlan.sizeBytes % size == 0
       } yield readPlan.sizeBytes / size
     }
-    Some(
+    elemSize.filter(_ > 0).map { size =>
       MemberSubRoute.ValueSubRoute(
         memberName = MemberSubRoute.RootArrayMemberName,
         baseAddress = readPlan.address,
@@ -364,8 +364,8 @@ object HttpRouteIrEmitter {
         wordSizeBits = wordSizeBits,
         endian = endian,
         valueType = Some(list.element),
-        elementSizeBytes = elemSize,
-        elementStrideBytes = stride,
+        elementSizeBytes = Some(size),
+        elementStrideBytes = stride.orElse(Some(size)),
         decodeCodec = compileJsonCodecForType(
           list.element,
           endian,
@@ -374,7 +374,7 @@ object HttpRouteIrEmitter {
           s"${readPlan.path}/[element]"
         )
       )
-    )
+    }
   }
 
   private def buildSubRoutesForStruct(
@@ -690,7 +690,8 @@ object HttpRouteIrEmitter {
       errors: ListBuffer[String]
   ): IrType.Struct =
     structure match {
-      case m: IrType.MemoryMappedStruct if m.members.forall(_.offsetBytes.isEmpty) =>
+      case m: IrType.MemoryMappedStruct
+          if m.members.isEmpty || m.members.exists(_.offsetBytes.isEmpty) =>
         IrLayout.packMembers(m.members, wordSize) match {
           case Right((members, sizeof)) =>
             m.copy(
@@ -701,17 +702,6 @@ object HttpRouteIrEmitter {
             errors ++= errs
             m
         }
-      case m: IrType.MemoryMappedStruct if m.members.exists(_.offsetBytes.isEmpty) =>
-        // Rare mixed IR: honor explicit offsets; place unspecified members at the running cursor.
-        var current = 0
-        val filled = m.members.map { member =>
-          val offset = member.offsetBytes.getOrElse(current)
-          IrLayout.memberSizeBytes(member, wordSize, errors).foreach { size =>
-            current = math.max(current, offset + size)
-          }
-          member.copy(offsetBytes = Some(offset))
-        }
-        m.copy(members = filled)
       case other =>
         other
     }

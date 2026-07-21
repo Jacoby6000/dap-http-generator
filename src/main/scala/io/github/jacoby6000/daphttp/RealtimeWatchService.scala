@@ -120,12 +120,13 @@ private[daphttp] final class RealtimeWatchService(
     */
   def rebindAll: IO[(List[WatchBinding], List[String])] =
     for {
-      current <- bindingsRef.get
+      // Clear local bindings before cancel so in-flight memoryChanged events cannot decode
+      // against watches that are already being torn down.
+      current <- bindingsRef.getAndSet(Map.empty)
       paths = current.values.toList.sortBy(_.watchId).map(_.path)
       _ <- current.keys.toList.traverse_ { id =>
         dapClient.realtimeWatchCancel(id).attempt.void
       }
-      _ <- bindingsRef.set(Map.empty)
       results <- paths.traverse { path =>
         subscribe(path).map {
           case Right(binding) => Right(binding)

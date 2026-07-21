@@ -1642,7 +1642,7 @@ object DapHttpServerMain extends IOApp {
     if (addr == 0L) {
       IO.pure(Json.Null)
     } else if (depth >= MaxPointerFollowDepth || visited.contains(addr)) {
-      IO.pure(Json.fromLong(rawAddr))
+      IO.pure(Json.fromLong(addr))
     } else {
       val nextVisited = visited + addr
       (
@@ -1725,21 +1725,29 @@ object DapHttpServerMain extends IOApp {
       dapClient: DapClient
   ): IO[Response[IO]] = {
     val typeIndex = TypeOverlay.buildTypeIndex(services)
-    val wordSize = services.headOption.flatMap(_.wordSizeBits)
-    val endian = services.headOption.map(_.defaultEndian).getOrElse(IrEndian.Big)
-    val rootTypeOpt =
+    val shapeIdOpt =
       try {
-        val shapeId =
+        Some(
           if (decodeType.contains("#")) software.amazon.smithy.model.shapes.ShapeId.from(decodeType)
           else TypeOverlay.normalizeShapeId(decodeType)
-        typeIndex.get(shapeId).orElse {
-          typeIndex.collectFirst {
-            case (id, t) if id.getName == decodeType || id.toString == decodeType => t
-          }
-        }
+        )
       } catch {
         case _: IllegalArgumentException => None
       }
+    val owningService = shapeIdOpt
+      .flatMap { shapeId =>
+        services.find(svc => TypeOverlay.buildTypeIndex(List(svc)).contains(shapeId))
+      }
+      .orElse(services.headOption)
+    val wordSize = owningService.flatMap(_.wordSizeBits)
+    val endian = owningService.map(_.defaultEndian).getOrElse(IrEndian.Big)
+    val rootTypeOpt = shapeIdOpt.flatMap { shapeId =>
+      typeIndex.get(shapeId).orElse {
+        typeIndex.collectFirst {
+          case (id, t) if id.getName == decodeType || id.toString == decodeType => t
+        }
+      }
+    }
 
     rootTypeOpt match {
       case None =>

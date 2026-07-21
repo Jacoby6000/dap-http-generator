@@ -10,23 +10,18 @@ private[daphttp] object OverlayFieldMapping {
   def memberSpans(
       struct: IrType.Struct,
       wordSize: Option[Int]
-  ): Either[List[String], List[MemberSpan]] = {
-    val errors = ListBuffer.empty[String]
-    val packed = IrLayout.packMembers(struct.members, wordSize) match {
-      case Left(errs) =>
-        errors ++= errs
-        struct.members
-      case Right((members, _)) =>
-        members
-    }
-    val spans = packed.flatMap { member =>
-      val offset = member.offsetBytes.getOrElse(0)
-      IrLayout.memberSizeBytes(member, wordSize, errors).map { size =>
-        MemberSpan(member.name, offset, size, memberReadType(member))
+  ): Either[List[String], List[MemberSpan]] =
+    IrLayout.packMembers(struct.members, wordSize).flatMap { case (packed, _) =>
+      val errors = ListBuffer.empty[String]
+      val spans = packed.flatMap { member =>
+        member.offsetBytes.flatMap { offset =>
+          IrLayout.memberSizeBytes(member, wordSize, errors).map { size =>
+            MemberSpan(member.name, offset, size, memberReadType(member))
+          }
+        }
       }
+      if (errors.nonEmpty) Left(errors.toList.distinct) else Right(spans)
     }
-    if (errors.nonEmpty) Left(errors.toList.distinct) else Right(spans)
-  }
 
   def overlappingOverlaySpans(
       sourceStruct: IrType.Struct,
