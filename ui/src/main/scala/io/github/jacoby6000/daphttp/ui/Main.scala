@@ -2159,7 +2159,9 @@ object Main {
           "overlay" -> Json.fromBoolean(overlayPanel)
         )
         setIndexStatus(f"Writing 0x$address%x…", ok = true)
-        putJson("/dap-proxy/writeMemory", body).onComplete {
+        // DESNOTE(jbarber, 2026-07-21): writeMemory moved from PUT /memory to
+        // POST /dap-proxy/writeMemory (DAP-shaped). Keep POST; putJson is for /overlays.
+        postJson("/dap-proxy/writeMemory", body).onComplete {
           case Success(resp) =>
             if (resp.hcursor.get[Boolean]("success").toOption.contains(false)) {
               val err =
@@ -3167,10 +3169,14 @@ object Main {
       response.text().toFuture.map { text =>
         parse(text) match {
           case Right(json) =>
-            if (!response.ok)
-              throw new RuntimeException(
-                json.hcursor.get[String]("error").toOption.getOrElse(s"HTTP ${response.status}")
-              )
+            if (!response.ok) {
+              val detail = json.hcursor
+                .get[String]("message")
+                .toOption
+                .orElse(json.hcursor.get[String]("error").toOption)
+                .getOrElse(s"HTTP ${response.status}")
+              throw new RuntimeException(detail)
+            }
             json
           case Left(err) =>
             throw new RuntimeException(
