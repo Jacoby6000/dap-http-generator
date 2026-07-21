@@ -128,7 +128,8 @@ flowchart LR
   (`{index}` template substitute/resolve for the explorer index bar),
   `WatchPathMatch` (realtime watch / overlay-segment coverage), `JsonPath` /
   `DecodedPayload` / `FetchableRoutePath` (explorer JSON path and envelope helpers),
-  and `OverlayDocumentOps` (pure overlay-document mutations for the struct editor).
+  and `OverlayDocumentOps` (pure overlay-document mutations for the struct editor),
+  plus `FieldFreshness` / `JsonPrimitiveDisplay` for dual-view stamp keys and leaf styling.
   No IR or DAP runtime.
 - **ui (Scala.js)** — browser explorer under `modules/ui/`; depends on `api-models` JS.
   `Compile / resourceGenerators` copies `fastOptJS` + `index.html` into `web/` resources

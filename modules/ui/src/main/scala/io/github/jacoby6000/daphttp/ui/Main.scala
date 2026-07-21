@@ -8,8 +8,10 @@ import io.github.jacoby6000.daphttp.DecodedPayload
 import io.github.jacoby6000.daphttp.DualChild
 import io.github.jacoby6000.daphttp.DualDecodeAlign
 import io.github.jacoby6000.daphttp.FetchableRoutePath
+import io.github.jacoby6000.daphttp.FieldFreshness
 import io.github.jacoby6000.daphttp.IndexPath
 import io.github.jacoby6000.daphttp.JsonPath
+import io.github.jacoby6000.daphttp.JsonPrimitiveDisplay
 import io.github.jacoby6000.daphttp.OverlayDocumentOps
 import io.github.jacoby6000.daphttp.OverlayMember
 import io.github.jacoby6000.daphttp.RouteTreeNode
@@ -101,7 +103,7 @@ object Main {
   private var watchSocket: Option[dom.WebSocket] = None
 
   /** Soft ceiling: fields older than this (relative to latest data / now) look distinctly muted. */
-  private val StaleAfterMs = 60_000.0
+  private val StaleAfterMs = FieldFreshness.StaleAfterMs
 
   /** Template path containing `{index}` slots currently being browsed. */
   private var indexTemplate: Option[String] = None
@@ -999,8 +1001,7 @@ object Main {
       sourceSegments: List[String],
       overlaySegments: List[String]
   ): String =
-    stampKey(basePath, sourceSegments, overlayPanel = false) + "\n" +
-      stampKey(basePath, overlaySegments, overlayPanel = true)
+    FieldFreshness.dualStampKey(basePath, sourceSegments, overlaySegments)
 
   private def getAtPath(json: Json, segments: List[String]): Option[Json] =
     JsonPath.get(json, segments)
@@ -1995,42 +1996,28 @@ object Main {
     }
   }
 
-  private def jsonPointer(segments: List[String]): String =
-    if (segments.isEmpty) "" else segments.mkString("/", "/", "")
-
   private def stampKey(
       basePath: String,
       segments: List[String],
       overlayPanel: Boolean
-  ): String = {
-    val raw = basePath + jsonPointer(segments)
-    if (overlayPanel) s"ov:$raw" else raw
-  }
+  ): String =
+    FieldFreshness.stampKey(basePath, segments, overlayPanel)
 
   /** Epoch ms when this subtree (or nearest ancestor) was last updated. */
   private def fieldFreshMs(
       basePath: String,
       segments: List[String],
       overlayPanel: Boolean
-  ): Double = {
-    var segs = segments
-    while (true) {
-      fieldFreshAt.get(stampKey(basePath, segs, overlayPanel)) match {
-        case Some(stamped) =>
-          return stamped
-        case None =>
-          if (segs.isEmpty) return latestDataTime
-          segs = segs.init
-      }
-    }
-    latestDataTime
-  }
+  ): Double =
+    FieldFreshness.resolveFreshMs(
+      segs => fieldFreshAt.get(stampKey(basePath, segs, overlayPanel)),
+      segments,
+      latestDataTime
+    )
 
   /** Age in ms: how far behind the latest data (or wall clock) this field is. */
-  private def fieldAgeMs(freshMs: Double): Double = {
-    val latest = math.max(latestDataTime, js.Date.now())
-    math.max(0.0, latest - freshMs)
-  }
+  private def fieldAgeMs(freshMs: Double): Double =
+    FieldFreshness.ageMs(freshMs, latestDataTime, js.Date.now())
 
   private def applyAgeAttributes(
       line: HTMLElement,
@@ -2044,24 +2031,11 @@ object Main {
   }
 
   private def applyAgeStyle(line: HTMLElement, ageMs: Double): Unit = {
-    val (opacity, tint) = ageVisual(ageMs)
+    val (opacity, tint) = FieldFreshness.ageVisual(ageMs)
     line.style.setProperty("--jv-fade", f"$opacity%.3f")
     line.style.setProperty("--jv-tint", f"$tint%.3f")
     if (ageMs >= StaleAfterMs) line.classList.add("jv-stale")
     else line.classList.remove("jv-stale")
-  }
-
-  /** Mild fade for the first minute; a clearer (but still readable) mute after that. */
-  private def ageVisual(ageMs: Double): (Double, Double) = {
-    val sec = ageMs / 1000.0
-    if (sec <= 0) (1.0, 0.0)
-    else if (sec < 60.0) {
-      val t = sec / 60.0
-      (1.0 - t * 0.10, t * 0.22)
-    } else {
-      val extra = math.min(1.0, (sec - 60.0) / 180.0)
-      (0.82 - extra * 0.06, 0.34 + extra * 0.08)
-    }
   }
 
   private def refreshVisibleAgeStyles(): Unit = {
@@ -2076,21 +2050,10 @@ object Main {
   }
 
   private def jsonPrimitiveClass(json: Json): String =
-    if (json.isNull) "jv-null"
-    else if (json.isBoolean) "jv-bool"
-    else if (json.isNumber) "jv-num"
-    else if (json.isString) "jv-str"
-    else "jv-punct"
+    JsonPrimitiveDisplay.cssClass(json)
 
   private def jsonPrimitiveText(json: Json): String =
-    json.fold(
-      jsonNull = "null",
-      jsonBoolean = _.toString,
-      jsonNumber = _.toString,
-      jsonString = s => Json.fromString(s).noSpaces,
-      jsonArray = _ => "[]",
-      jsonObject = _ => "{}"
-    )
+    JsonPrimitiveDisplay.text(json)
 
   private def showIdleDetail(): Unit = {
     // Keep open tabs; only reset empty messaging when nothing is open.
