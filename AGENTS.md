@@ -195,8 +195,10 @@ flowchart LR
   C strings; function pointers stay as raw address numbers. Follow depth is capped and
   previously visited pointee addresses are skipped so pointer cycles cannot hang decode.
 - Member `@size(N)` (also structure `@size`) round-trips doldecomp symbol `size:` as
-  `IrMember.readSizeBytes` through `cheaders-smithy` → `smithy`. Structure `@size` still means
-  declared structure width; on members it is the explicit DAP read width.
+  `IrMember.readSizeBytes` through `cheaders-smithy` → `smithy`. Structure `@size` means
+  declared width whose unit depends on the shape: **bytes** for `@dapStruct` /
+  enclosing structs (`IrType.*.declaredSizeBytes`), **bits** for `@bitmask`
+  (`IrType.Bitmask.storageBits`). On members it is the explicit DAP read width in bytes.
 - Global arrays (including pointer arrays) use `readSizeBytes / length` as element stride when that
   exceeds packed layout/pointer width (padding between elements). Pointer-chain outer indices use
   the same stride. Enclosing outputs that unwrap to a root-level array (e.g. Melee `player_slots`)

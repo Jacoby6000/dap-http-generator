@@ -32,7 +32,7 @@ class HttpRouteIrEmitterCodecSpec extends AnyFunSuite {
           readSizeBytes = readSizeBytes
         )
       ),
-      declaredSizeBits = None
+      declaredSizeBytes = None
     )
 
     HttpRouteIrEmitter
@@ -210,7 +210,7 @@ class HttpRouteIrEmitterCodecSpec extends AnyFunSuite {
           primitiveOverride = None
         )
       ),
-      declaredSizeBits = Some(2)
+      storageBits = Some(2)
     )
 
     val read = compileSingleRead(bitmask)
@@ -246,7 +246,7 @@ class HttpRouteIrEmitterCodecSpec extends AnyFunSuite {
           primitiveOverride = None
         )
       ),
-      declaredSizeBits = None
+      declaredSizeBytes = None
     )
 
     val dapStruct = IrType.MemoryMappedStruct(
@@ -265,7 +265,7 @@ class HttpRouteIrEmitterCodecSpec extends AnyFunSuite {
           primitiveOverride = None
         )
       ),
-      declaredSizeBits = Some(2)
+      declaredSizeBytes = Some(2)
     )
 
     val read = compileSingleRead(dapStruct)
@@ -304,7 +304,7 @@ class HttpRouteIrEmitterCodecSpec extends AnyFunSuite {
           primitiveOverride = Some(IrPrimitive.U16)
         )
       ),
-      declaredSizeBits = Some(4)
+      declaredSizeBytes = Some(4)
     )
 
     val read = compileSingleRead(dapStruct)
@@ -335,7 +335,7 @@ class HttpRouteIrEmitterCodecSpec extends AnyFunSuite {
     val struct = IrType.MemoryMappedStruct(
       id = id("Name"),
       members = List(member),
-      declaredSizeBits = Some(8)
+      declaredSizeBytes = Some(8)
     )
 
     val read = compileSingleRead(struct)
@@ -419,7 +419,7 @@ class HttpRouteIrEmitterCodecSpec extends AnyFunSuite {
           primitiveOverride = None
         )
       ),
-      declaredSizeBits = Some(4)
+      declaredSizeBytes = Some(4)
     )
     val read = compileSingleRead(dapStruct)
 
@@ -494,7 +494,7 @@ class HttpRouteIrEmitterCodecSpec extends AnyFunSuite {
           primitiveOverride = None
         )
       ),
-      declaredSizeBits = None
+      declaredSizeBytes = None
     )
     val read = HttpRouteIrEmitter
       .emitRoutePlansFromIr(
@@ -555,7 +555,7 @@ class HttpRouteIrEmitterCodecSpec extends AnyFunSuite {
           offsetBytes = Some(4)
         )
       ),
-      declaredSizeBits = Some(8)
+      declaredSizeBytes = Some(8)
     )
     val outer = IrType.MemoryMappedStruct(
       id = id("Outer"),
@@ -600,7 +600,7 @@ class HttpRouteIrEmitterCodecSpec extends AnyFunSuite {
           offsetBytes = Some(0x20)
         )
       ),
-      declaredSizeBits = Some(0x28 * 8)
+      declaredSizeBytes = Some(0x28)
     )
 
     val decoded = Json.obj(
@@ -670,7 +670,7 @@ class HttpRouteIrEmitterCodecSpec extends AnyFunSuite {
           offsetBytes = Some(0)
         )
       ),
-      declaredSizeBits = Some(4)
+      declaredSizeBytes = Some(4)
     )
     val listType =
       IrType.ListType(id = id("ItemList"), element = item, bytesAlias = false, bitsAlias = false)
@@ -691,7 +691,7 @@ class HttpRouteIrEmitterCodecSpec extends AnyFunSuite {
           offsetBytes = Some(0)
         )
       ),
-      declaredSizeBits = Some(8)
+      declaredSizeBytes = Some(8)
     )
 
     val decoded = Json.obj(
@@ -727,7 +727,7 @@ class HttpRouteIrEmitterCodecSpec extends AnyFunSuite {
           offsetBytes = Some(0)
         )
       ),
-      declaredSizeBits = Some(4)
+      declaredSizeBytes = Some(4)
     )
     val listType =
       IrType.ListType(id = id("StrideList"), element = item, bytesAlias = false, bitsAlias = false)
@@ -748,7 +748,7 @@ class HttpRouteIrEmitterCodecSpec extends AnyFunSuite {
           readSizeBytes = Some(16)
         )
       ),
-      declaredSizeBits = None
+      declaredSizeBytes = None
     )
 
     val read = HttpRouteIrEmitter
@@ -816,7 +816,7 @@ class HttpRouteIrEmitterCodecSpec extends AnyFunSuite {
           readSizeBytes = Some(0x10)
         )
       ),
-      declaredSizeBits = None
+      declaredSizeBytes = None
     )
 
     val route = HttpRouteIrEmitter

@@ -105,7 +105,7 @@ class ArrayLengthEnrichmentSpec extends AnyFunSuite {
       assert(counts.arrayLength.contains(0x64))
       assert(counts.offsetBytes.contains(4))
       assert(struct.members.find(_.name == "thrownItemCount").get.offsetBytes.contains(0x194))
-      assert(struct.declaredSizeBits.contains(0x1ac))
+      assert(struct.declaredSizeBytes.contains(0x1ac))
     } finally {
       Files.walk(tmp).sorted(java.util.Comparator.reverseOrder()).forEach { path =>
         val _ = Files.deleteIfExists(path)

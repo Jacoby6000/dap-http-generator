@@ -142,7 +142,7 @@ class WatchPathResolverSpec extends AnyFunSuite {
           offsetBytes = Some(4)
         )
       ),
-      declaredSizeBits = Some(6)
+      declaredSizeBytes = Some(6)
     )
     val sub = MemberSubRoute.ValueSubRoute(
       memberName = MemberSubRoute.RootArrayMemberName,
@@ -224,7 +224,7 @@ class WatchPathResolverSpec extends AnyFunSuite {
           offsetBytes = Some(4)
         )
       ),
-      declaredSizeBits = Some(8)
+      declaredSizeBytes = Some(8)
     )
     val sub = MemberSubRoute.ValueSubRoute(
       memberName = "a",
@@ -316,7 +316,7 @@ class WatchPathResolverSpec extends AnyFunSuite {
           offsetBytes = Some(4)
         )
       ),
-      declaredSizeBits = Some(6)
+      declaredSizeBytes = Some(6)
     )
     val sub = MemberSubRoute.ValueSubRoute(
       memberName = MemberSubRoute.RootArrayMemberName,
@@ -402,7 +402,7 @@ class WatchPathResolverSpec extends AnyFunSuite {
           offsetBytes = Some(0)
         )
       ),
-      declaredSizeBits = Some(4)
+      declaredSizeBytes = Some(4)
     )
     val sub = MemberSubRoute.ValueSubRoute(
       memberName = MemberSubRoute.RootArrayMemberName,

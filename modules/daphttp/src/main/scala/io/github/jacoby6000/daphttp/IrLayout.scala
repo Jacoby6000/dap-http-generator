@@ -58,7 +58,7 @@ object IrLayout {
       wordSize: Option[Int]
   ): Either[List[String], IrType.MemoryMappedStruct] =
     packMembers(struct.members, wordSize).map { case (members, sizeof) =>
-      struct.copy(members = members, declaredSizeBits = Some(sizeof))
+      struct.copy(members = members, declaredSizeBytes = Some(sizeof))
     }
 
   /** Compare packed IR offsets to doldecomp-style comment offsets; return warning messages. */
@@ -124,7 +124,7 @@ object IrLayout {
           case Right((members, sizeof)) =>
             m.copy(
               members = members,
-              declaredSizeBits = m.declaredSizeBits.orElse(Some(sizeof))
+              declaredSizeBytes = m.declaredSizeBytes.orElse(Some(sizeof))
             )
           case Left(errs) =>
             errors ++= errs
@@ -135,7 +135,7 @@ object IrLayout {
           case Right((members, sizeof)) =>
             m.copy(
               members = members,
-              declaredSizeBits = m.declaredSizeBits.orElse(Some(sizeof))
+              declaredSizeBytes = m.declaredSizeBytes.orElse(Some(sizeof))
             )
           case Left(errs) =>
             errors ++= errs
@@ -254,14 +254,14 @@ object IrLayout {
       case list: IrType.ListType =>
         typeSizeBytes(list.element, wordSize, errors)
       case b: IrType.Bitmask =>
-        b.declaredSizeBits
+        b.storageBits
           .map(bits => math.ceil(bits.toDouble / 8d).toInt)
           .orElse {
             errors += s"${b.id}: Bitmask requires declared size."
             None
           }
       case m: IrType.MemoryMappedStruct =>
-        m.declaredSizeBits.orElse {
+        m.declaredSizeBytes.orElse {
           packMembers(m.members.map(_.copy(offsetBytes = None)), wordSize) match {
             case Right((_, size)) => Some(size)
             case Left(errs)       =>
@@ -270,7 +270,7 @@ object IrLayout {
           }
         }
       case e: IrType.EnclosingStruct =>
-        e.declaredSizeBits.orElse {
+        e.declaredSizeBytes.orElse {
           packMembers(e.members.map(_.copy(offsetBytes = None)), wordSize) match {
             case Right((_, size)) => Some(size)
             case Left(errs)       =>

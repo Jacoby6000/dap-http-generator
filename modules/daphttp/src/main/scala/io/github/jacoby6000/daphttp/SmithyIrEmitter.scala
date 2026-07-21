@@ -239,7 +239,7 @@ object SmithyIrEmitter {
           buildStructure(
             id,
             struct.members,
-            struct.declaredSizeBits,
+            struct.storageBits,
             isBitmask = true,
             isDapStruct = false
           )
@@ -249,7 +249,7 @@ object SmithyIrEmitter {
           buildStructure(
             id,
             struct.members,
-            struct.declaredSizeBits,
+            struct.declaredSizeBytes,
             isBitmask = false,
             isDapStruct = true
           )
@@ -259,7 +259,7 @@ object SmithyIrEmitter {
           buildStructure(
             id,
             struct.members,
-            struct.declaredSizeBits,
+            struct.declaredSizeBytes,
             isBitmask = false,
             isDapStruct = false
           )
@@ -309,7 +309,7 @@ object SmithyIrEmitter {
   private def buildStructure(
       id: ShapeId,
       members: List[IrMember],
-      declaredSizeBits: Option[Int],
+      declaredSize: Option[Int], // Smithy @size: bits for bitmask, bytes otherwise
       isBitmask: Boolean,
       isDapStruct: Boolean
   ): StructureShape = {
@@ -320,7 +320,7 @@ object SmithyIrEmitter {
     if (isDapStruct) {
       builder.addTrait(annotationTrait("dapStruct"))
     }
-    declaredSizeBits.foreach(size => builder.addTrait(intTrait("size", size)))
+    declaredSize.foreach(size => builder.addTrait(intTrait("size", size)))
     members.foreach(member => addMember(builder, member))
     builder.build()
   }

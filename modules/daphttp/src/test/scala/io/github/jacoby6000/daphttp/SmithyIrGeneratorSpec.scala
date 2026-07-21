@@ -125,7 +125,7 @@ class SmithyIrGeneratorSpec extends AnyFunSuite {
     assert(registers.staticAddress.contains(0x1000L))
     assert(registers.target.isInstanceOf[IrType.MemoryMappedStruct])
     val registerBlock = registers.target.asInstanceOf[IrType.MemoryMappedStruct]
-    assert(registerBlock.declaredSizeBits.contains(4))
+    assert(registerBlock.declaredSizeBytes.contains(4))
     assert(
       registerBlock.members.map(_.primitiveOverride) == List(
         Some(IrPrimitive.U16),

@@ -619,12 +619,12 @@ object TypeOverlay {
     IrLayout.packMembers(unresolved, wordSize) match {
       case Left(errs) =>
         errors ++= errs
-        IrType.MemoryMappedStruct(id = id, members = unresolved, declaredSizeBits = None)
+        IrType.MemoryMappedStruct(id = id, members = unresolved, declaredSizeBytes = None)
       case Right((members, sizeof)) =>
         IrType.MemoryMappedStruct(
           id = id,
           members = members,
-          declaredSizeBits = Some(sizeof)
+          declaredSizeBytes = Some(sizeof)
         )
     }
   }

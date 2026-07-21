@@ -657,31 +657,28 @@ object HttpRouteIrEmitter {
       errors: ListBuffer[String]
   ): Option[Int] = {
     val packed = ensurePackedOffsets(structure, wordSize, errors)
-    packed.declaredSizeBits
-      .map { raw =>
-        packed match {
-          case _: IrType.Bitmask => math.ceil(raw.toDouble / 8d).toInt
-          case _                 => raw
-        }
-      }
-      .orElse {
-        if (packed.members.exists(_.offsetBytes.isDefined)) {
-          packed.members.flatMap { member =>
-            for {
-              offset <- member.offsetBytes
-              sizeBytes <- memberSizeBytes(member, wordSize, errors)
-            } yield offset + sizeBytes
-          }.maxOption
+    (packed match {
+      case b: IrType.Bitmask => b.storageBits.map(bits => math.ceil(bits.toDouble / 8d).toInt)
+      case m: IrType.MemoryMappedStruct => m.declaredSizeBytes
+      case e: IrType.EnclosingStruct    => e.declaredSizeBytes
+    }).orElse {
+      if (packed.members.exists(_.offsetBytes.isDefined)) {
+        packed.members.flatMap { member =>
+          for {
+            offset <- member.offsetBytes
+            sizeBytes <- memberSizeBytes(member, wordSize, errors)
+          } yield offset + sizeBytes
+        }.maxOption
+      } else {
+        val bits = packed.members.flatMap(member => memberBitWidth(member, wordSize, errors))
+        if (bits.isEmpty) {
+          errors += s"${packed.id}: Unable to infer read width; add @size."
+          None
         } else {
-          val bits = packed.members.flatMap(member => memberBitWidth(member, wordSize, errors))
-          if (bits.isEmpty) {
-            errors += s"${packed.id}: Unable to infer read width; add @size."
-            None
-          } else {
-            Some(math.ceil(bits.sum.toDouble / 8d).toInt)
-          }
+          Some(math.ceil(bits.sum.toDouble / 8d).toInt)
         }
       }
+    }
   }
 
   private def ensurePackedOffsets(
@@ -1099,15 +1096,11 @@ object HttpRouteIrEmitter {
         } else {
           None
         }
-      val totalBits = layoutStruct.declaredSizeBits
-        .map(raw =>
-          layoutStruct match {
-            case _: IrType.Bitmask => raw
-            case _                 => raw * 8
-          }
-        )
-        .orElse(offsetAwareEndBits)
-        .getOrElse(memberBits)
+      val totalBits = (layoutStruct match {
+        case b: IrType.Bitmask            => b.storageBits
+        case m: IrType.MemoryMappedStruct => m.declaredSizeBytes.map(_ * 8)
+        case e: IrType.EnclosingStruct    => e.declaredSizeBytes.map(_ * 8)
+      }).orElse(offsetAwareEndBits).getOrElse(memberBits)
 
       val resolvedBits = math.max(totalBits, memberBits)
       val paddingBits = resolvedBits - memberBits

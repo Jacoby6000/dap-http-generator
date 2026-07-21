@@ -130,18 +130,20 @@ object SmithyIrGenerator {
                   buildIrType(member.getTarget, stack + shapeId, wordSize)
                 )
               )
-            val declaredSizeBits = intTraitValue(structure, SizeTrait)
+            // DESNOTE(jbarber, 2026-07-21): Smithy `@size` unit depends on the shape kind —
+            // bits for `@bitmask`, bytes for `@dapStruct` / enclosing structures.
+            val sizeTrait = intTraitValue(structure, SizeTrait)
             if (structure.hasTrait(BitmaskTrait)) {
               IrType.Bitmask(
                 id = structure.getId,
                 members = members,
-                declaredSizeBits = declaredSizeBits
+                storageBits = sizeTrait
               )
             } else if (structure.hasTrait(DapStructTrait)) {
               val unpacked = IrType.MemoryMappedStruct(
                 id = structure.getId,
                 members = members,
-                declaredSizeBits = declaredSizeBits
+                declaredSizeBytes = sizeTrait
               )
               // DESNOTE(jbarber, 2026-07-20): Pack from member types so Smithy round-trips
               // (which omit C offset comments) keep ABI layout. Explicit @size on the structure
@@ -150,8 +152,8 @@ object SmithyIrGenerator {
                 .map(ws => IrLayout.packStruct(unpacked, Some(ws)))
                 .getOrElse(Right(unpacked)) match {
                 case Right(packed) =>
-                  declaredSizeBits match {
-                    case Some(size) => packed.copy(declaredSizeBits = Some(size))
+                  sizeTrait match {
+                    case Some(size) => packed.copy(declaredSizeBytes = Some(size))
                     case None       => packed
                   }
                 case Left(errs) =>
@@ -162,7 +164,7 @@ object SmithyIrGenerator {
               IrType.EnclosingStruct(
                 id = structure.getId,
                 members = members,
-                declaredSizeBits = declaredSizeBits
+                declaredSizeBytes = sizeTrait
               )
             }
           case ShapeType.UNION =>

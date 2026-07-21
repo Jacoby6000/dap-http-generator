@@ -21,7 +21,8 @@ object IrEquivalence extends Assertions {
   final case class NormalizedStruct(
       kind: String,
       name: String,
-      declaredSizeBits: Option[Int],
+      /** Smithy `@size` value: bits for bitmasks, bytes for aggregates. */
+      declaredSize: Option[Int],
       members: List[NormalizedMember]
   )
 
@@ -88,7 +89,11 @@ object IrEquivalence extends Assertions {
     NormalizedStruct(
       kind = structKind(struct),
       name = struct.id.getName,
-      declaredSizeBits = struct.declaredSizeBits,
+      declaredSize = struct match {
+        case b: IrType.Bitmask            => b.storageBits
+        case m: IrType.MemoryMappedStruct => m.declaredSizeBytes
+        case e: IrType.EnclosingStruct    => e.declaredSizeBytes
+      },
       members = struct.members.map(normalizeMember)
     )
 

@@ -64,7 +64,7 @@ class TypeOverlaySpec extends AnyFunSuite {
           arrayLength = Some(6)
         )
       ),
-      declaredSizeBits = Some(8)
+      declaredSizeBytes = Some(8)
     )
   }
 
@@ -86,7 +86,7 @@ class TypeOverlaySpec extends AnyFunSuite {
                 offsetBytes = None
               )
             ),
-            declaredSizeBits = None
+            declaredSizeBytes = None
           )
         )
       )
@@ -147,7 +147,7 @@ class TypeOverlaySpec extends AnyFunSuite {
           primitive = Some(IrPrimitive.U32)
         )
       ),
-      declaredSizeBits = Some(8)
+      declaredSizeBytes = Some(8)
     )
     val document = TypeOverlayDocument(
       structs = Map(
@@ -183,7 +183,7 @@ class TypeOverlaySpec extends AnyFunSuite {
           primitive = Some(IrPrimitive.U8)
         )
       ),
-      declaredSizeBits = Some(0x20)
+      declaredSizeBytes = Some(0x20)
     )
     // Overlay rebuilds from member list only (offsets recomputed from 0).
     val document = TypeOverlayDocument(

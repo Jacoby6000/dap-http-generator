@@ -488,7 +488,7 @@ class DapHttpServerMainSpec extends AnyFunSuite {
         mem("x", IrType.Primitive(IrPrimitive.U32), 0, Some(IrPrimitive.U32)),
         mem("y", IrType.Primitive(IrPrimitive.U16), 4, Some(IrPrimitive.U16))
       ),
-      declaredSizeBits = Some(48)
+      declaredSizeBytes = Some(6)
     )
     val services = List(
       IrService(
@@ -504,7 +504,7 @@ class DapHttpServerMainSpec extends AnyFunSuite {
               members = List(
                 mem("value", demo, 0).copy(id = sid("GetDemoOutput_value"), offsetBytes = None)
               ),
-              declaredSizeBits = None
+              declaredSizeBytes = None
             )
           )
         )

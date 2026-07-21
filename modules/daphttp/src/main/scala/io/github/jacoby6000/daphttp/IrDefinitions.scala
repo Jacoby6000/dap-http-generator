@@ -68,25 +68,28 @@ final case class IrEnumValue(name: String, value: Int)
 
 sealed trait IrType
 object IrType {
+  // DESNOTE(jbarber, 2026-07-21): Aggregate layouts store sizeof in *bytes*
+  // (`declaredSizeBytes`); bitmasks store storage width in *bits* (`storageBits`).
+  // Both round-trip through Smithy `@size`, whose unit is implied by `@dapStruct`
+  // vs `@bitmask` — never mix the fields across kinds.
   sealed trait Struct extends IrType {
     def id: ShapeId
     def members: List[IrMember]
-    def declaredSizeBits: Option[Int]
   }
   final case class Bitmask(
       id: ShapeId,
       members: List[IrMember],
-      declaredSizeBits: Option[Int]
+      storageBits: Option[Int]
   ) extends Struct
   final case class MemoryMappedStruct(
       id: ShapeId,
       members: List[IrMember],
-      declaredSizeBits: Option[Int]
+      declaredSizeBytes: Option[Int]
   ) extends Struct
   final case class EnclosingStruct(
       id: ShapeId,
       members: List[IrMember],
-      declaredSizeBits: Option[Int]
+      declaredSizeBytes: Option[Int]
   ) extends Struct
   final case class Union(id: ShapeId, members: List[IrMember]) extends IrType
   final case class ListType(id: ShapeId, element: IrType, bytesAlias: Boolean, bitsAlias: Boolean)

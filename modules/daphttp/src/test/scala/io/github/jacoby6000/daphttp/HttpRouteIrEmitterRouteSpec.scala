@@ -35,7 +35,7 @@ class HttpRouteIrEmitterRouteSpec extends AnyFunSuite {
           primitiveOverride = Some(IrPrimitive.U16)
         )
       ),
-      declaredSizeBits = Some(4)
+      declaredSizeBytes = Some(4)
     )
 
     val output = IrType.EnclosingStruct(
@@ -54,7 +54,7 @@ class HttpRouteIrEmitterRouteSpec extends AnyFunSuite {
           primitiveOverride = None
         )
       ),
-      declaredSizeBits = None
+      declaredSizeBytes = None
     )
 
     val plans = HttpRouteIrEmitter
@@ -108,7 +108,7 @@ class HttpRouteIrEmitterRouteSpec extends AnyFunSuite {
           primitiveOverride = None
         )
       ),
-      declaredSizeBits = Some(10)
+      storageBits = Some(10)
     )
 
     val output = IrType.EnclosingStruct(
@@ -127,7 +127,7 @@ class HttpRouteIrEmitterRouteSpec extends AnyFunSuite {
           primitiveOverride = None
         )
       ),
-      declaredSizeBits = None
+      declaredSizeBytes = None
     )
 
     val plans = HttpRouteIrEmitter
@@ -168,7 +168,7 @@ class HttpRouteIrEmitterRouteSpec extends AnyFunSuite {
           offsetBytes = Some(0)
         )
       ),
-      declaredSizeBits = Some(4)
+      declaredSizeBytes = Some(4)
     )
     val opaque = IrType.MapType(
       id = id("OpaqueMap"),
@@ -216,7 +216,7 @@ class HttpRouteIrEmitterRouteSpec extends AnyFunSuite {
           primitiveOverride = None
         )
       ),
-      declaredSizeBits = Some(0x28)
+      declaredSizeBytes = Some(0x28)
     )
 
     val decoded = Json.obj(
@@ -255,7 +255,7 @@ class HttpRouteIrEmitterRouteSpec extends AnyFunSuite {
           offsetBytes = Some(0)
         )
       ),
-      declaredSizeBits = Some(4)
+      declaredSizeBytes = Some(4)
     )
     val list = IrType.ListType(
       id = id("PlayerSlotsArray"),
@@ -280,7 +280,7 @@ class HttpRouteIrEmitterRouteSpec extends AnyFunSuite {
           readSizeBytes = Some(24)
         )
       ),
-      declaredSizeBits = None
+      declaredSizeBytes = None
     )
     val result = HttpRouteIrEmitter.emitRoutePlansFromIr(
       List(

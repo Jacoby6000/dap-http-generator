@@ -333,7 +333,7 @@ object DoldecompIrGenerator {
                   val unpacked = IrType.MemoryMappedStruct(
                     id = ShapeId.from(s"$namespace#$name"),
                     members = members,
-                    declaredSizeBits = None
+                    declaredSizeBytes = None
                   )
                   val packed = IrLayout.packStruct(unpacked, Some(wordSizeBits)) match {
                     case Right(p) =>
@@ -556,7 +556,7 @@ object DoldecompIrGenerator {
                 output = IrType.EnclosingStruct(
                   id = outputShapeId,
                   members = List(outputMember),
-                  declaredSizeBits = None
+                  declaredSizeBytes = None
                 ),
                 pointerChain =
                   if (operation.pointerDepth > 0) {
@@ -925,7 +925,7 @@ object DoldecompIrGenerator {
             primitiveOverride = None
           )
         },
-        declaredSizeBits = Some(storageBits)
+        storageBits = Some(storageBits)
       ),
       staticAddress = None,
       paddingRepeats = None,
@@ -1257,10 +1257,10 @@ object DoldecompIrGenerator {
     }
 
   private def irStructSizeBytes(struct: IrType.MemoryMappedStruct, wordSizeBits: Int): Int =
-    struct.declaredSizeBits.getOrElse {
+    struct.declaredSizeBytes.getOrElse {
       IrLayout
         .packStruct(struct, Some(wordSizeBits))
-        .map(_.declaredSizeBits.getOrElse(0))
+        .map(_.declaredSizeBytes.getOrElse(0))
         .getOrElse(0)
     }
 

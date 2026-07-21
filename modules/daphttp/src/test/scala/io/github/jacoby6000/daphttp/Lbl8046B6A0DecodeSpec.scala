@@ -25,12 +25,12 @@ class Lbl8046B6A0DecodeSpec extends AnyFunSuite {
       .getOrElse(fail("no lbl_8046B6A0 op"))
     val root = op.output.members.head.target.asInstanceOf[IrType.MemoryMappedStruct]
     assert(
-      root.declaredSizeBits.contains(0x2528),
-      s"packed=${root.declaredSizeBits.map(b => s"0x${b.toHexString}")}"
+      root.declaredSizeBytes.contains(0x2528),
+      s"packed=${root.declaredSizeBytes.map(b => s"0x${b.toHexString}")}"
     )
     val rules =
       root.members.find(_.name == "x24C8").get.target.asInstanceOf[IrType.MemoryMappedStruct]
-    assert(rules.declaredSizeBits.contains(0x60), s"StartMeleeRules=${rules.declaredSizeBits}")
+    assert(rules.declaredSizeBytes.contains(0x60), s"StartMeleeRules=${rules.declaredSizeBytes}")
 
     val codec = HttpRouteIrEmitter.compileCodec(root, IrEndian.Big, Some(32))
     assert(codec.isRight, codec)

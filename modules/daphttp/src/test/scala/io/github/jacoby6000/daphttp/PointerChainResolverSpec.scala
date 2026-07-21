@@ -20,7 +20,7 @@ class PointerChainResolverSpec extends AnyFunSuite {
         primitiveOverride = Some(IrPrimitive.U8)
       )
     ),
-    declaredSizeBits = None
+    declaredSizeBytes = None
   )
 
   private val chainPlan = PointerChainPlan(

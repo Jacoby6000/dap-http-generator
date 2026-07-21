@@ -14,7 +14,7 @@ class IrSizingWarningsSpec extends AnyFunSuite {
           members = List(
             member("value", IrType.Primitive(IrPrimitive.S32), staticAddress = Some(0x1000L))
           ),
-          declaredSizeBits = None
+          declaredSizeBytes = None
         )
       )
     )
@@ -32,7 +32,7 @@ class IrSizingWarningsSpec extends AnyFunSuite {
           members = List(
             member("value", IrType.Primitive(IrPrimitive.LongWord), staticAddress = Some(0x1000L))
           ),
-          declaredSizeBits = None
+          declaredSizeBytes = None
         )
       )
     )
@@ -50,7 +50,7 @@ class IrSizingWarningsSpec extends AnyFunSuite {
           members = List(
             member("value", IrType.Primitive(IrPrimitive.F32), staticAddress = Some(0x1000L))
           ),
-          declaredSizeBits = None
+          declaredSizeBytes = None
         )
       )
     )
@@ -68,7 +68,7 @@ class IrSizingWarningsSpec extends AnyFunSuite {
           members = List(
             member("value", IrType.Primitive(IrPrimitive.F64), staticAddress = Some(0x1000L))
           ),
-          declaredSizeBits = None
+          declaredSizeBytes = None
         )
       )
     )
@@ -91,7 +91,7 @@ class IrSizingWarningsSpec extends AnyFunSuite {
               primitiveOverride = Some(IrPrimitive.F16)
             )
           ),
-          declaredSizeBits = None
+          declaredSizeBytes = None
         )
       )
     )
@@ -112,7 +112,7 @@ class IrSizingWarningsSpec extends AnyFunSuite {
               primitiveOverride = Some(IrPrimitive.F32)
             )
           ),
-          declaredSizeBits = None
+          declaredSizeBytes = None
         )
       )
     )
@@ -133,7 +133,7 @@ class IrSizingWarningsSpec extends AnyFunSuite {
               primitiveOverride = Some(IrPrimitive.U32)
             )
           ),
-          declaredSizeBits = None
+          declaredSizeBytes = None
         )
       )
     )
@@ -155,7 +155,7 @@ class IrSizingWarningsSpec extends AnyFunSuite {
               primitiveOverride = Some(IrPrimitive.Char)
             )
           ),
-          declaredSizeBits = None
+          declaredSizeBytes = None
         )
       )
     )
@@ -175,7 +175,7 @@ class IrSizingWarningsSpec extends AnyFunSuite {
               staticAddress = Some(0x1000L)
             )
           ),
-          declaredSizeBits = None
+          declaredSizeBytes = None
         )
       )
     )
@@ -194,12 +194,12 @@ class IrSizingWarningsSpec extends AnyFunSuite {
               IrType.MemoryMappedStruct(
                 id = id("Info"),
                 members = List(member("value", IrType.Primitive(IrPrimitive.S32))),
-                declaredSizeBits = Some(4)
+                declaredSizeBytes = Some(4)
               ),
               staticAddress = Some(0x1000L)
             )
           ),
-          declaredSizeBits = None
+          declaredSizeBytes = None
         )
       )
     )

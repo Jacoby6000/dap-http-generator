@@ -179,7 +179,7 @@ class IrSmithyRoundTripSpec extends AnyFunSuite {
                   primitiveOverride = None
                 )
               ),
-              declaredSizeBits = None
+              declaredSizeBytes = None
             )
           )
         )

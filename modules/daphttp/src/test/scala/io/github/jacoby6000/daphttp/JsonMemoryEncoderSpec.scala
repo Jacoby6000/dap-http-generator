@@ -74,7 +74,7 @@ class JsonMemoryEncoderSpec extends AnyFunSuite {
           offsetBytes = Some(4)
         )
       ),
-      declaredSizeBits = Some(8)
+      declaredSizeBytes = Some(8)
     )
     val outer = IrType.MemoryMappedStruct(
       id = id("Outer"),
@@ -93,7 +93,7 @@ class JsonMemoryEncoderSpec extends AnyFunSuite {
           offsetBytes = Some(0x10)
         )
       ),
-      declaredSizeBits = Some(0x18 * 8)
+      declaredSizeBytes = Some(0x18)
     )
     val (_, _, offset) =
       JsonMemoryEncoder.resolveLeaf(outer, List("pos", "y"), Some(32)).fold(fail(_), identity)

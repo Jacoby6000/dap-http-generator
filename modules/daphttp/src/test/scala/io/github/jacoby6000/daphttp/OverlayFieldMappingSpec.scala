@@ -32,7 +32,7 @@ class OverlayFieldMappingSpec extends AnyFunSuite {
         member("ab", IrType.Primitive(IrPrimitive.U64)),
         member("tail", IrType.Primitive(IrPrimitive.U16))
       ),
-      declaredSizeBits = None
+      declaredSizeBytes = None
     )
     // a@0 size4, b@4 size4, c@8 size2 → ab@0 size8 overlaps a and b; tail@8 overlaps c
     val overA = OverlayFieldMapping.overlappingOverlaySpansInRange(overlay, 0, 4, Some(32))
@@ -52,14 +52,14 @@ class OverlayFieldMappingSpec extends AnyFunSuite {
         member("left", IrType.Primitive(IrPrimitive.U32)),
         member("right", IrType.Primitive(IrPrimitive.U32))
       ),
-      declaredSizeBits = None
+      declaredSizeBytes = None
     )
     val overlay = IrType.MemoryMappedStruct(
       id = id("Ov"),
       members = List(
         member("wide", IrType.Primitive(IrPrimitive.U64))
       ),
-      declaredSizeBits = None
+      declaredSizeBytes = None
     )
     val hits =
       OverlayFieldMapping.overlappingOverlaySpans(source, overlay, "left", Some(32))

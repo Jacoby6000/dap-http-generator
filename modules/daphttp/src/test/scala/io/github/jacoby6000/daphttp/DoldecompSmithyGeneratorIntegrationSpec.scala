@@ -675,7 +675,7 @@ class DoldecompSmithyGeneratorIntegrationSpec extends AnyFunSuite {
 
     assert(x0.target.isInstanceOf[IrType.Bitmask])
     assert(x0.target.asInstanceOf[IrType.Bitmask].members.size == 8)
-    assert(x0.target.asInstanceOf[IrType.Bitmask].declaredSizeBits.contains(8))
+    assert(x0.target.asInstanceOf[IrType.Bitmask].storageBits.contains(8))
     assert(isTeams.target == IrType.Primitive(IrPrimitive.Bool))
     assert(isTeams.layoutBitWidth.contains(8))
 
@@ -785,7 +785,7 @@ class DoldecompSmithyGeneratorIntegrationSpec extends AnyFunSuite {
         .get
       val root = generation.services.head.operations.head.output.members.head.target
         .asInstanceOf[IrType.MemoryMappedStruct]
-      assert(root.declaredSizeBits.contains(0x60), s"sizeof=${root.declaredSizeBits}")
+      assert(root.declaredSizeBytes.contains(0x60), s"sizeof=${root.declaredSizeBytes}")
       assert(root.members.find(_.name == "x6").flatMap(_.offsetBytes).contains(6))
       assert(root.members.find(_.name == "x20").flatMap(_.offsetBytes).contains(0x20))
       assert(root.members.find(_.name == "onUnpauseOverride").flatMap(_.offsetBytes).contains(0x38))
@@ -828,7 +828,7 @@ class DoldecompSmithyGeneratorIntegrationSpec extends AnyFunSuite {
 
     assert(aMember.offsetBytes.contains(0x00))
     assert(bMember.offsetBytes.contains(0x04))
-    assert(struct.declaredSizeBits.contains(8))
+    assert(struct.declaredSizeBytes.contains(8))
 
     val outputMember = generation.services.head.operations.head.output.members.head
     assert(outputMember.readSizeBytes.contains(0x08))
@@ -1030,7 +1030,7 @@ class DoldecompSmithyGeneratorIntegrationSpec extends AnyFunSuite {
           offsetBytes = Some(0)
         )
       ),
-      declaredSizeBits = Some(4)
+      declaredSizeBytes = Some(4)
     )
     val listType =
       IrType.ListType(
@@ -1056,7 +1056,7 @@ class DoldecompSmithyGeneratorIntegrationSpec extends AnyFunSuite {
           readSizeBytes = Some(8)
         )
       ),
-      declaredSizeBits = None
+      declaredSizeBytes = None
     )
     val services = List(
       IrService(
