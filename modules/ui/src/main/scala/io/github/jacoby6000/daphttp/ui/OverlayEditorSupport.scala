@@ -9,7 +9,6 @@ import io.github.jacoby6000.daphttp.TypeOverlayDocument
 import org.scalajs.dom
 import org.scalajs.dom.HTMLElement
 import org.scalajs.dom.HTMLInputElement
-import org.scalajs.dom.KeyboardEvent
 import org.scalajs.dom.MouseEvent
 
 import scala.concurrent.ExecutionContext.Implicits.global

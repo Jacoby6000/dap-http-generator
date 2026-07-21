@@ -11,26 +11,23 @@ import io.github.jacoby6000.daphttp.FieldFreshness
 import io.github.jacoby6000.daphttp.IndexPath
 import io.github.jacoby6000.daphttp.JsonPath
 import io.github.jacoby6000.daphttp.JsonPrimitiveDisplay
-import io.github.jacoby6000.daphttp.OverlayDocumentOps
 import io.github.jacoby6000.daphttp.OverlayMember
 import io.github.jacoby6000.daphttp.RouteTreeNode
 import io.github.jacoby6000.daphttp.RoutesResponse
 import io.github.jacoby6000.daphttp.TypeCatalogEntry
 import io.github.jacoby6000.daphttp.TypeOverlayDocument
-import io.github.jacoby6000.daphttp.WatchPathMatch
 import org.scalajs.dom
 import org.scalajs.dom.HTMLElement
 import org.scalajs.dom.HTMLInputElement
+import org.scalajs.dom.HttpMethod
 import org.scalajs.dom.KeyboardEvent
 import org.scalajs.dom.MouseEvent
 import org.scalajs.dom.RequestInit
-import org.scalajs.dom.HttpMethod
 
 import scala.annotation.unused
 import scala.concurrent.ExecutionContext.Implicits.global
 import scala.concurrent.Future
 import scala.scalajs.js
-import scala.scalajs.js.Thenable.Implicits._
 import scala.util.Failure
 import scala.util.Success
 import scala.util.Try

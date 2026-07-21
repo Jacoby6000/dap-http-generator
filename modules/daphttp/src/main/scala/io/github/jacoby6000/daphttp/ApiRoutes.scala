@@ -33,11 +33,12 @@ object ApiRoutes {
       dapClient: DapClient,
       overlaysRef: Ref[IO, OverlayEngine]
   ): HttpRoutes[IO] =
-    HttpRoutes.of[IO] { case request @ GET -> _ =>
-      val routePath = request.uri.path.renderString
-      if (!isDataPath(routePath)) {
-        NotFound(Json.obj("error" -> Json.fromString(s"No route generated for $routePath")))
-      } else {
+    HttpRoutes.of[IO] {
+      // DESNOTE(jbarber, 2026-07-21): Only claim `/api…` GETs. A catch-all `GET -> _` sat after
+      // WebAppRoutes and answered unknown paths (e.g. `/favicon.ico`, unmatched `/watches`) with
+      // "No route generated…", which looks like a missing IR route instead of an unknown URL.
+      case request @ GET -> _ if isDataPath(request.uri.path.renderString) =>
+        val routePath = request.uri.path.renderString
         for {
           result <- plansRef.get
           response <- RoutePathResolver.resolveForHttp(routePath, result.routes) match {
@@ -73,6 +74,5 @@ object ApiRoutes {
               )
           }
         } yield response
-      }
     }
 }

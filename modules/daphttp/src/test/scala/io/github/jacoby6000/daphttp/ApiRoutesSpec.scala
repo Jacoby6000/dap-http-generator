@@ -16,8 +16,11 @@ class ApiRoutesSpec extends AnyFunSuite {
 
   test("isDataPath recognizes /api routes only") {
     assert(ApiRoutes.isDataPath("/api/Foo/bar"))
+    assert(ApiRoutes.isDataPath("/api"))
     assert(!ApiRoutes.isDataPath("/health"))
     assert(!ApiRoutes.isDataPath("/routes"))
+    assert(!ApiRoutes.isDataPath("/watches"))
+    assert(!ApiRoutes.isDataPath("/favicon.ico"))
     assert(!ApiRoutes.isDataPath("/assets/main.js"))
   }
 }

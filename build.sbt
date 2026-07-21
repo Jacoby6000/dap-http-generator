@@ -47,11 +47,15 @@ lazy val ui = project
     scalaJSUseMainModuleInitializer := true,
     // DESNOTE(jbarber, 2026-07-18): Scala.js DOM / Promise interop is noisy under the JVM
     // module's strict -Xlint/-Wunused settings; keep those fatal warnings on the server.
+    // DESNOTE(jbarber, 2026-07-21): Keep `-Wunused:imports` after stripping the broader
+    // `-Wunused:…` bundle so scalafix OrganizeImports / RemoveUnused still run on UI
+    // (`scalafixAll --check` in CI).
     scalacOptions --= Seq(
       "-Xlint:_",
       "-Wunused:imports,patvars,privates,locals,explicits,implicits",
       "-Wvalue-discard"
     ),
+    scalacOptions += "-Wunused:imports",
     scalacOptions += "-P:scalajs:nowarnGlobalExecutionContext",
     libraryDependencies ++= Seq(
       "org.scala-js" %%% "scalajs-dom" % "2.8.0",
