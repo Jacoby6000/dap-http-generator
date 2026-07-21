@@ -329,7 +329,7 @@ class DapHttpIntegrationSpec extends AnyFunSuite {
           .withPort(Port.fromInt(0).get)
           .withHttpApp(
             DapHttpServerMain
-              .routes(plansRef, new DapHttpServerMain.SocketDapClient("127.0.0.1", dummyDap.port))
+              .routes(plansRef, new SocketDapClient("127.0.0.1", dummyDap.port))
               .orNotFound
           )
           .build
@@ -376,7 +376,7 @@ class DapHttpIntegrationSpec extends AnyFunSuite {
   test("connects to DAP on startup via background connection manager") {
     val dummyDap = new DummyDapServer(Map.empty)
     try {
-      val client = new DapHttpServerMain.SocketDapClient(
+      val client = new SocketDapClient(
         "127.0.0.1",
         dummyDap.port,
         dapConnectRetryMs = 50
@@ -389,7 +389,7 @@ class DapHttpIntegrationSpec extends AnyFunSuite {
   }
 
   private def eventuallyConnected(
-      client: DapHttpServerMain.SocketDapClient,
+      client: SocketDapClient,
       timeoutMs: Long = 5000L
   ): Unit = {
     val deadline = System.nanoTime() + timeoutMs * 1000000L
@@ -404,7 +404,7 @@ class DapHttpIntegrationSpec extends AnyFunSuite {
   test("reuses one DAP connection across continue and readMemory") {
     val dummyDap = new DummyDapServer(Map((0x1000L, 4) -> Array(0x01, 0x02, 0x03, 0x04)))
     try {
-      val client = new DapHttpServerMain.SocketDapClient("127.0.0.1", dummyDap.port)
+      val client = new SocketDapClient("127.0.0.1", dummyDap.port)
       val resumeResult =
         client.continueExecution().unsafeRunSync()(cats.effect.unsafe.IORuntime.global)
       val readResult =

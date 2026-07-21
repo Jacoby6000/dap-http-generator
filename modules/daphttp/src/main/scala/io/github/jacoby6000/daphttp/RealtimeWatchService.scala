@@ -50,7 +50,7 @@ final case class WatchBinding(
   * broadcasts JSON updates for WebSocket clients.
   */
 private[daphttp] final class RealtimeWatchService(
-    dapClient: DapHttpServerMain.DapClient,
+    dapClient: DapClient,
     plansRef: Ref[IO, RoutePlansLoadResult],
     overlaysRef: Ref[IO, OverlayEngine],
     bindingsRef: Ref[IO, Map[Int, WatchBinding]],
@@ -296,7 +296,7 @@ private[daphttp] final class RealtimeWatchService(
 
 private[daphttp] object RealtimeWatchService {
   def create(
-      dapClient: DapHttpServerMain.DapClient,
+      dapClient: DapClient,
       plansRef: Ref[IO, RoutePlansLoadResult],
       overlaysRef: Ref[IO, OverlayEngine]
   ): IO[RealtimeWatchService] =

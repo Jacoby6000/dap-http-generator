@@ -26,7 +26,7 @@ private[daphttp] final class LocalPipeDapClient(
     dapContinueTimeoutMs: Int = 30000,
     dapConnectTimeoutMs: Int = 1000,
     dapConnectRetryMs: Int = 5000
-) extends DapHttpServerMain.DapClient {
+) extends DapClient {
   private final class OwnedSession(val session: DapFramedSession, val release: IO[Unit])
 
   private val connectionLock = new AnyRef
@@ -85,39 +85,7 @@ private[daphttp] final class LocalPipeDapClient(
           java.lang.Long.toHexString(address),
           Integer.valueOf(sizeBytes)
         )
-        activeSession
-          .sendRequest(
-            command = "readMemory",
-            arguments = Some(
-              Json.obj(
-                "memoryReference" -> Json.fromString(f"0x$address%x"),
-                "count" -> Json.fromInt(sizeBytes)
-              )
-            ),
-            timeoutMs = dapTimeoutMs
-          )
-          .flatMap { body =>
-            body.hcursor
-              .downField("data")
-              .as[String]
-              .toOption
-              .toRight("DAP readMemory response did not include body.data.")
-          } match {
-          case Right(value) =>
-            DapHttpLoggers.dap.debug(
-              "readMemory address=0x{} succeeded bytes={}",
-              java.lang.Long.toHexString(address),
-              Integer.valueOf(sizeBytes)
-            )
-            Right(value)
-          case Left(error) =>
-            DapHttpLoggers.dap.warn(
-              "readMemory address=0x{} failed: {}",
-              java.lang.Long.toHexString(address),
-              error
-            )
-            Left(error)
-        }
+        FramedDapOps.readMemory(activeSession, address, sizeBytes, dapTimeoutMs)
       }
     }.handleError { error =>
       DapHttpLoggers.dap.warn(
@@ -136,38 +104,7 @@ private[daphttp] final class LocalPipeDapClient(
           path,
           java.lang.Long.toHexString(address)
         )
-        activeSession
-          .sendRequest(
-            command = "writeMemory",
-            arguments = Some(
-              Json.obj(
-                "memoryReference" -> Json.fromString(f"0x$address%x"),
-                "data" -> Json.fromString(dataBase64)
-              )
-            ),
-            timeoutMs = dapTimeoutMs
-          )
-          .flatMap { body =>
-            body.hcursor
-              .get[Int]("bytesWritten")
-              .toOption
-              .toRight("DAP writeMemory response did not include body.bytesWritten.")
-          } match {
-          case Right(written) =>
-            DapHttpLoggers.dap.debug(
-              "writeMemory address=0x{} succeeded bytesWritten={}",
-              java.lang.Long.toHexString(address),
-              Integer.valueOf(written)
-            )
-            Right(written)
-          case Left(error) =>
-            DapHttpLoggers.dap.warn(
-              "writeMemory address=0x{} failed: {}",
-              java.lang.Long.toHexString(address),
-              error
-            )
-            Left(error)
-        }
+        FramedDapOps.writeMemory(activeSession, address, dataBase64, dapTimeoutMs)
       }
     }.handleError { error =>
       DapHttpLoggers.dap.warn(
@@ -198,14 +135,8 @@ private[daphttp] final class LocalPipeDapClient(
         val threadIdIO = threadId match {
           case Some(id) => IO.pure(id)
           case None     =>
-            IO.interruptible(
-              activeSession.sendRequest(
-                command = "threads",
-                arguments = None,
-                timeoutMs = math.min(dapTimeoutMs, 2000)
-              )
-            ).timeout(math.min(dapTimeoutMs, 2000).millis)
-              .map(_.toOption.flatMap(json => parseThreadIds(json).headOption).getOrElse(1))
+            IO.interruptible(FramedDapOps.resolveThreadId(activeSession, dapTimeoutMs))
+              .timeout(math.min(dapTimeoutMs, 2000).millis)
               .handleError { _ =>
                 DapHttpLoggers.dap.debug("threads unavailable; continuing with threadId=1")
                 1
@@ -215,28 +146,12 @@ private[daphttp] final class LocalPipeDapClient(
         threadIdIO.flatMap { resolvedThreadId =>
           DapHttpLoggers.dap.info("continue pipe={}", path)
           IO.interruptible {
-            activeSession
-              .sendRequest(
-                command = "continue",
-                arguments = Some(Json.obj("threadId" -> Json.fromInt(resolvedThreadId))),
-                timeoutMs = dapContinueTimeoutMs
-              )
-              .map { response =>
-                DapHttpLoggers.dap.info(
-                  "continue threadId={} succeeded",
-                  Integer.valueOf(resolvedThreadId)
-                )
-                response
-              }
-              .left
-              .map { error =>
-                DapHttpLoggers.dap.warn(
-                  "continue threadId={} failed: {}",
-                  Integer.valueOf(resolvedThreadId),
-                  error
-                )
-                error
-              }
+            FramedDapOps.continueExecution(
+              activeSession,
+              Some(resolvedThreadId),
+              dapTimeoutMs,
+              dapContinueTimeoutMs
+            )
           }.timeout(dapContinueTimeoutMs.millis)
         }
       }
@@ -382,14 +297,6 @@ private[daphttp] final class LocalPipeDapClient(
         IO.unit
     }
 
-  private def parseThreadIds(responseBody: Json): List[Int] =
-    responseBody.hcursor
-      .downField("threads")
-      .values
-      .getOrElse(Vector.empty)
-      .flatMap(_.hcursor.downField("id").as[Int].toOption)
-      .toList
-
   private final class OpenedStreams(
       val in: InputStream,
       val out: OutputStream,
@@ -439,35 +346,4 @@ private[daphttp] final class LocalPipeDapClient(
     val normalized = pipePath.toString.replace('/', '\\').toLowerCase
     normalized.startsWith("""\\.\pipe\""") || normalized.startsWith("""\\?\pipe\""")
   }
-}
-
-private[daphttp] object DapClients {
-  def create(
-      dapPipe: Option[Path],
-      dapHost: String,
-      dapPort: Int,
-      dapTimeoutMs: Int,
-      dapContinueTimeoutMs: Int,
-      dapConnectTimeoutMs: Int,
-      dapConnectRetryMs: Int
-  ): DapHttpServerMain.DapClient =
-    dapPipe match {
-      case Some(path) =>
-        new LocalPipeDapClient(
-          path,
-          dapTimeoutMs,
-          dapContinueTimeoutMs,
-          dapConnectTimeoutMs,
-          dapConnectRetryMs
-        )
-      case None =>
-        new DapHttpServerMain.SocketDapClient(
-          dapHost,
-          dapPort,
-          dapTimeoutMs,
-          dapContinueTimeoutMs,
-          dapConnectTimeoutMs,
-          dapConnectRetryMs
-        )
-    }
 }

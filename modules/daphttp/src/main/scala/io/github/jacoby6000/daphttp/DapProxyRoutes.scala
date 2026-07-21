@@ -24,7 +24,7 @@ private[daphttp] object DapProxyRoutes {
 
   def routes(
       plansRef: Ref[IO, RoutePlansLoadResult],
-      dapClient: DapHttpServerMain.DapClient,
+      dapClient: DapClient,
       overlaysRef: Ref[IO, OverlayEngine]
   ): HttpRoutes[IO] =
     HttpRoutes.of[IO] {
@@ -205,7 +205,7 @@ private[daphttp] object DapProxyRoutes {
       useOverlay: Boolean,
       address: Long,
       value: Json,
-      dapClient: DapHttpServerMain.DapClient
+      dapClient: DapClient
   ): IO[Response[IO]] = {
     val typeIndex = TypeOverlay.buildTypeIndex(services)
     val shapeIdOpt =

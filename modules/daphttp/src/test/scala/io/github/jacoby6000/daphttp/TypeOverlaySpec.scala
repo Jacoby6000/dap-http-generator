@@ -323,7 +323,7 @@ class TypeOverlaySpec extends AnyFunSuite {
       (0x1000L + i) -> (0x10 + i).toByte
     }.toMap
 
-    val dapClient = new DapHttpServerMain.DapClient {
+    val dapClient = new DapClient {
       override def readMemory(address: Long, sizeBytes: Int): IO[Either[String, String]] =
         IO {
           val bytes = (0 until sizeBytes).map { i =>

@@ -632,7 +632,7 @@ class DoldecompSmithyGeneratorIntegrationSpec extends AnyFunSuite {
     def readBytes(address: Long, sizeBytes: Int): Array[Byte] =
       (0 until sizeBytes).map(offset => memory.getOrElse(address + offset, 0.toByte)).toArray
 
-    val dapClient = new DapHttpServerMain.DapClient {
+    val dapClient = new DapClient {
       override def readMemory(address: Long, sizeBytes: Int): IO[Either[String, String]] =
         IO.pure(Right(Base64.getEncoder.encodeToString(readBytes(address, sizeBytes))))
 
@@ -964,7 +964,7 @@ class DoldecompSmithyGeneratorIntegrationSpec extends AnyFunSuite {
     def readBytes(address: Long, sizeBytes: Int): Array[Byte] =
       (0 until sizeBytes).map(offset => memory.getOrElse(address + offset, 0.toByte)).toArray
 
-    val dapClient = new DapHttpServerMain.DapClient {
+    val dapClient = new DapClient {
       override def readMemory(address: Long, sizeBytes: Int): IO[Either[String, String]] =
         IO.pure(Right(Base64.getEncoder.encodeToString(readBytes(address, sizeBytes))))
 
@@ -1090,7 +1090,7 @@ class DoldecompSmithyGeneratorIntegrationSpec extends AnyFunSuite {
     storePointer(0x80400000L, 0x80001000L)
     storePointer(0x80400004L, 0x80001010L)
 
-    val dapClient = new DapHttpServerMain.DapClient {
+    val dapClient = new DapClient {
       override def readMemory(address: Long, sizeBytes: Int): IO[Either[String, String]] =
         IO.pure(
           Right(

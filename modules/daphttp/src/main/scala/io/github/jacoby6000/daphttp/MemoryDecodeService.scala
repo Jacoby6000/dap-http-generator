@@ -74,7 +74,7 @@ private[daphttp] object MemoryDecodeService {
   /** Read one memory region and decode source (+ optional overlay) JSON. */
   def readAndDecode(
       region: Region,
-      dapClient: DapHttpServerMain.DapClient,
+      dapClient: DapClient,
       overlaysRef: Ref[IO, OverlayEngine],
       resolveAndAnnotate: (
           Option[IrType],
@@ -82,7 +82,7 @@ private[daphttp] object MemoryDecodeService {
           Long,
           Int,
           IrEndian,
-          DapHttpServerMain.DapClient
+          DapClient
       ) => IO[Json],
       decodeOverlay: (
           OverlayEngine.PreparedCodec,
@@ -90,7 +90,7 @@ private[daphttp] object MemoryDecodeService {
           Long,
           Int,
           IrEndian,
-          DapHttpServerMain.DapClient
+          DapClient
       ) => IO[Json]
   ): IO[Outcome] =
     if (region.sourceSizeBytes <= 0)

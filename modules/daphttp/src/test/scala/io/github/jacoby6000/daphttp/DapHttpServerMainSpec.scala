@@ -410,7 +410,7 @@ class DapHttpServerMainSpec extends AnyFunSuite {
     import org.http4s.implicits._
 
     val resumed = new java.util.concurrent.atomic.AtomicBoolean(false)
-    val dapClient = new DapHttpServerMain.DapClient {
+    val dapClient = new DapClient {
       override def readMemory(address: Long, sizeBytes: Int): IO[Either[String, String]] =
         IO.pure(Right(""))
 
@@ -445,7 +445,7 @@ class DapHttpServerMainSpec extends AnyFunSuite {
     import software.amazon.smithy.model.shapes.ShapeId
 
     val written = new java.util.concurrent.atomic.AtomicReference[(Long, String)](null)
-    val dapClient = new DapHttpServerMain.DapClient {
+    val dapClient = new DapClient {
       override def readMemory(address: Long, sizeBytes: Int): IO[Either[String, String]] =
         IO.pure(Right(""))
 

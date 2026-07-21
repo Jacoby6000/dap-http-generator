@@ -101,8 +101,8 @@ class ComplexStructValidationSpec extends AnyFunSuite {
     mem.toMap
   }
 
-  private def mockDapClient(memory: Map[Long, Byte]): DapHttpServerMain.DapClient =
-    new DapHttpServerMain.DapClient {
+  private def mockDapClient(memory: Map[Long, Byte]): DapClient =
+    new DapClient {
       override def readMemory(
           address: Long,
           sizeBytes: Int

@@ -37,7 +37,9 @@ Run with `sbt "run <subcommand> ..."`. Standard build/lint/test commands are doc
 
 ### DAP transport notes
 
-- TCP client: `DapHttpServerMain.SocketDapClient`. Pipe/socket client: `LocalPipeDapClient`.
+- TCP client: `SocketDapClient`. Pipe/socket client: `LocalPipeDapClient`. Shared framed
+  request/response helpers live in `FramedDapOps`; each transport keeps its own connect and
+  locking policy (JVM monitor vs cats-effect `Mutex`).
 - Sessions are persistent and handshake with DAP `initialize`. Outbound requests are serialized;
   a background reader thread demuxes responses by `request_seq` and forwards
   `dolphin_memoryChanged` events while idle (required for realtime watches).

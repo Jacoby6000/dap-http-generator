@@ -30,7 +30,7 @@ object ApiRoutes {
 
   private[daphttp] def routes(
       plansRef: Ref[IO, RoutePlansLoadResult],
-      dapClient: DapHttpServerMain.DapClient,
+      dapClient: DapClient,
       overlaysRef: Ref[IO, OverlayEngine]
   ): HttpRoutes[IO] =
     HttpRoutes.of[IO] { case request @ GET -> _ =>
