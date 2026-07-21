@@ -16,7 +16,6 @@ import software.amazon.smithy.model.Model
 import java.nio.file.Files
 import java.nio.file.Path
 import scala.concurrent.duration._
-import scala.jdk.CollectionConverters._
 import scala.util.Try
 
 object Cli
@@ -244,21 +243,8 @@ object Cli
         DapHttpServerMain.buildRoutePlansFromModel(model)
     }
 
-  private def loadModel(paths: List[Path]): Either[List[String], Model] = {
-    val smithyFiles = paths.flatMap(collectSmithyFiles).distinct
-    val traitsPath = SmithyIrEmitter.dapHttpTraitsPath
-    val assembler = Model.assembler()
-    if (Files.exists(traitsPath)) {
-      assembler.addImport(traitsPath.toString)
-    }
-    smithyFiles.foreach(path => assembler.addImport(path.toString))
-    val result = assembler.assemble()
-    if (result.isBroken) {
-      Left(result.getValidationEvents.asScala.map(_.toString).toList)
-    } else {
-      Right(result.unwrap())
-    }
-  }
+  private def loadModel(paths: List[Path]): Either[List[String], Model] =
+    SmithyModelLoader.load(paths)
 
   private def loadCHeaderPlans(
       symbolsPath: Path,
@@ -353,27 +339,6 @@ object Cli
       DapHttpLoggers.irSourceDoldecomp.info("Wrote diagnostics report to {}", written)
     }
 
-  private def collectSmithyFiles(path: Path): List[Path] = {
-    if (!Files.exists(path)) {
-      Nil
-    } else if (Files.isRegularFile(path) && path.toString.endsWith(".smithy")) {
-      List(path)
-    } else if (Files.isDirectory(path)) {
-      val stream = Files.walk(path)
-      try {
-        stream
-          .iterator()
-          .asScala
-          .filter(p => Files.isRegularFile(p) && p.toString.endsWith(".smithy"))
-          .toList
-      } finally {
-        stream.close()
-      }
-    } else {
-      Nil
-    }
-  }
-
   private def runServer(
       config: ServerConfig,
       plans: RoutePlansLoadResult,
@@ -448,7 +413,7 @@ object Cli
   ): IO[Unit] = {
     def newestTimestamp: Long =
       paths
-        .flatMap(collectSmithyFiles)
+        .flatMap(SmithyModelLoader.collectSmithyFiles)
         .flatMap(path => Try(Files.getLastModifiedTime(path).toMillis).toOption)
         .sorted
         .lastOption

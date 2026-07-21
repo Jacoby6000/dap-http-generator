@@ -240,7 +240,7 @@ class DapHttpIntegrationSpec extends AnyFunSuite {
   test("decodes DAP memory payloads through generated http routes") {
     val model = Model
       .assembler()
-      .addImport("src/main/smithy/dap-http-traits.smithy")
+      .addImport(SmithyIrEmitter.dapHttpTraitsPath.toString)
       .addUnparsedModel(
         "integration.smithy",
         """$version: "2"

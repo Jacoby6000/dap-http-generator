@@ -309,6 +309,31 @@ object IrLayout {
         Some(1)
     }
 
+  /** Bit width used by codecs / bitfield packing (Bool is 1 bit).
+    *
+    * Distinct from [[primitiveSizeBytes]] which is ABI/storage bytes (Bool is 1 byte).
+    */
+  def bitsForPrimitive(kind: IrPrimitive, wordSize: Option[Int]): Option[Int] =
+    kind match {
+      case IrPrimitive.Bool     => Some(1)
+      case IrPrimitive.Char     => Some(8)
+      case IrPrimitive.U8       => Some(8)
+      case IrPrimitive.S8       => Some(8)
+      case IrPrimitive.U16      => Some(16)
+      case IrPrimitive.S16      => Some(16)
+      case IrPrimitive.U32      => Some(32)
+      case IrPrimitive.S32      => Some(32)
+      case IrPrimitive.U64      => Some(64)
+      case IrPrimitive.S64      => Some(64)
+      case IrPrimitive.U128     => Some(128)
+      case IrPrimitive.S128     => Some(128)
+      case IrPrimitive.F8       => Some(8)
+      case IrPrimitive.F16      => Some(16)
+      case IrPrimitive.F32      => Some(32)
+      case IrPrimitive.F64      => Some(64)
+      case IrPrimitive.LongWord => wordSize.orElse(Some(64))
+    }
+
   private def primitiveSizeBytes(
       kind: IrPrimitive,
       wordSize: Option[Int],

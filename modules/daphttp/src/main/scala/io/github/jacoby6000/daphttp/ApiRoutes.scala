@@ -40,43 +40,37 @@ object ApiRoutes {
       } else {
         for {
           result <- plansRef.get
-          response <- DapHttpServerMain.matchRoutePublic(routePath, result.routes) match {
-            case Some((routePlan, chainSegments)) if chainSegments.nonEmpty =>
+          response <- RoutePathResolver.resolveForHttp(routePath, result.routes) match {
+            case Some(ResolvedDataPath.PointerChain(routePlan, chainSegments)) =>
               DapHttpServerMain.servePointerChainRoute(
                 routePlan,
                 chainSegments,
                 dapClient,
                 overlaysRef
               )
-            case Some((routePlan, _)) =>
+            case Some(ResolvedDataPath.Root(routePlan)) =>
               DapHttpServerMain.serveRoutePlan(routePlan, dapClient, overlaysRef)
+            case Some(ResolvedDataPath.MemberSub(_, subRoute, index)) =>
+              DapHttpServerMain.serveMemberSubRoute(
+                routePath,
+                subRoute,
+                index,
+                dapClient,
+                overlaysRef
+              )
+            case Some(ResolvedDataPath.NestedMember(resolved)) =>
+              DapHttpServerMain.serveResolvedMember(
+                routePath,
+                resolved,
+                dapClient,
+                overlaysRef
+              )
             case None =>
-              DapHttpServerMain.matchMemberSubRoutePublic(routePath, result.routes) match {
-                case Some((_, subRoute, index)) =>
-                  DapHttpServerMain.serveMemberSubRoute(
-                    routePath,
-                    subRoute,
-                    index,
-                    dapClient,
-                    overlaysRef
-                  )
-                case None =>
-                  MemberPathResolver.resolve(routePath, result.routes) match {
-                    case Some(resolved) =>
-                      DapHttpServerMain.serveResolvedMember(
-                        routePath,
-                        resolved,
-                        dapClient,
-                        overlaysRef
-                      )
-                    case None =>
-                      NotFound(
-                        Json.obj(
-                          "error" -> Json.fromString(s"No route generated for $routePath")
-                        )
-                      )
-                  }
-              }
+              NotFound(
+                Json.obj(
+                  "error" -> Json.fromString(s"No route generated for $routePath")
+                )
+              )
           }
         } yield response
       }

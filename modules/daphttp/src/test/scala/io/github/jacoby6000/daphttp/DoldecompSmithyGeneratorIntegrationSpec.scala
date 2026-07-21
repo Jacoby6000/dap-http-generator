@@ -218,7 +218,7 @@ class DoldecompSmithyGeneratorIntegrationSpec extends AnyFunSuite {
       SmithyIrEmitter.emit(original).fold(errors => fail(errors.mkString("\n")), identity)
     val model = Model
       .assembler()
-      .addImport("src/main/smithy/dap-http-traits.smithy")
+      .addImport(SmithyIrEmitter.dapHttpTraitsPath.toString)
       .addUnparsedModel("offsets.smithy", smithyText)
       .assemble()
       .unwrap()

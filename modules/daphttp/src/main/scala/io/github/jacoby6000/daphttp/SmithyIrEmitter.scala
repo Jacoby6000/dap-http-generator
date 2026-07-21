@@ -18,13 +18,12 @@ import software.amazon.smithy.model.traits.Trait
 
 import java.nio.file.Files
 import java.nio.file.Path
-import java.nio.file.Paths
 import java.util.function.Consumer
 import scala.jdk.CollectionConverters._
 
 object SmithyIrEmitter {
   private val TraitsNamespace = "com.jacoby6000.daphttp"
-  private val TraitsPath = Paths.get("src/main/smithy/dap-http-traits.smithy")
+  private def TraitsPath: Path = SmithyModelLoader.traitsPath
   private val BytesShapeId = ShapeId.from(s"$TraitsNamespace#Bytes")
   private val BitsShapeId = ShapeId.from(s"$TraitsNamespace#Bits")
 
@@ -86,7 +85,7 @@ object SmithyIrEmitter {
     Model.assembler().addImport(TraitsPath.toString).assemble().unwrap()
 
   def dapHttpTraitsModel: Model = traitsModel
-  def dapHttpTraitsPath: Path = TraitsPath
+  def dapHttpTraitsPath: Path = SmithyModelLoader.traitsPath
 
   private def validateModel(model: Model): Either[List[String], Model] = {
     val result = Model.assembler().addModel(model).assemble()

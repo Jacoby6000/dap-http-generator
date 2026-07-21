@@ -4,11 +4,10 @@ import org.scalatest.funsuite.AnyFunSuite
 import software.amazon.smithy.model.Model
 import software.amazon.smithy.model.shapes.ShapeId
 
-import java.nio.file.Paths
 import scala.jdk.CollectionConverters._
 
 class IrSmithyRoundTripSpec extends AnyFunSuite {
-  private val traitsPath = Paths.get("src/main/smithy/dap-http-traits.smithy")
+  private val traitsPath = SmithyIrEmitter.dapHttpTraitsPath
 
   test("losslessly round trips nested dap structs, lists, unions, and maps") {
     assertLosslessSmithyRoundTrip(

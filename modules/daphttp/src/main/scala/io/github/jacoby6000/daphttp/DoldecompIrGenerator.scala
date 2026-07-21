@@ -437,11 +437,13 @@ object DoldecompIrGenerator {
             if (isStructType(resolved)) {
               Some(irStructSizeBytes(buildStruct(resolved), wordSizeBits))
             } else if (isEnumType(resolved) || isEnumType(typeName)) {
-              bitsForPrimitive(IrPrimitive.S32, Some(wordSizeBits))
+              IrLayout
+                .bitsForPrimitive(IrPrimitive.S32, Some(wordSizeBits))
                 .map(bits => math.ceil(bits.toDouble / 8d).toInt)
             } else {
               primitiveForType(resolved).flatMap { kind =>
-                bitsForPrimitive(kind, Some(wordSizeBits))
+                IrLayout
+                  .bitsForPrimitive(kind, Some(wordSizeBits))
                   .map(bits => math.ceil(bits.toDouble / 8d).toInt)
               }
             }
@@ -895,7 +897,7 @@ object DoldecompIrGenerator {
   }
 
   private def primitiveStorageBits(normalizedType: String, wordSizeBits: Int): Option[Int] =
-    primitiveForType(normalizedType).flatMap(bitsForPrimitive(_, Some(wordSizeBits)))
+    primitiveForType(normalizedType).flatMap(IrLayout.bitsForPrimitive(_, Some(wordSizeBits)))
 
   private def toBitmaskMember(
       namespace: String,
@@ -1265,27 +1267,6 @@ object DoldecompIrGenerator {
         .packStruct(struct, Some(wordSizeBits))
         .map(_.declaredSizeBits.getOrElse(0))
         .getOrElse(0)
-    }
-
-  private def bitsForPrimitive(kind: IrPrimitive, wordSize: Option[Int]): Option[Int] =
-    kind match {
-      case IrPrimitive.Bool     => Some(1)
-      case IrPrimitive.Char     => Some(8)
-      case IrPrimitive.U8       => Some(8)
-      case IrPrimitive.S8       => Some(8)
-      case IrPrimitive.U16      => Some(16)
-      case IrPrimitive.S16      => Some(16)
-      case IrPrimitive.U32      => Some(32)
-      case IrPrimitive.S32      => Some(32)
-      case IrPrimitive.U64      => Some(64)
-      case IrPrimitive.S64      => Some(64)
-      case IrPrimitive.U128     => Some(128)
-      case IrPrimitive.S128     => Some(128)
-      case IrPrimitive.F8       => Some(8)
-      case IrPrimitive.F16      => Some(16)
-      case IrPrimitive.F32      => Some(32)
-      case IrPrimitive.F64      => Some(64)
-      case IrPrimitive.LongWord => wordSize.orElse(Some(64))
     }
 
   private final case class HeaderFile(path: Path, raw: String, cdtSource: String) {

@@ -8,7 +8,7 @@ import java.nio.file.Paths
 import scala.jdk.CollectionConverters._
 
 class SmithyIrEmitterSpec extends AnyFunSuite {
-  private val traitsPath = Paths.get("src/main/smithy/dap-http-traits.smithy")
+  private val traitsPath = SmithyIrEmitter.dapHttpTraitsPath
 
   test("emits Smithy that assembles and round-trips doldecomp IR") {
     val fixtureRoot = Paths.get("src/test/resources/doldecomp-fixture")

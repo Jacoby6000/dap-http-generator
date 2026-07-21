@@ -200,19 +200,17 @@ private[daphttp] final class RealtimeWatchService(
       case None =>
         IO.pure(None)
       case Some((watchBytes, decoded)) =>
-        overlaysRef.get.flatMap { engine =>
-          val fieldUpdates = decodeOverlayFields(binding, watchBytes)
-          decodeFullOverlay(binding, watchBytes, engine).map { fullOverlay =>
-            Some(
-              WatchUpdate(
-                watchId = binding.watchId,
-                path = binding.path,
-                decoded = decoded,
-                overlayDecoded = fullOverlay,
-                overlayFieldUpdates = fieldUpdates
-              )
+        val fieldUpdates = decodeOverlayFields(binding, watchBytes)
+        decodeFullOverlay(binding, watchBytes).map { fullOverlay =>
+          Some(
+            WatchUpdate(
+              watchId = binding.watchId,
+              path = binding.path,
+              decoded = decoded,
+              overlayDecoded = fullOverlay,
+              overlayFieldUpdates = fieldUpdates
             )
-          }
+          )
         }
     }
 
@@ -244,8 +242,7 @@ private[daphttp] final class RealtimeWatchService(
 
   private def decodeFullOverlay(
       binding: WatchBinding,
-      watchBytes: Array[Byte],
-      engine: OverlayEngine
+      watchBytes: Array[Byte]
   ): IO[Option[Json]] =
     // Full-struct overlay decode only when the watch covers the root read (no field mapping).
     if (binding.overlayFields.nonEmpty || binding.path != binding.parentPath)
@@ -255,26 +252,31 @@ private[daphttp] final class RealtimeWatchService(
         case None =>
           IO.pure(None)
         case Some(irType) =>
-          val (_, prep) = engine.prepare(irType, binding.endian, binding.wordSizeBits)
-          prep match {
-            case None =>
-              IO.pure(None)
-            case Some(prepared) =>
-              IO.delay {
-                val take = math.min(watchBytes.length, prepared.sizeBytes)
-                prepared.codec
-                  .decode(BitVector(java.util.Arrays.copyOf(watchBytes, take)))
-                  .toOption
-                  .map { result =>
-                    HttpRouteIrEmitter.annotateDecodedAddresses(
-                      prepared.irType,
-                      result.value,
-                      binding.address,
-                      binding.wordSizeBits
-                    )
-                  }
-              }
-          }
+          // DESNOTE(jbarber, 2026-07-21): Persist prepare() cache via Ref.modify; a prior
+          // get+local prepare discarded updated OverlayEngine state on every watch event.
+          overlaysRef
+            .modify { engine =>
+              engine.prepare(irType, binding.endian, binding.wordSizeBits)
+            }
+            .flatMap {
+              case None =>
+                IO.pure(None)
+              case Some(prepared) =>
+                IO.delay {
+                  val take = math.min(watchBytes.length, prepared.sizeBytes)
+                  prepared.codec
+                    .decode(BitVector(java.util.Arrays.copyOf(watchBytes, take)))
+                    .toOption
+                    .map { result =>
+                      HttpRouteIrEmitter.annotateDecodedAddresses(
+                        prepared.irType,
+                        result.value,
+                        binding.address,
+                        binding.wordSizeBits
+                      )
+                    }
+                }
+            }
       }
 
   private def clearAllLocal: IO[Unit] =
@@ -334,9 +336,9 @@ private[daphttp] object WatchPathResolver {
       path: String,
       routes: Map[String, RoutePlan],
       overlayEngine: OverlayEngine = OverlayEngine.empty
-  ): Either[String, WatchTarget] = {
-    DapHttpServerMain.matchRoutePublic(path, routes) match {
-      case Some((plan, Nil)) =>
+  ): Either[String, WatchTarget] =
+    RoutePathResolver.resolveForWatch(path, routes).flatMap {
+      case ResolvedDataPath.Root(plan) =>
         plan.reads.headOption match {
           case Some(read) =>
             read.decodeCodec match {
@@ -360,22 +362,17 @@ private[daphttp] object WatchPathResolver {
           case None =>
             Left(s"Route $path has no readable memory plan.")
         }
-      case Some((_, _ :: _)) =>
-        Left(s"Pointer-chain path $path cannot be watched directly; open a concrete index first.")
-      case None =>
-        MemberPathResolver.resolve(path, routes) match {
-          case None =>
-            Left(s"No route generated for $path")
-          case Some(resolved) =>
-            resolveResolvedMember(
-              path,
-              resolved,
-              routes.get(resolved.parentPath),
-              overlayEngine
-            )
-        }
+      case ResolvedDataPath.NestedMember(resolved) =>
+        resolveResolvedMember(
+          path,
+          resolved,
+          routes.get(resolved.parentPath),
+          overlayEngine
+        )
+      case ResolvedDataPath.PointerChain(_, _) | ResolvedDataPath.MemberSub(_, _, _) =>
+        // DESNOTE(jbarber, 2026-07-21): resolveForWatch never returns these; kept exhaustive.
+        Left(s"No route generated for $path")
     }
-  }
 
   private def resolveResolvedMember(
       path: String,

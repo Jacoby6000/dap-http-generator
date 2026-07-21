@@ -250,7 +250,7 @@ class ComplexStructValidationSpec extends AnyFunSuite {
     val smithyText = SmithyIrEmitter.emit(ir).fold(errors => fail(errors.mkString("\n")), identity)
     val model = Model
       .assembler()
-      .addImport("src/main/smithy/dap-http-traits.smithy")
+      .addImport(SmithyIrEmitter.dapHttpTraitsPath.toString)
       .addUnparsedModel("complex.smithy", smithyText)
       .assemble()
       .unwrap()
@@ -275,7 +275,7 @@ class ComplexStructValidationSpec extends AnyFunSuite {
     val smithyText = SmithyIrEmitter.emit(ir).fold(errors => fail(errors.mkString("\n")), identity)
     val model = Model
       .assembler()
-      .addImport("src/main/smithy/dap-http-traits.smithy")
+      .addImport(SmithyIrEmitter.dapHttpTraitsPath.toString)
       .addUnparsedModel("complex.smithy", smithyText)
       .assemble()
       .unwrap()
@@ -504,7 +504,7 @@ class ComplexStructValidationSpec extends AnyFunSuite {
     val smithyText = SmithyIrEmitter.emit(ir).fold(errors => fail(errors.mkString("\n")), identity)
     val model = Model
       .assembler()
-      .addImport("src/main/smithy/dap-http-traits.smithy")
+      .addImport(SmithyIrEmitter.dapHttpTraitsPath.toString)
       .addUnparsedModel("complex.smithy", smithyText)
       .assemble()
       .unwrap()
@@ -549,7 +549,7 @@ class ComplexStructValidationSpec extends AnyFunSuite {
     val smithyText = SmithyIrEmitter.emit(ir).fold(errors => fail(errors.mkString("\n")), identity)
     val model = Model
       .assembler()
-      .addImport("src/main/smithy/dap-http-traits.smithy")
+      .addImport(SmithyIrEmitter.dapHttpTraitsPath.toString)
       .addUnparsedModel("complex.smithy", smithyText)
       .assemble()
       .unwrap()
@@ -710,7 +710,7 @@ class ComplexStructValidationSpec extends AnyFunSuite {
     val smithyText = SmithyIrEmitter.emit(ir).fold(errors => fail(errors.mkString("\n")), identity)
     val model = Model
       .assembler()
-      .addImport("src/main/smithy/dap-http-traits.smithy")
+      .addImport(SmithyIrEmitter.dapHttpTraitsPath.toString)
       .addUnparsedModel("complex.smithy", smithyText)
       .assemble()
       .unwrap()

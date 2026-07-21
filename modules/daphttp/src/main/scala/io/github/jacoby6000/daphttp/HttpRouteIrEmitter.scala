@@ -517,11 +517,11 @@ object HttpRouteIrEmitter {
       case struct: IrType.Struct =>
         structureSizeBytes(struct, wordSize, errors)
       case intEnum: IrType.IntEnum =>
-        bitsForPrimitive(intEnum.underlying, wordSize).map(bits =>
-          math.ceil(bits.toDouble / 8d).toInt
-        )
+        IrLayout
+          .bitsForPrimitive(intEnum.underlying, wordSize)
+          .map(bits => math.ceil(bits.toDouble / 8d).toInt)
       case IrType.Primitive(kind) =>
-        bitsForPrimitive(kind, wordSize).map(bits => math.ceil(bits.toDouble / 8d).toInt)
+        IrLayout.bitsForPrimitive(kind, wordSize).map(bits => math.ceil(bits.toDouble / 8d).toInt)
       case _: IrType.FunctionPointer =>
         wordSize.map(_ / 8)
       case _ =>
@@ -696,9 +696,7 @@ object HttpRouteIrEmitter {
       wordSize: Option[Int],
       errors: ListBuffer[String]
   ): Option[Int] =
-    member.readSizeBytes.orElse {
-      memberBitWidth(member, wordSize, errors).map(bits => math.ceil(bits.toDouble / 8d).toInt)
-    }
+    IrLayout.memberSizeBytes(member, wordSize, errors)
 
   private def memberBitWidth(
       member: IrMember,
@@ -709,7 +707,7 @@ object HttpRouteIrEmitter {
       if (member.isPointer && member.isArray) {
         member.arrayLength
           .flatMap { length =>
-            bitsForPrimitive(IrPrimitive.LongWord, wordSize).map(_ * length)
+            IrLayout.bitsForPrimitive(IrPrimitive.LongWord, wordSize).map(_ * length)
           }
           .orElse {
             errors += s"${member.id}: Pointer arrays must declare @length."
@@ -723,12 +721,12 @@ object HttpRouteIrEmitter {
           None
         }
       } else {
-        member.primitiveOverride.flatMap(bitsForPrimitive(_, wordSize)).orElse {
+        member.primitiveOverride.flatMap(IrLayout.bitsForPrimitive(_, wordSize)).orElse {
           member.target match {
             case IrType.Primitive(kind) =>
-              bitsForPrimitive(kind, wordSize)
+              IrLayout.bitsForPrimitive(kind, wordSize)
             case intEnum: IrType.IntEnum =>
-              bitsForPrimitive(intEnum.underlying, wordSize)
+              IrLayout.bitsForPrimitive(intEnum.underlying, wordSize)
             case listType: IrType.ListType =>
               listBitWidth(member, listType, wordSize, errors)
             case nestedStruct: IrType.Struct =>
@@ -928,7 +926,7 @@ object HttpRouteIrEmitter {
     if (isPointerArray) {
       member.arrayLength
         .flatMap { length =>
-          bitsForPrimitive(IrPrimitive.LongWord, wordSize).map(_ * length)
+          IrLayout.bitsForPrimitive(IrPrimitive.LongWord, wordSize).map(_ * length)
         }
         .orElse {
           errors += s"${member.id}: Pointer arrays must declare @length."
@@ -959,34 +957,12 @@ object HttpRouteIrEmitter {
 
   private def listElementBitWidth(elementType: IrType, wordSize: Option[Int]): Option[Int] = {
     elementType match {
-      case IrType.Primitive(kind)      => bitsForPrimitive(kind, wordSize)
-      case intEnum: IrType.IntEnum     => bitsForPrimitive(intEnum.underlying, wordSize)
+      case IrType.Primitive(kind)      => IrLayout.bitsForPrimitive(kind, wordSize)
+      case intEnum: IrType.IntEnum     => IrLayout.bitsForPrimitive(intEnum.underlying, wordSize)
       case nestedStruct: IrType.Struct =>
         structureSizeBytes(nestedStruct, wordSize, ListBuffer.empty).map(_ * 8)
       case _ =>
         None
-    }
-  }
-
-  private def bitsForPrimitive(kind: IrPrimitive, wordSize: Option[Int]): Option[Int] = {
-    kind match {
-      case IrPrimitive.Bool     => Some(1)
-      case IrPrimitive.Char     => Some(8)
-      case IrPrimitive.U8       => Some(8)
-      case IrPrimitive.S8       => Some(8)
-      case IrPrimitive.U16      => Some(16)
-      case IrPrimitive.S16      => Some(16)
-      case IrPrimitive.U32      => Some(32)
-      case IrPrimitive.S32      => Some(32)
-      case IrPrimitive.U64      => Some(64)
-      case IrPrimitive.S64      => Some(64)
-      case IrPrimitive.U128     => Some(128)
-      case IrPrimitive.S128     => Some(128)
-      case IrPrimitive.F8       => Some(8)
-      case IrPrimitive.F16      => Some(16)
-      case IrPrimitive.F32      => Some(32)
-      case IrPrimitive.F64      => Some(64)
-      case IrPrimitive.LongWord => wordSize.orElse(Some(64))
     }
   }
 
@@ -1241,7 +1217,7 @@ object HttpRouteIrEmitter {
       None
     }
     val elementCodec = compilePrimitiveCodec(IrPrimitive.LongWord, endian, wordSize)
-    val elementWidth = bitsForPrimitive(IrPrimitive.LongWord, wordSize)
+    val elementWidth = IrLayout.bitsForPrimitive(IrPrimitive.LongWord, wordSize)
     (length, elementCodec, elementWidth) match {
       case (Some(count), Some(codec), Some(width)) =>
         val strideBits = arrayElementStrideBits(member, width)
@@ -1365,7 +1341,7 @@ object HttpRouteIrEmitter {
       endian: IrEndian,
       wordSize: Option[Int]
   ): Option[Codec[Json]] = {
-    bitsForPrimitive(IrPrimitive.LongWord, wordSize).map { bitWidth =>
+    IrLayout.bitsForPrimitive(IrPrimitive.LongWord, wordSize).map { bitWidth =>
       val paramStr = fp.params.map(p => s"${p.typeName} ${p.name}").mkString(", ")
       val prefix = s"<function ${fp.name}($paramStr) @ 0x"
       bits(bitWidth.toLong).xmap[Json](
@@ -1387,7 +1363,7 @@ object HttpRouteIrEmitter {
       endian: IrEndian,
       wordSize: Option[Int]
   ): Option[Codec[Json]] = {
-    bitsForPrimitive(kind, wordSize).map { bitWidth =>
+    IrLayout.bitsForPrimitive(kind, wordSize).map { bitWidth =>
       primitiveCodec(kind, bitWidth, endian)
     }
   }
@@ -1397,7 +1373,7 @@ object HttpRouteIrEmitter {
       endian: IrEndian,
       wordSize: Option[Int]
   ): Option[Codec[Json]] = {
-    bitsForPrimitive(intEnum.underlying, wordSize).map { bitWidth =>
+    IrLayout.bitsForPrimitive(intEnum.underlying, wordSize).map { bitWidth =>
       val namesByValue = intEnum.values.foldLeft(Map.empty[Int, String]) { (acc, enumValue) =>
         if (acc.contains(enumValue.value)) acc else acc + (enumValue.value -> enumValue.name)
       }

@@ -111,6 +111,9 @@ flowchart LR
   (`io.github.jacoby6000.daphttp.Cli`). HTTP routes compose as
   `DapProxyRoutes <+> WebAppRoutes <+> ApiRoutes` (DAP runtime under `/dap-proxy`,
   explorer/catalog/watches/ws at the root, generated data under `/api`).
+  Path matching for GET/watches lives in `RoutePathResolver`; single-region DAP
+  read/decode is shared via `MemoryDecodeService`. Smithy assembly is
+  `SmithyModelLoader` (used by Cli and `DapHttpServerMain`).
 - **ui (Scala.js)** — browser explorer under `modules/ui/`; `Compile / resourceGenerators`
   copies `fastOptJS` + `index.html` into `web/` resources served at `/` and `/assets/main.js`.
   The explorer keeps the full `/routes` catalog in memory but only renders search results in the

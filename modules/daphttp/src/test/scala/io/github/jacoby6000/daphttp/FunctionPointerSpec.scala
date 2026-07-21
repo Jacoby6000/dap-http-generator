@@ -205,7 +205,7 @@ class FunctionPointerSpec extends AnyFunSuite {
       SmithyIrEmitter.emit(fnptrIr.services).fold(errors => fail(errors.mkString("\n")), identity)
     val model = Model
       .assembler()
-      .addImport("src/main/smithy/dap-http-traits.smithy")
+      .addImport(SmithyIrEmitter.dapHttpTraitsPath.toString)
       .addUnparsedModel("fnptr.smithy", smithyText)
       .assemble()
       .unwrap()
