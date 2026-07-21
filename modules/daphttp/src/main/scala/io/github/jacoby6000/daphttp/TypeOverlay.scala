@@ -112,39 +112,65 @@ object TypeOverlay {
       errors += s"$context: member names must be unique."
   }
 
-  def buildTypeIndex(services: List[IrService]): Map[ShapeId, IrType] = {
+  def buildTypeIndex(services: List[IrService]): Map[ShapeId, IrType] =
+    buildTypeCatalog(services).types
+
+  /** First-seen owning service for each shape id (same visit order as [[buildTypeIndex]]). */
+  def buildServiceOwners(services: List[IrService]): Map[ShapeId, IrService] =
+    buildTypeCatalog(services).owners
+
+  final case class TypeCatalog(
+      types: Map[ShapeId, IrType],
+      owners: Map[ShapeId, IrService]
+  )
+
+  def buildTypeCatalog(services: List[IrService]): TypeCatalog = {
     val index = mutable.Map.empty[ShapeId, IrType]
-    def visit(tpe: IrType): Unit =
+    val owners = mutable.Map.empty[ShapeId, IrService]
+    def visit(service: IrService, tpe: IrType): Unit =
       tpe match {
         case s: IrType.Struct =>
           if (!index.contains(s.id)) {
             index(s.id) = s
-            s.members.foreach(m => visit(m.target))
+            owners(s.id) = service
+            s.members.foreach(m => visit(service, m.target))
           }
         case e: IrType.IntEnum =>
-          index(e.id) = e
+          if (!index.contains(e.id)) {
+            index(e.id) = e
+            owners(e.id) = service
+          }
         case list: IrType.ListType =>
-          index(list.id) = list
-          visit(list.element)
+          if (!index.contains(list.id)) {
+            index(list.id) = list
+            owners(list.id) = service
+            visit(service, list.element)
+          }
         case union: IrType.Union =>
-          index(union.id) = union
-          union.members.foreach(m => visit(m.target))
+          if (!index.contains(union.id)) {
+            index(union.id) = union
+            owners(union.id) = service
+            union.members.foreach(m => visit(service, m.target))
+          }
         case mapType: IrType.MapType =>
-          index(mapType.id) = mapType
-          visit(mapType.key)
-          visit(mapType.value)
-        case IrType.Ref(id) =>
+          if (!index.contains(mapType.id)) {
+            index(mapType.id) = mapType
+            owners(mapType.id) = service
+            visit(service, mapType.key)
+            visit(service, mapType.value)
+          }
+        case IrType.Ref(_) =>
           ()
         case _ =>
           ()
       }
     services.foreach { service =>
       service.operations.foreach { op =>
-        visit(op.output)
-        op.pointerChain.foreach(pc => visit(pc.pointeeType))
+        visit(service, op.output)
+        op.pointerChain.foreach(pc => visit(service, pc.pointeeType))
       }
     }
-    index.toMap
+    TypeCatalog(index.toMap, owners.toMap)
   }
 
   def catalog(

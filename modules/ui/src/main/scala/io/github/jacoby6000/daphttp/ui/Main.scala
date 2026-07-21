@@ -10,9 +10,8 @@ import io.github.jacoby6000.daphttp.DualDecodeAlign
 import io.github.jacoby6000.daphttp.FetchableRoutePath
 import io.github.jacoby6000.daphttp.IndexPath
 import io.github.jacoby6000.daphttp.JsonPath
+import io.github.jacoby6000.daphttp.OverlayDocumentOps
 import io.github.jacoby6000.daphttp.OverlayMember
-import io.github.jacoby6000.daphttp.OverlayNewStruct
-import io.github.jacoby6000.daphttp.OverlayStructDef
 import io.github.jacoby6000.daphttp.RouteTreeNode
 import io.github.jacoby6000.daphttp.RoutesResponse
 import io.github.jacoby6000.daphttp.TypeCatalogEntry
@@ -2213,14 +2212,7 @@ object Main {
       setEditorStatus(s"Loaded ${draftMembers.size} field(s).", ok = true)
     }
 
-    overlays.structs
-      .get(structId)
-      .map(_.members)
-      .orElse(
-        overlays.newStructs
-          .find(ns => ns.id == structId || s"overlay#${ns.id}" == structId)
-          .map(_.members)
-      ) match {
+    OverlayDocumentOps.membersForStruct(overlays, structId) match {
       case Some(members) =>
         applyMembers(members)
       case None =>
@@ -2407,24 +2399,15 @@ object Main {
     val structId = inputById("edit-struct").value.trim
     if (structId.isEmpty) {
       setEditorStatus("Select a struct to edit.", ok = false)
-    } else if (draftMembers.isEmpty || draftMembers.exists(_.name.trim.isEmpty)) {
-      setEditorStatus("Each field needs a non-empty name.", ok = false)
-    } else if (draftMembers.exists(_.typeId.trim.isEmpty)) {
-      setEditorStatus("Each field needs a typeId.", ok = false)
     } else {
-      editingStructId = Some(structId)
-      persistActiveTabDraft()
-      val updatedStructs =
-        overlays.structs + (structId -> OverlayStructDef(draftMembers))
-      val updatedNew =
-        overlays.newStructs.map { ns =>
-          val fullId = if (ns.id.contains("#")) ns.id else s"overlay#${ns.id}"
-          if (fullId == structId || ns.id == structId)
-            ns.copy(members = draftMembers)
-          else ns
-        }
-      val next = overlays.copy(structs = updatedStructs, newStructs = updatedNew)
-      putOverlays(next)
+      OverlayDocumentOps.validateDraftMembers(draftMembers) match {
+        case Some(err) =>
+          setEditorStatus(err, ok = false)
+        case None =>
+          editingStructId = Some(structId)
+          persistActiveTabDraft()
+          putOverlays(OverlayDocumentOps.applyStructMembers(overlays, structId, draftMembers))
+      }
     }
   }
 
@@ -2433,24 +2416,21 @@ object Main {
       case None =>
         setEditorStatus("Select a struct to reset.", ok = false)
       case Some(structId) =>
-        val next = overlays.copy(structs = overlays.structs - structId)
-        putOverlays(next)
+        putOverlays(OverlayDocumentOps.removeStructOverlay(overlays, structId))
     }
   }
 
   private def createNewStruct(): Unit = {
     val raw = inputById("new-struct-id").value.trim
-    if (raw.isEmpty) {
-      setEditorStatus("Enter a name for the new struct.", ok = false)
-    } else {
-      val id = if (raw.contains("#")) raw else s"overlay#$raw"
-      if (overlays.newStructs.exists(ns => ns.id == raw || ns.id == id)) {
-        setEditorStatus(s"$id already exists.", ok = false)
-      } else {
-        val members = List(OverlayMember("field0", "u8", isArray = false, None, false))
-        val next = overlays.copy(
-          newStructs = overlays.newStructs :+ OverlayNewStruct(id, members)
-        )
+    OverlayDocumentOps.addNewStruct(
+      overlays,
+      raw,
+      List(OverlayMember("field0", "u8", isArray = false, None, false))
+    ) match {
+      case Left(err) =>
+        setEditorStatus(err, ok = false)
+      case Right((next, id)) =>
+        val members = next.newStructs.find(_.id == id).map(_.members).getOrElse(Nil)
         overlays = next
         typeCatalog = typeCatalog :+ TypeCatalogEntry(
           id,
@@ -2466,7 +2446,6 @@ object Main {
         renderTypeDatalists()
         renderFieldEditor()
         setEditorStatus(s"Created $id — edit fields then Apply.", ok = true)
-      }
     }
   }
 

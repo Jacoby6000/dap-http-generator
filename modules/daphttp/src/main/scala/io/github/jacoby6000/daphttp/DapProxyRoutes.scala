@@ -207,7 +207,8 @@ private[daphttp] object DapProxyRoutes {
       value: Json,
       dapClient: DapClient
   ): IO[Response[IO]] = {
-    val typeIndex = TypeOverlay.buildTypeIndex(services)
+    val catalog = TypeOverlay.buildTypeCatalog(services)
+    val typeIndex = catalog.types
     val shapeIdOpt =
       try {
         Some(
@@ -218,9 +219,7 @@ private[daphttp] object DapProxyRoutes {
         case _: IllegalArgumentException => None
       }
     val owningService = shapeIdOpt
-      .flatMap { shapeId =>
-        services.find(svc => TypeOverlay.buildTypeIndex(List(svc)).contains(shapeId))
-      }
+      .flatMap(catalog.owners.get)
       .orElse(services.headOption)
     val wordSize = owningService.flatMap(_.wordSizeBits)
     val endian = owningService.map(_.defaultEndian).getOrElse(IrEndian.Big)

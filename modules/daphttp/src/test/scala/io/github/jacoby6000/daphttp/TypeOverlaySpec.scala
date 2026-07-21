@@ -94,8 +94,9 @@ class TypeOverlaySpec extends AnyFunSuite {
   )
 
   test("catalog omits fields by default; fieldsFor returns descriptors") {
-    val typeIndex = TypeOverlay.buildTypeIndex(services)
-    assert(typeIndex.contains(id("PadDemo")))
+    val catalog = TypeOverlay.buildTypeCatalog(services)
+    assert(catalog.types.contains(id("PadDemo")))
+    assert(catalog.owners.get(id("PadDemo")).map(_.name).contains("Api"))
     val entry = TypeOverlay
       .catalog(services, TypeOverlayDocument.empty)
       .find(_.id == id("PadDemo").toString)
