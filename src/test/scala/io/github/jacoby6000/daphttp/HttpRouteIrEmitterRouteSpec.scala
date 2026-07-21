@@ -236,4 +236,93 @@ class HttpRouteIrEmitterRouteSpec extends AnyFunSuite {
       annotated.hcursor.downField("b").downField("_address").as[String].toOption.contains("0x1004")
     )
   }
+
+  test("root-level array reads expose indexed element subroutes") {
+    val slot = IrType.MemoryMappedStruct(
+      id = id("StaticPlayer"),
+      members = List(
+        IrMember(
+          id = id("StaticPlayer_x"),
+          name = "x",
+          target = IrType.Primitive(IrPrimitive.U32),
+          staticAddress = None,
+          paddingRepeats = None,
+          isPointer = false,
+          isArray = false,
+          arrayLength = None,
+          endianOverride = None,
+          primitiveOverride = Some(IrPrimitive.U32),
+          offsetBytes = Some(0)
+        )
+      ),
+      declaredSizeBits = Some(4)
+    )
+    val list = IrType.ListType(
+      id = id("PlayerSlotsArray"),
+      element = slot,
+      bytesAlias = false,
+      bitsAlias = false
+    )
+    val output = IrType.EnclosingStruct(
+      id = id("PlayerSlotsOutput"),
+      members = List(
+        IrMember(
+          id = id("PlayerSlotsOutput_value"),
+          name = "value",
+          target = list,
+          staticAddress = Some(0x80453080L),
+          paddingRepeats = None,
+          isPointer = false,
+          isArray = true,
+          arrayLength = Some(6),
+          endianOverride = None,
+          primitiveOverride = None,
+          readSizeBytes = Some(24)
+        )
+      ),
+      declaredSizeBits = None
+    )
+    val result = HttpRouteIrEmitter.emitRoutePlansFromIr(
+      List(
+        IrService(
+          name = "MasterHand",
+          wordSizeBits = Some(32),
+          defaultEndian = IrEndian.Big,
+          operations = List(
+            IrOperation(
+              name = "GetPlayerSlots",
+              routePath = "/MasterHand/player_slots",
+              output = output
+            )
+          )
+        )
+      )
+    )
+    assert(result.errors.isEmpty)
+    val plan = result.routes("/api/MasterHand/player_slots")
+    val rootArray = plan.memberSubRoutes.find(_.memberName == MemberSubRoute.RootArrayMemberName)
+    assert(rootArray.isDefined)
+    assert(rootArray.get.isArray)
+    assert(rootArray.get.arrayLength.contains(6))
+
+    val tree = RouteTree.fromPlans(result.routes)
+    val root = tree.find(_.path == "/api/MasterHand/player_slots").get
+    val elementPaths = root.children.flatMap(_.children).map(_.path).toSet
+    assert(elementPaths.contains("/api/MasterHand/player_slots/0"))
+    assert(elementPaths.contains("/api/MasterHand/player_slots/5"))
+    assert(root.children.flatMap(_.children).forall(_.fetchable))
+
+    val matched =
+      DapHttpServerMain.matchMemberSubRoutePublic("/api/MasterHand/player_slots/3", result.routes)
+    assert(matched.isDefined)
+    assert(matched.get._3.contains(3))
+
+    val nested = DapHttpServerMain.resolveMemberPathPublic(
+      "/api/MasterHand/player_slots/3/x",
+      result.routes
+    )
+    assert(nested.isDefined)
+    assert(nested.get.address == 0x80453080L + 3 * 4)
+    assert(nested.get.sizeBytes == 4)
+  }
 }

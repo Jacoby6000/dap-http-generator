@@ -38,7 +38,9 @@ object RouteTree {
       val rootAddress = plan.reads.headOption.map(_.address)
       val memberChildren = plan.memberSubRoutes.sortBy(_.memberName).flatMap { sub =>
         val memberAddress = Some(sub.baseAddress + sub.memberOffsetBytes.toLong)
-        if (sub.isArray) {
+        if (sub.isArray && sub.memberName == MemberSubRoute.RootArrayMemberName) {
+          rootArrayChildren(basePath, sub, memberAddress)
+        } else if (sub.isArray) {
           val length = sub.arrayLength.getOrElse(0)
           val elements =
             if (length > 0)
@@ -121,12 +123,45 @@ object RouteTree {
         s"$basePath/$suffix"
       }
       val memberRoutes = plan.memberSubRoutes.flatMap { sub =>
-        if (sub.isArray) s"$basePath/${sub.memberName}/{index}" :: Nil
+        if (sub.isArray && sub.memberName == MemberSubRoute.RootArrayMemberName)
+          s"$basePath/{index}" :: Nil
+        else if (sub.isArray) s"$basePath/${sub.memberName}/{index}" :: Nil
         else s"$basePath/${sub.memberName}" :: Nil
       }
       chainRoutes ++ memberRoutes
     }
     (roots ++ extras).distinct.sorted
+  }
+
+  private def rootArrayChildren(
+      basePath: String,
+      sub: MemberSubRoute,
+      memberAddress: Option[Long]
+  ): List[RouteTreeNode] = {
+    val length = sub.arrayLength.getOrElse(0)
+    val elements =
+      if (length > 0)
+        (0 until length).map { i =>
+          RouteTreeNode(
+            path = s"$basePath/$i",
+            kind = "arrayElement",
+            fetchable = true,
+            index = Some(i),
+            arrayLength = sub.arrayLength,
+            address = memberAddress.map(_ + i.toLong * elementStride(sub))
+          )
+        }.toList
+      else Nil
+    List(
+      RouteTreeNode(
+        path = s"$basePath/{index}",
+        kind = "array",
+        fetchable = false,
+        arrayLength = sub.arrayLength,
+        address = memberAddress,
+        children = elements
+      )
+    )
   }
 
   private def memberKind(sub: MemberSubRoute): String =

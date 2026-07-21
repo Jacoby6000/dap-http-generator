@@ -177,6 +177,16 @@ object TypeOverlayDocumentUi {
   }
 }
 
+final case class OpenTab(
+    path: String,
+    decodeType: Option[String] = None,
+    editingStructId: Option[String] = None,
+    draftMembers: List[OverlayMemberUi] = Nil,
+    editorOpen: Boolean = false,
+    indexTemplate: Option[String] = None,
+    indexValues: List[Int] = Nil
+)
+
 object Main {
   private var catalog: List[RouteTreeNode] = Nil
   private var visible: List[RouteTreeNode] = Nil
@@ -188,31 +198,61 @@ object Main {
   private var activeQuery: String = ""
   private var typeCatalog: List[TypeCatalogEntry] = Nil
   private var overlays: TypeOverlayDocumentUi = TypeOverlayDocumentUi.empty
+
+  /** Open workspace tabs (insertion order). */
+  private val openTabs = scala.collection.mutable.LinkedHashMap.empty[String, OpenTab]
+
+  /** Active tab path — drives decode/editor panes and watch repaint targeting. */
+  private var activeTabPath: Option[String] = None
+
+  // Working copies for the active tab (synced via saveActiveTabDraft / restoreActiveTabEditor).
   private var editingStructId: Option[String] = None
   private var draftMembers: List[OverlayMemberUi] = Nil
   private var lastDecodeType: Option[String] = None
   private var editorOpen: Boolean = false
 
-  /** Global counter bumped on every successful memory refresh (full or per-field). */
-  private var refreshCount: Int = 0
+  /** Json-pointer path → epoch ms when that subtree was last refreshed. */
+  private val fieldFreshAt = scala.collection.mutable.Map.empty[String, Double]
 
-  /** Json-pointer path → `refreshCount` when that subtree was last refreshed. */
-  private val fieldFreshAt = scala.collection.mutable.Map.empty[String, Int]
+  /** Most recent successful memory update time (epoch ms). */
+  private var latestDataTime: Double = js.Date.now()
 
   private val fieldLoading = scala.collection.mutable.Set.empty[String]
-  private var detailViewPath: Option[String] = None
   private var cachedFetchablePaths: Set[String] = Set.empty
 
   /** Expanded JSON composite paths (`stampKey`) — collapsed nodes are not built in the DOM. */
   private val jsonExpanded = scala.collection.mutable.Set.empty[String]
 
-  private val MaxRefreshAge = 10
+  /** Dual-view `.jv-line` / value nodes by stampKey — watch updates patch these in place. */
+  private val dualLineByStamp = scala.collection.mutable.Map.empty[String, HTMLElement]
+  private val dualValueByStamp = scala.collection.mutable.Map.empty[String, HTMLElement]
+
+  /** Coalesce rapid watch patches into one rAF flush (avoids multi-kHz DOM work). Value is a set of
+    * focus keys (`""` = whole tree, else `seg/seg` under the base path).
+    */
+  private val pendingPatchFocus =
+    scala.collection.mutable.Map.empty[String, scala.collection.mutable.Set[String]]
+  private var patchRafScheduled = false
+
+  /** Active realtime watches: HTTP path → server watchId. */
+  private val activeWatches = scala.collection.mutable.Map.empty[String, Int]
+
+  /** Source watch path → overlay JSON segment paths co-watched via byte-range overlap. */
+  private val watchOverlaySegments =
+    scala.collection.mutable.Map.empty[String, List[List[String]]]
+
+  private var watchSocket: Option[dom.WebSocket] = None
+
+  /** Soft ceiling: fields older than this (relative to latest data / now) look distinctly muted. */
+  private val StaleAfterMs = 60_000.0
 
   /** Template path containing `{index}` slots currently being browsed. */
   private var indexTemplate: Option[String] = None
 
   /** Current index values for `indexTemplate` (or concrete indexed path). */
   private var indexValues: List[Int] = Nil
+
+  private def detailViewPath: Option[String] = activeTabPath
 
   def main(@unused args: Array[String]): Unit = {
     byId("reload-tree").onclick = (_: MouseEvent) => loadCatalog()
@@ -226,6 +266,8 @@ object Main {
       renderResults()
       showIdleDetail()
     }
+    byId("expand-tree").onclick = (_: MouseEvent) => expandAllTree()
+    byId("collapse-tree").onclick = (_: MouseEvent) => collapseAllTree()
     byId("refresh-visible").onclick = (_: MouseEvent) => refreshVisible()
     val input = searchInput()
     input.onkeydown = { (e: KeyboardEvent) =>
@@ -241,6 +283,7 @@ object Main {
     byId("overlay-add-field").onclick = (_: MouseEvent) => {
       syncDraftFromDom()
       draftMembers = draftMembers :+ OverlayMemberUi("field", "u8", isArray = false, None, false)
+      persistActiveTabDraft()
       renderFieldEditor()
     }
     byId("create-struct").onclick = (_: MouseEvent) => createNewStruct()
@@ -257,6 +300,8 @@ object Main {
     byId("index-next").onclick = (_: MouseEvent) => stepIndex(1)
     loadCatalog()
     loadTypesAndOverlays()
+    connectWatchSocket()
+    js.timers.setInterval(2000)(refreshVisibleAgeStyles())
   }
 
   private def loadTypesAndOverlays(): Unit = {
@@ -287,7 +332,10 @@ object Main {
             }.toSet
             byId("route-count").textContent = s"${response.routes.size} routes"
             if (response.errors.nonEmpty)
-              setBanner(Some(s"IR warnings/errors: ${response.errors.mkString("; ")}"))
+              showToast(
+                "IR warnings / errors",
+                response.errors.mkString("\n")
+              )
             if (activeQuery.nonEmpty) runSearch(activeQuery)
             else {
               visible = Nil
@@ -315,8 +363,8 @@ object Main {
       showIdleDetail()
     } else {
       visible = filterCatalog(catalog, query)
+      // Search results start fully collapsed; Expand all / per-node twists open branches.
       expanded.clear()
-      visible.foreach(n => expanded.add(n.path))
       renderResults()
       if (visible.isEmpty) {
         byId("detail-empty").removeAttribute("hidden")
@@ -375,6 +423,18 @@ object Main {
     else Try(java.lang.Long.parseUnsignedLong(hex, 16)).toOption
   }
 
+  private def expandAllTree(): Unit = {
+    collectNodes(visible).foreach { n =>
+      if (n.children.nonEmpty) expanded.add(n.path)
+    }
+    renderResults()
+  }
+
+  private def collapseAllTree(): Unit = {
+    expanded.clear()
+    renderResults()
+  }
+
   private def refreshVisible(): Unit = {
     val paths = collectNodes(visible).collect {
       case n if n.fetchable && (expanded.contains(n.path) || n.children.isEmpty) =>
@@ -395,14 +455,22 @@ object Main {
           loadErrors.update(path, decodeErrorMessage(json))
           selected = Some(path)
           renderResults()
-          showErrorDetail(path, decodeErrorMessage(json))
+          // Errors do not open tabs — keep tree error badge; leave workspace as-is.
+          if (openTabs.isEmpty) showErrorDetail(path, decodeErrorMessage(json))
           setIndexStatus(s"End of chain / decode failed at $path", ok = false)
         } else {
           payloads.update(path, json)
-          selected = Some(path)
           bumpRefreshFreshness(path, extractDecoded(json), extractOverlayDecoded(json))
+          val openedNew = !openTabs.contains(path)
+          if (openedNew) {
+            selected = Some(path)
+            openOrFocusTab(path)
+            showDetail(path, json)
+          } else if (activeTabPath.contains(path)) {
+            selected = Some(path)
+            showDetail(path, json)
+          }
           renderResults()
-          showDetail(path, json)
           setIndexStatus(s"Loaded $path", ok = true)
         }
       case Failure(err) =>
@@ -410,7 +478,7 @@ object Main {
         loadErrors.update(path, err.getMessage)
         selected = Some(path)
         renderResults()
-        showErrorDetail(path, err.getMessage)
+        if (openTabs.isEmpty) showErrorDetail(path, err.getMessage)
         setIndexStatus(err.getMessage, ok = false)
     }
   }
@@ -464,13 +532,16 @@ object Main {
   private def renderNode(node: RouteTreeNode): HTMLElement = {
     val li = el("li")
     val row = el("div")
-    val selectedClass = if (selected.contains(node.path)) " selected" else ""
+    val selectedClass =
+      if (activeTabPath.contains(node.path) || selected.contains(node.path)) " selected"
+      else ""
     row.className = "node" + selectedClass
 
     val twist = el("span")
     twist.className = if (node.children.isEmpty) "twist empty" else "twist"
     val isOpen = expanded.contains(node.path)
-    twist.textContent = if (node.children.isEmpty) "·" else if (isOpen) "▼" else "▶"
+    // Keep an empty width gutter for leaves; do not insert a · placeholder glyph.
+    twist.textContent = if (node.children.isEmpty) "" else if (isOpen) "▼" else "▶"
     if (node.children.nonEmpty) {
       twist.onclick = { (e: MouseEvent) =>
         e.stopPropagation()
@@ -495,23 +566,40 @@ object Main {
     statusBadge(node.path).foreach(label.appendChild)
     label.onclick = { (_: MouseEvent) =>
       selected = Some(node.path)
+      val concrete = concretePathForSelection(node.path)
       resolveIndexBrowse(node.path) match {
         case Some((template, indices)) =>
-          indexTemplate = Some(template)
-          indexValues = indices
-          renderIndexBar()
-        case None =>
-          clearIndexBrowse()
-      }
-      payloads.get(concretePathForSelection(node.path)) match {
-        case Some(json) => showDetail(concretePathForSelection(node.path), json)
-        case None       =>
-          loadErrors.get(concretePathForSelection(node.path)) match {
-            case Some(msg) => showErrorDetail(concretePathForSelection(node.path), msg)
-            case None      =>
-              if (node.path.contains("{index}")) showIndexPrompt(node.path)
-              else showPlaceholder(node.path)
+          if (openTabs.contains(concrete)) {
+            updateActiveTabIndex(concrete, Some(template), indices)
+          } else {
+            indexTemplate = Some(template)
+            indexValues = indices
+            renderIndexBar()
           }
+        case None =>
+          if (!openTabs.contains(concrete)) clearIndexBrowse()
+      }
+      if (openTabs.contains(concrete)) {
+        activateTab(concrete)
+        payloads.get(concrete).foreach(showDetail(concrete, _))
+      } else {
+        payloads.get(concrete) match {
+          case Some(_) =>
+            // Tab was closed; require ↻ to reopen (successful load opens tabs).
+            setIndexStatus(s"$concrete — press ↻ to reopen tab", ok = true)
+          case None =>
+            loadErrors.get(concrete) match {
+              case Some(msg) =>
+                if (openTabs.isEmpty) showErrorDetail(concrete, msg)
+                else setIndexStatus(msg, ok = false)
+              case None =>
+                if (openTabs.isEmpty) {
+                  if (node.path.contains("{index}")) showIndexPrompt(node.path)
+                  else showPlaceholder(node.path)
+                } else
+                  setIndexStatus(s"$concrete — press ↻ to fetch", ok = true)
+            }
+        }
       }
       renderResults()
     }
@@ -561,16 +649,21 @@ object Main {
     } else None
 
   private def showDetail(path: String, json: Json): Unit = {
-    val empty = byId("detail-empty")
-    val body = byId("detail-body")
-    empty.setAttribute("hidden", "true")
-    body.removeAttribute("hidden")
+    ensureWorkspaceVisible()
     byId("editor-panel").removeAttribute("hidden")
-    setEditorOpen(editorOpen)
+
+    val tab = openTabs.getOrElse(path, OpenTab(path))
+    openTabs.update(path, tab)
+    if (!activeTabPath.contains(path)) {
+      saveActiveTabDraft()
+      activeTabPath = Some(path)
+      restoreWorkingCopies(tab)
+    }
 
     resolveIndexBrowse(path).foreach { case (template, indices) =>
       indexTemplate = Some(template)
       indexValues = indices
+      persistActiveTabDraft()
       renderIndexBar()
     }
 
@@ -589,51 +682,61 @@ object Main {
       .downField("overlayDecoded")
       .focus
       .orElse(json.hcursor.downField("overlayDecoded").focus)
-    lastDecodeType = readCursor
+    val decodeType = readCursor
       .get[String]("decodeType")
       .toOption
       .orElse(json.hcursor.get[String]("decodeType").toOption)
+    lastDecodeType = decodeType
+    decodeType.foreach { id =>
+      openTabs.update(path, openTabs.getOrElse(path, OpenTab(path)).copy(decodeType = Some(id)))
+    }
 
     byId("detail-path").textContent = path
-    detailViewPath = Some(path)
-    // Cached payload with no stamps for this view yet: treat as fresh without bumping.
-    if (!fieldFreshAt.contains(stampKey(path, Nil))) {
-      fieldFreshAt.update(stampKey(path, Nil), refreshCount)
+    val now = js.Date.now()
+    if (!fieldFreshAt.contains(stampKey(path, Nil, overlayPanel = false))) {
+      fieldFreshAt.update(stampKey(path, Nil, overlayPanel = false), now)
     }
-    setJsonView("detail-decoded", decoded, rootOpen = true, basePath = path)
-    overlayDecoded match {
-      case Some(overlay) => setJsonView("detail-overlay", overlay, rootOpen = true, basePath = path)
-      case None          => setPlainView("detail-overlay", "No overlay applied for this type.")
+    if (
+      overlayDecoded.isDefined &&
+      !fieldFreshAt.contains(stampKey(path, Nil, overlayPanel = true))
+    ) {
+      fieldFreshAt.update(stampKey(path, Nil, overlayPanel = true), now)
     }
+    setDualDecodeView(path, decoded, overlayDecoded)
 
-    lastDecodeType.foreach { id =>
-      editingStructId = Some(id)
-      inputById("edit-struct").value = id
-      loadDraftForStruct(id)
+    setEditorOpen(editorOpen)
+    decodeType.foreach { id =>
+      val current = openTabs.getOrElse(path, OpenTab(path))
+      if (current.editingStructId.isEmpty && current.draftMembers.isEmpty) {
+        editingStructId = Some(id)
+        inputById("edit-struct").value = id
+        persistActiveTabDraft()
+        loadDraftForStruct(id)
+      } else {
+        inputById("edit-struct").value = editingStructId.getOrElse(id)
+        renderFieldEditor()
+      }
     }
+    renderTabBar()
   }
 
   private def showErrorDetail(path: String, message: String): Unit = {
+    // Only used when no tabs are open (failed first load).
     val empty = byId("detail-empty")
     val body = byId("detail-body")
-    empty.setAttribute("hidden", "true")
-    body.removeAttribute("hidden")
-    byId("editor-panel").setAttribute("hidden", "true")
-    resolveIndexBrowse(path).foreach { case (template, indices) =>
-      indexTemplate = Some(template)
-      indexValues = indices
-      renderIndexBar()
-    }
-    byId("detail-path").textContent = path
-    detailViewPath = Some(path)
-    setPlainView("detail-decoded", s"Error: $message", error = true)
-    setPlainView("detail-overlay", "")
+    val tabBar = byId("tab-bar")
+    empty.removeAttribute("hidden")
+    empty.textContent = s"Error loading $path: $message"
+    body.setAttribute("hidden", "true")
+    tabBar.classList.remove("has-tabs")
+    tabBar.innerHTML = ""
   }
 
   private def showPlaceholder(path: String): Unit = {
     val empty = byId("detail-empty")
     val body = byId("detail-body")
     body.setAttribute("hidden", "true")
+    byId("tab-bar").classList.remove("has-tabs")
     empty.removeAttribute("hidden")
     empty.textContent = s"$path — press ↻ to fetch."
   }
@@ -645,13 +748,173 @@ object Main {
     body.removeAttribute("hidden")
     byId("editor-panel").setAttribute("hidden", "true")
     byId("detail-path").textContent = path
-    detailViewPath = Some(path)
-    setPlainView(
-      "detail-decoded",
-      "Set index values below, then Fetch (or press ↻). Use Prev/Next to walk the chain."
+    setDualPlain(
+      s"Set index values below, then Fetch (or press ↻). Use Prev/Next to walk the chain.",
+      ""
     )
-    setPlainView("detail-overlay", "")
     renderIndexBar()
+  }
+
+  private def ensureWorkspaceVisible(): Unit = {
+    byId("detail-empty").setAttribute("hidden", "true")
+    byId("detail-body").removeAttribute("hidden")
+  }
+
+  private def openOrFocusTab(path: String): Unit = {
+    saveActiveTabDraft()
+    if (!openTabs.contains(path)) {
+      openTabs.update(path, OpenTab(path))
+    }
+    activateTab(path)
+  }
+
+  private def activateTab(path: String): Unit = {
+    if (!openTabs.contains(path)) return
+    if (!activeTabPath.contains(path)) {
+      saveActiveTabDraft()
+      activeTabPath = Some(path)
+      restoreWorkingCopies(openTabs(path))
+    } else {
+      activeTabPath = Some(path)
+    }
+    selected = Some(path)
+    renderTabBar()
+    ensureWorkspaceVisible()
+    renderIndexBar()
+    setEditorOpen(editorOpen)
+  }
+
+  private def closeTab(path: String): Unit = {
+    val wasActive = activeTabPath.contains(path)
+    if (wasActive) saveActiveTabDraft()
+    openTabs.remove(path)
+    if (!wasActive) {
+      renderTabBar()
+      return
+    }
+    val remaining = openTabs.keys.toList
+    remaining.lastOption match {
+      case Some(next) =>
+        activeTabPath = None
+        activateTab(next)
+        payloads.get(next).foreach(showDetail(next, _))
+      case None =>
+        clearWorkspace()
+    }
+  }
+
+  private def clearWorkspace(): Unit = {
+    openTabs.clear()
+    activeTabPath = None
+    editingStructId = None
+    draftMembers = Nil
+    lastDecodeType = None
+    editorOpen = false
+    clearIndexBrowse()
+    byId("tab-bar").classList.remove("has-tabs")
+    byId("tab-bar").innerHTML = ""
+    byId("detail-body").setAttribute("hidden", "true")
+    byId("editor-panel").setAttribute("hidden", "true")
+    val empty = byId("detail-empty")
+    empty.removeAttribute("hidden")
+    empty.textContent = "Search for a route, then press ↻ to load memory."
+  }
+
+  private def renderTabBar(): Unit = {
+    val bar = byId("tab-bar")
+    bar.innerHTML = ""
+    if (openTabs.isEmpty) {
+      bar.classList.remove("has-tabs")
+      return
+    }
+    bar.classList.add("has-tabs")
+    openTabs.values.foreach { tab =>
+      val btn = el("div")
+      btn.className = "tab" + (if (activeTabPath.contains(tab.path)) " active" else "")
+      btn.setAttribute("role", "tab")
+      btn.setAttribute("tabindex", "0")
+      btn.setAttribute("aria-selected", activeTabPath.contains(tab.path).toString)
+      btn.title = tab.path
+      val label = el("span")
+      label.className = "tab-label"
+      label.textContent = shortenPath(tab.path)
+      val close = el("button")
+      close.className = "tab-close"
+      close.setAttribute("type", "button")
+      close.textContent = "×"
+      close.title = s"Close ${tab.path}"
+      close.onclick = { (e: MouseEvent) =>
+        e.stopPropagation()
+        closeTab(tab.path)
+      }
+      btn.onclick = { (_: MouseEvent) =>
+        if (!activeTabPath.contains(tab.path)) {
+          activateTab(tab.path)
+          payloads.get(tab.path).foreach(showDetail(tab.path, _))
+        }
+      }
+      btn.appendChild(label)
+      btn.appendChild(close)
+      bar.appendChild(btn)
+    }
+  }
+
+  private def saveActiveTabDraft(): Unit =
+    activeTabPath.foreach { path =>
+      syncDraftFromDom()
+      openTabs.get(path).foreach { tab =>
+        openTabs.update(
+          path,
+          tab.copy(
+            decodeType = lastDecodeType.orElse(tab.decodeType),
+            editingStructId = editingStructId,
+            draftMembers = draftMembers,
+            editorOpen = editorOpen,
+            indexTemplate = indexTemplate,
+            indexValues = indexValues
+          )
+        )
+      }
+    }
+
+  private def persistActiveTabDraft(): Unit =
+    activeTabPath.foreach { path =>
+      openTabs.get(path).foreach { tab =>
+        openTabs.update(
+          path,
+          tab.copy(
+            decodeType = lastDecodeType.orElse(tab.decodeType),
+            editingStructId = editingStructId,
+            draftMembers = draftMembers,
+            editorOpen = editorOpen,
+            indexTemplate = indexTemplate,
+            indexValues = indexValues
+          )
+        )
+      }
+    }
+
+  private def restoreWorkingCopies(tab: OpenTab): Unit = {
+    lastDecodeType = tab.decodeType
+    editingStructId = tab.editingStructId
+    draftMembers = tab.draftMembers
+    editorOpen = tab.editorOpen
+    indexTemplate = tab.indexTemplate
+    indexValues = tab.indexValues
+    inputById("edit-struct").value = editingStructId.getOrElse("")
+  }
+
+  private def updateActiveTabIndex(
+      path: String,
+      template: Option[String],
+      indices: List[Int]
+  ): Unit = {
+    indexTemplate = template
+    indexValues = indices
+    openTabs.get(path).foreach { tab =>
+      openTabs.update(path, tab.copy(indexTemplate = template, indexValues = indices))
+    }
+    if (activeTabPath.contains(path)) renderIndexBar()
   }
 
   private def setPlainView(id: String, text: String, error: Boolean = false): Unit = {
@@ -661,7 +924,685 @@ object Main {
     host.textContent = text
   }
 
-  private def setJsonView(id: String, json: Json, rootOpen: Boolean, basePath: String): Unit = {
+  private def setDualPlain(
+      sourceText: String,
+      overlayText: String,
+      error: Boolean = false
+  ): Unit = {
+    val host = byId("detail-dual")
+    host.innerHTML = ""
+    host.className = "json-view dual-scroll"
+    val row = el("div")
+    row.className = "dual-row"
+    val left = el("div")
+    left.className = "dual-cell" + (if (error) " error" else "")
+    val leftLine = el("div")
+    leftLine.className = if (error) "jv-line jv-null" else "jv-line"
+    leftLine.style.color = if (error) "var(--err)" else "var(--muted)"
+    leftLine.textContent = sourceText
+    left.appendChild(leftLine)
+    val right = el("div")
+    right.className = "dual-cell"
+    val rightLine = el("div")
+    rightLine.className = "jv-line"
+    rightLine.style.color = "var(--muted)"
+    rightLine.textContent = overlayText
+    right.appendChild(rightLine)
+    row.appendChild(left)
+    row.appendChild(right)
+    host.appendChild(row)
+  }
+
+  private def setDualDecodeView(
+      basePath: String,
+      source: Json,
+      overlay: Option[Json]
+  ): Unit = {
+    dualLineByStamp.clear()
+    dualValueByStamp.clear()
+    val host = byId("detail-dual")
+    host.innerHTML = ""
+    host.className = "json-view dual-scroll"
+    host.appendChild(
+      renderDualNode(
+        source = Some(source),
+        overlay = overlay,
+        forceOpen = true,
+        sourceKeyName = None,
+        overlayKeyName = None,
+        basePath = basePath,
+        sourceSegments = Nil,
+        overlaySegments = Nil,
+        sourceAddress = None,
+        overlayAddress = None,
+        fetchable = cachedFetchablePaths,
+        depth = 0
+      )
+    )
+  }
+
+  private def repaintJsonViews(basePath: String): Unit =
+    payloads.get(basePath).foreach { payload =>
+      setDualDecodeView(basePath, extractDecoded(payload), extractOverlayDecoded(payload))
+    }
+
+  // DESNOTE(jbarber, 2026-07-20): Rapid watch updates used to call setDualDecodeView and
+  // recreate every button. Clicks on ◎ never completed (mousedown target destroyed before
+  // mouseup). Patch leaf text/age in place; fall back to a full rebuild only on shape change.
+  // Coalesce to animation frames and scope to the watched subtree when possible — DAP can
+  // stream far faster than walking a full Melee struct (or player_slots[]) in the DOM.
+  private def patchJsonViews(basePath: String, focusSegments: List[String] = Nil): Unit = {
+    val focusKey = if (focusSegments.isEmpty) "" else focusSegments.mkString("/")
+    val focuses = pendingPatchFocus.getOrElseUpdate(basePath, scala.collection.mutable.Set.empty)
+    if (focusKey.isEmpty) {
+      focuses.clear()
+      focuses.add("")
+    } else if (!focuses.contains("")) {
+      focuses.add(focusKey)
+    }
+    if (!patchRafScheduled) {
+      patchRafScheduled = true
+      val _ = dom.window.requestAnimationFrame { (_: Double) =>
+        patchRafScheduled = false
+        val batch = pendingPatchFocus.toList
+        pendingPatchFocus.clear()
+        batch.foreach { case (path, focusSet) =>
+          if (focusSet.contains("")) flushPatchJsonViews(path, Nil)
+          else
+            focusSet.foreach { key =>
+              val segs = if (key.isEmpty) Nil else key.split("/").toList.filter(_.nonEmpty)
+              flushPatchJsonViews(path, segs)
+            }
+        }
+      }
+    }
+  }
+
+  private def flushPatchJsonViews(basePath: String, focusSegments: List[String]): Unit =
+    payloads.get(basePath).foreach { payload =>
+      val source = extractDecoded(payload)
+      val overlay = extractOverlayDecoded(payload)
+      if (
+        dualLineByStamp.isEmpty ||
+        !patchDualDecodeView(basePath, source, overlay, focusSegments)
+      )
+        setDualDecodeView(basePath, source, overlay)
+      else
+        refreshDualAges(basePath, focusSegments)
+    }
+
+  private def patchDualDecodeView(
+      basePath: String,
+      source: Json,
+      overlay: Option[Json],
+      focusSegments: List[String]
+  ): Boolean = {
+    def walk(json: Json, segments: List[String], overlayPanel: Boolean): Boolean = {
+      val key = stampKey(basePath, segments, overlayPanel)
+      json.arrayOrObject(
+        or = {
+          dualValueByStamp.get(key) match {
+            case Some(el) =>
+              val text = jsonPrimitiveText(json)
+              // Skip no-op writes — full-tree watches otherwise thrash every leaf each tick.
+              if (el.textContent != text) {
+                el.className = jsonPrimitiveClass(json)
+                el.textContent = text
+                dualLineByStamp.get(key).foreach { line =>
+                  Option(line.closest(".dual-cell")).foreach(_.classList.remove("missing"))
+                }
+              }
+              true
+            case None =>
+              dualLineByStamp.get(key) match {
+                case Some(_) =>
+                  // DOM has a row at this path but not a leaf value — shape changed.
+                  false
+                case None =>
+                  // Collapsed / not built yet — expand will re-read from payloads.
+                  true
+              }
+          }
+        },
+        jsonArray = arr =>
+          dualLineByStamp.get(key) match {
+            case Some(line) if line.classList.contains("jv-leaf") && arr.nonEmpty =>
+              false
+            case _ =>
+              arr.toList.zipWithIndex.forall { case (value, index) =>
+                walk(value, segments :+ index.toString, overlayPanel)
+              }
+          },
+        jsonObject = obj =>
+          dualLineByStamp.get(key) match {
+            case Some(line)
+                if line.classList.contains("jv-leaf") &&
+                  obj.keys.exists(k => !DualDecodeAlign.isMetaKey(k)) =>
+              false
+            case _ =>
+              obj.toList.forall { case (name, value) =>
+                if (DualDecodeAlign.isMetaKey(name)) true
+                else walk(value, segments :+ name, overlayPanel)
+              }
+          }
+      )
+    }
+
+    def walkFrom(root: Json, overlayPanel: Boolean): Boolean =
+      if (focusSegments.isEmpty) walk(root, Nil, overlayPanel)
+      else
+        getAtPath(root, focusSegments) match {
+          case None        => true
+          case Some(focus) => walk(focus, focusSegments, overlayPanel)
+        }
+
+    walkFrom(source, overlayPanel = false) &&
+    overlay.forall(o => walkFrom(o, overlayPanel = true))
+  }
+
+  private def refreshDualAges(basePath: String, focusSegments: List[String]): Unit = {
+    val focusPrefix =
+      if (focusSegments.isEmpty) basePath
+      else basePath + "/" + focusSegments.mkString("/")
+    dualLineByStamp.foreach { case (stamp, line) =>
+      val overlayPanel = stamp.startsWith("ov:")
+      val raw = if (overlayPanel) stamp.stripPrefix("ov:") else stamp
+      if (raw == focusPrefix || raw.startsWith(focusPrefix + "/")) {
+        val segments =
+          if (raw == basePath) Nil
+          else raw.stripPrefix(basePath + "/").split("/").toList.filter(_.nonEmpty)
+        applyAgeAttributes(line, basePath, segments, overlayPanel)
+      }
+    }
+  }
+
+  private def trackDualLine(
+      line: HTMLElement,
+      basePath: String,
+      segments: List[String],
+      overlayPanel: Boolean
+  ): Unit = {
+    applyAgeAttributes(line, basePath, segments, overlayPanel)
+    dualLineByStamp.update(stampKey(basePath, segments, overlayPanel), line)
+  }
+
+  private def trackDualValue(
+      value: HTMLElement,
+      basePath: String,
+      segments: List[String],
+      overlayPanel: Boolean
+  ): Unit =
+    dualValueByStamp.update(stampKey(basePath, segments, overlayPanel), value)
+
+  /** Shared expand key so renamed source/overlay fields still toggle together. */
+  private def dualStampKey(
+      basePath: String,
+      sourceSegments: List[String],
+      overlaySegments: List[String]
+  ): String =
+    stampKey(basePath, sourceSegments, overlayPanel = false) + "\n" +
+      stampKey(basePath, overlaySegments, overlayPanel = true)
+
+  private def getAtPath(json: Json, segments: List[String]): Option[Json] =
+    segments.foldLeft(Option(json)) { (acc, seg) =>
+      acc.flatMap { j =>
+        j.asObject
+          .flatMap(_.apply(seg))
+          .orElse(
+            j.asArray.flatMap { arr =>
+              Try(seg.toInt).toOption.flatMap(i => arr.lift(i))
+            }
+          )
+      }
+    }
+
+  private def dualObjectFieldCount(obj: io.circe.JsonObject): Int =
+    obj.keys.count(k => !DualDecodeAlign.isMetaKey(k))
+
+  private def alignDualChildren(source: Option[Json], overlay: Option[Json]): List[DualChild] = {
+    val srcObj = source.flatMap(_.asObject)
+    val ovObj = overlay.flatMap(_.asObject)
+    val srcArr = source.flatMap(_.asArray)
+    val ovArr = overlay.flatMap(_.asArray)
+    if (srcObj.isDefined || ovObj.isDefined)
+      DualDecodeAlign.alignObjects(srcObj, ovObj)
+    else if (srcArr.isDefined || ovArr.isDefined)
+      DualDecodeAlign.alignArrays(
+        srcArr.map(_.toList).getOrElse(Nil),
+        ovArr.map(_.toList).getOrElse(Nil)
+      )
+    else Nil
+  }
+
+  private def parseHexAddressUi(raw: String): Option[Long] = {
+    val hex = raw.trim.toLowerCase.stripPrefix("0x")
+    if (hex.isEmpty || !hex.forall(c => c.isDigit || (c >= 'a' && c <= 'f'))) None
+    else
+      try Some(java.lang.Long.parseUnsignedLong(hex, 16))
+      catch { case _: NumberFormatException => None }
+  }
+
+  private def structAbsoluteAddress(json: Option[Json]): Option[Long] =
+    json
+      .flatMap(_.asObject)
+      .flatMap(_("_address"))
+      .flatMap(_.asString)
+      .flatMap(parseHexAddressUi)
+
+  private def memberAbsoluteAddress(
+      parentJson: Option[Json],
+      parentAddr: Option[Long],
+      fieldName: Option[String],
+      fieldJson: Option[Json]
+  ): Option[Long] =
+    structAbsoluteAddress(fieldJson).orElse {
+      for {
+        name <- fieldName if !DualDecodeAlign.isMetaKey(name)
+        base <- structAbsoluteAddress(parentJson).orElse(parentAddr)
+        off <- parentJson
+          .flatMap(_.asObject)
+          .map(DualDecodeAlign.parseOffsets)
+          .flatMap(_.get(name))
+      } yield base + off
+    }
+
+  private def renderDualNode(
+      source: Option[Json],
+      overlay: Option[Json],
+      forceOpen: Boolean,
+      sourceKeyName: Option[String],
+      overlayKeyName: Option[String],
+      basePath: String,
+      sourceSegments: List[String],
+      overlaySegments: List[String],
+      sourceAddress: Option[Long],
+      overlayAddress: Option[Long],
+      fetchable: Set[String],
+      depth: Int
+  ): HTMLElement = {
+    val srcObj = source.flatMap(_.asObject)
+    val ovObj = overlay.flatMap(_.asObject)
+    val srcArr = source.flatMap(_.asArray)
+    val ovArr = overlay.flatMap(_.asArray)
+    val resolvedSrcAddr = structAbsoluteAddress(source).orElse(sourceAddress)
+    val resolvedOvAddr = structAbsoluteAddress(overlay).orElse(overlayAddress)
+
+    if (srcObj.isDefined || ovObj.isDefined) {
+      val children = alignDualChildren(source, overlay)
+      val srcCount = srcObj.map(dualObjectFieldCount).getOrElse(0)
+      val ovCount = ovObj.map(dualObjectFieldCount).getOrElse(0)
+      renderDualComposite(
+        forceOpen = forceOpen,
+        openPunct = "{",
+        closePunct = "}",
+        sourcePreview =
+          if (source.isEmpty) "—" else if (srcCount == 0) "{}" else s"{$srcCount}",
+        overlayPreview =
+          if (overlay.isEmpty) "—" else if (ovCount == 0) "{}" else s"{$ovCount}",
+        sourceKeyName = sourceKeyName,
+        overlayKeyName = overlayKeyName,
+        basePath = basePath,
+        sourceSegments = sourceSegments,
+        overlaySegments = overlaySegments,
+        sourceAddress = resolvedSrcAddr,
+        overlayAddress = resolvedOvAddr,
+        fetchable = fetchable,
+        depth = depth,
+        sourcePresent = source.isDefined,
+        overlayPresent = overlay.isDefined,
+        sourceJson = source,
+        overlayJson = overlay,
+        children = children
+      )
+    } else if (srcArr.isDefined || ovArr.isDefined) {
+      val children = alignDualChildren(source, overlay)
+      renderDualComposite(
+        forceOpen = forceOpen,
+        openPunct = "[",
+        closePunct = "]",
+        sourcePreview = srcArr.map(a => if (a.isEmpty) "[]" else s"[${a.size}]").getOrElse("—"),
+        overlayPreview = ovArr.map(a => if (a.isEmpty) "[]" else s"[${a.size}]").getOrElse("—"),
+        sourceKeyName = sourceKeyName,
+        overlayKeyName = overlayKeyName,
+        basePath = basePath,
+        sourceSegments = sourceSegments,
+        overlaySegments = overlaySegments,
+        sourceAddress = resolvedSrcAddr,
+        overlayAddress = resolvedOvAddr,
+        fetchable = fetchable,
+        depth = depth,
+        sourcePresent = source.isDefined,
+        overlayPresent = overlay.isDefined,
+        sourceJson = source,
+        overlayJson = overlay,
+        children = children
+      )
+    } else {
+      renderDualLeaf(
+        source,
+        overlay,
+        sourceKeyName,
+        overlayKeyName,
+        basePath,
+        sourceSegments,
+        overlaySegments,
+        sourceAddress,
+        overlayAddress,
+        fetchable,
+        depth
+      )
+    }
+  }
+
+  private def renderDualLeaf(
+      source: Option[Json],
+      overlay: Option[Json],
+      sourceKeyName: Option[String],
+      overlayKeyName: Option[String],
+      basePath: String,
+      sourceSegments: List[String],
+      overlaySegments: List[String],
+      sourceAddress: Option[Long],
+      overlayAddress: Option[Long],
+      fetchable: Set[String],
+      depth: Int
+  ): HTMLElement = {
+    val row = el("div")
+    row.className = "dual-row"
+    row.style.paddingLeft = s"${depth * 0.55}rem"
+
+    val left = el("div")
+    left.className = "dual-cell" + (if (source.isEmpty) " missing" else "")
+    val leftLine = el("div")
+    leftLine.className = "jv-line jv-leaf"
+    sourceKeyName.foreach { name =>
+      val keyEl = el("span")
+      keyEl.className = "jv-key"
+      keyEl.textContent = name
+      leftLine.appendChild(keyEl)
+    }
+    source match {
+      case Some(json) =>
+        trackDualLine(leftLine, basePath, sourceSegments, overlayPanel = false)
+        val leaf = el("span")
+        leaf.className = jsonPrimitiveClass(json)
+        leaf.textContent = jsonPrimitiveText(json)
+        trackDualValue(leaf, basePath, sourceSegments, overlayPanel = false)
+        leftLine.appendChild(leaf)
+        makeValueEditable(
+          leaf,
+          sourceAddress,
+          sourceSegments,
+          overlayPanel = false,
+          json
+        )
+        appendFieldActions(leftLine, basePath, sourceSegments, fetchable, overlayPanel = false)
+        appendPointerFocus(leftLine, basePath, sourceSegments, Some(json), overlay)
+      case None =>
+        val leaf = el("span")
+        leaf.className = "jv-punct"
+        leaf.textContent = "—"
+        leftLine.appendChild(leaf)
+    }
+    left.appendChild(leftLine)
+
+    val right = el("div")
+    right.className = "dual-cell" + (if (overlay.isEmpty) " missing" else "")
+    val rightLine = el("div")
+    rightLine.className = "jv-line jv-leaf"
+    overlayKeyName.foreach { name =>
+      val keyEl = el("span")
+      keyEl.className = "jv-key"
+      keyEl.textContent = name
+      rightLine.appendChild(keyEl)
+    }
+    overlay match {
+      case Some(json) =>
+        trackDualLine(rightLine, basePath, overlaySegments, overlayPanel = true)
+        val leaf = el("span")
+        leaf.className = jsonPrimitiveClass(json)
+        leaf.textContent = jsonPrimitiveText(json)
+        trackDualValue(leaf, basePath, overlaySegments, overlayPanel = true)
+        rightLine.appendChild(leaf)
+        makeValueEditable(
+          leaf,
+          overlayAddress,
+          overlaySegments,
+          overlayPanel = true,
+          json
+        )
+        appendFieldActions(rightLine, basePath, overlaySegments, fetchable, overlayPanel = true)
+      case None =>
+        val leaf = el("span")
+        leaf.className = "jv-punct"
+        leaf.textContent =
+          if (sourceSegments.isEmpty && source.isDefined) "No overlay applied for this type."
+          else "—"
+        rightLine.appendChild(leaf)
+    }
+    right.appendChild(rightLine)
+
+    row.appendChild(left)
+    row.appendChild(right)
+    row
+  }
+
+  private def renderDualComposite(
+      forceOpen: Boolean,
+      openPunct: String,
+      closePunct: String,
+      sourcePreview: String,
+      overlayPreview: String,
+      sourceKeyName: Option[String],
+      overlayKeyName: Option[String],
+      basePath: String,
+      sourceSegments: List[String],
+      overlaySegments: List[String],
+      sourceAddress: Option[Long],
+      overlayAddress: Option[Long],
+      fetchable: Set[String],
+      depth: Int,
+      sourcePresent: Boolean,
+      overlayPresent: Boolean,
+      sourceJson: Option[Json],
+      overlayJson: Option[Json],
+      children: List[DualChild]
+  ): HTMLElement = {
+    val pathKey = dualStampKey(basePath, sourceSegments, overlaySegments)
+    val isOpen = forceOpen || jsonExpanded.contains(pathKey)
+    val root = el("div")
+    root.className = if (isOpen) "jv-composite" else "jv-composite collapsed"
+
+    val leftCell = el("div")
+    leftCell.className = "dual-cell" + (if (!sourcePresent) " missing" else "")
+    val leftLine = el("div")
+    leftLine.className = if (children.isEmpty) "jv-line jv-leaf" else "jv-line"
+    if (sourcePresent)
+      trackDualLine(leftLine, basePath, sourceSegments, overlayPanel = false)
+    lazy val leftTwist = {
+      val twist = el("span")
+      twist.className = "jv-twist"
+      twist.textContent = if (isOpen) "▼" else "▶"
+      leftLine.appendChild(twist)
+      twist
+    }
+    if (children.nonEmpty) leftTwist
+    sourceKeyName.foreach { name =>
+      val keyEl = el("span")
+      keyEl.className = "jv-key"
+      keyEl.textContent = name
+      leftLine.appendChild(keyEl)
+    }
+    val leftOpen = el("span")
+    leftOpen.className = "jv-punct jv-open"
+    leftOpen.textContent = if (sourcePresent) openPunct else ""
+    val leftPreview = el("span")
+    leftPreview.className = "jv-preview"
+    leftPreview.textContent = if (sourcePresent) sourcePreview else "—"
+    if (children.isEmpty && sourcePresent) {
+      leftOpen.className = "jv-punct"
+      leftOpen.textContent = openPunct + closePunct
+      leftPreview.textContent = ""
+    }
+    leftLine.appendChild(leftOpen)
+    leftLine.appendChild(leftPreview)
+    if (sourcePresent)
+      appendFieldActions(leftLine, basePath, sourceSegments, fetchable, overlayPanel = false)
+    appendPointerFocus(leftLine, basePath, sourceSegments, sourceJson, overlayJson)
+    leftCell.appendChild(leftLine)
+
+    val rightCell = el("div")
+    rightCell.className = "dual-cell" + (if (!overlayPresent) " missing" else "")
+    val rightLine = el("div")
+    rightLine.className = if (children.isEmpty) "jv-line jv-leaf" else "jv-line"
+    if (overlayPresent)
+      trackDualLine(rightLine, basePath, overlaySegments, overlayPanel = true)
+    lazy val rightTwist = {
+      val twist = el("span")
+      twist.className = "jv-twist"
+      twist.textContent = if (isOpen) "▼" else "▶"
+      rightLine.appendChild(twist)
+      twist
+    }
+    if (children.nonEmpty) rightTwist
+    overlayKeyName.foreach { name =>
+      val keyEl = el("span")
+      keyEl.className = "jv-key"
+      keyEl.textContent = name
+      rightLine.appendChild(keyEl)
+    }
+    val rightOpen = el("span")
+    rightOpen.className = "jv-punct jv-open"
+    rightOpen.textContent = if (overlayPresent) openPunct else ""
+    val rightPreview = el("span")
+    rightPreview.className = "jv-preview"
+    rightPreview.textContent =
+      if (overlayPresent) overlayPreview
+      else if (sourceSegments.isEmpty) "No overlay applied for this type."
+      else "—"
+    if (children.isEmpty && overlayPresent) {
+      rightOpen.className = "jv-punct"
+      rightOpen.textContent = openPunct + closePunct
+      rightPreview.textContent = ""
+    }
+    rightLine.appendChild(rightOpen)
+    rightLine.appendChild(rightPreview)
+    if (overlayPresent)
+      appendFieldActions(rightLine, basePath, overlaySegments, fetchable, overlayPanel = true)
+    rightCell.appendChild(rightLine)
+
+    val headerRow = el("div")
+    headerRow.className = "dual-row"
+    headerRow.style.paddingLeft = s"${depth * 0.55}rem"
+    headerRow.appendChild(leftCell)
+    headerRow.appendChild(rightCell)
+    root.appendChild(headerRow)
+
+    if (children.nonEmpty) {
+      var built = false
+      def ensureChildren(): Unit =
+        if (!built) {
+          built = true
+          val kids = payloads.get(basePath) match {
+            case Some(payload) =>
+              val srcAt = getAtPath(extractDecoded(payload), sourceSegments)
+              val ovAt = extractOverlayDecoded(payload).flatMap(getAtPath(_, overlaySegments))
+              alignDualChildren(srcAt, ovAt)
+            case None =>
+              children
+          }
+          val childUl = el("ul")
+          childUl.className = "dual-children"
+          kids.foreach { child =>
+            val childSrcSegs =
+              child.sourceName.map(sourceSegments :+ _).getOrElse(sourceSegments)
+            val childOvSegs =
+              child.overlayName.map(overlaySegments :+ _).getOrElse(overlaySegments)
+            val childSrcAddr = memberAbsoluteAddress(
+              sourceJson,
+              sourceAddress,
+              child.sourceName,
+              child.source
+            )
+            val childOvAddr = memberAbsoluteAddress(
+              overlayJson,
+              overlayAddress,
+              child.overlayName,
+              child.overlay
+            )
+            val li = el("li")
+            li.appendChild(
+              renderDualNode(
+                source = child.source,
+                overlay = child.overlay,
+                forceOpen = false,
+                sourceKeyName = child.sourceName,
+                overlayKeyName = child.overlayName,
+                basePath = basePath,
+                sourceSegments = childSrcSegs,
+                overlaySegments = childOvSegs,
+                sourceAddress = childSrcAddr,
+                overlayAddress = childOvAddr,
+                fetchable = fetchable,
+                depth = depth + 1
+              )
+            )
+            childUl.appendChild(li)
+          }
+          root.appendChild(childUl)
+
+          val closeRow = el("div")
+          closeRow.className = "dual-row dual-close"
+          closeRow.style.paddingLeft = s"${depth * 0.55}rem"
+          def closeCell(present: Boolean): HTMLElement = {
+            val cell = el("div")
+            cell.className = "dual-cell" + (if (!present) " missing" else "")
+            val line = el("div")
+            line.className = "jv-line jv-close"
+            val mark = el("span")
+            mark.className = "jv-punct"
+            mark.textContent = if (present) closePunct else ""
+            line.appendChild(mark)
+            cell.appendChild(line)
+            cell
+          }
+          closeRow.appendChild(closeCell(sourcePresent))
+          closeRow.appendChild(closeCell(overlayPresent))
+          root.appendChild(closeRow)
+        }
+
+      if (isOpen) ensureChildren()
+
+      val toggle = (_: MouseEvent) => {
+        val collapsed = root.classList.toggle("collapsed")
+        if (collapsed) {
+          jsonExpanded.remove(pathKey)
+          leftTwist.textContent = "▶"
+          rightTwist.textContent = "▶"
+        } else {
+          jsonExpanded.add(pathKey)
+          ensureChildren()
+          leftTwist.textContent = "▼"
+          rightTwist.textContent = "▼"
+        }
+      }
+      List(leftTwist, rightTwist, leftOpen, rightOpen, leftPreview, rightPreview).foreach { el =>
+        el.onclick = toggle
+        el.style.cursor = "pointer"
+      }
+    }
+
+    root
+  }
+
+  // Kept for any single-pane fallbacks; dual view is the primary decode UI.
+  private def setJsonView(
+      id: String,
+      json: Json,
+      rootOpen: Boolean,
+      basePath: String,
+      overlayPanel: Boolean
+  ): Unit = {
     val host = byId(id)
     host.innerHTML = ""
     host.className = "json-view"
@@ -672,22 +1613,12 @@ object Main {
         key = None,
         basePath = basePath,
         segments = Nil,
-        fetchable = cachedFetchablePaths
+        fetchable = cachedFetchablePaths,
+        overlayPanel = overlayPanel,
+        absoluteAddress = structAbsoluteAddress(Some(json))
       )
     )
   }
-
-  private def repaintJsonViews(basePath: String): Unit =
-    payloads.get(basePath).foreach { payload =>
-      val decoded = extractDecoded(payload)
-      setJsonView("detail-decoded", decoded, rootOpen = true, basePath = basePath)
-      extractOverlayDecoded(payload) match {
-        case Some(overlay) =>
-          setJsonView("detail-overlay", overlay, rootOpen = true, basePath = basePath)
-        case None =>
-          setPlainView("detail-overlay", "No overlay applied for this type.")
-      }
-    }
 
   private def renderJsonNode(
       json: Json,
@@ -695,23 +1626,23 @@ object Main {
       key: Option[HTMLElement],
       basePath: String,
       segments: List[String],
-      fetchable: Set[String]
-  ): HTMLElement =
+      fetchable: Set[String],
+      overlayPanel: Boolean,
+      absoluteAddress: Option[Long]
+  ): HTMLElement = {
+    val resolvedAddr = structAbsoluteAddress(Some(json)).orElse(absoluteAddress)
     json.arrayOrObject(
       or = {
         val row = el("div")
-        row.className = "jv-line"
-        row.setAttribute("data-age", refreshAge(basePath, segments).toString)
-        val pad = el("span")
-        pad.className = "jv-twist empty"
-        pad.textContent = "·"
-        row.appendChild(pad)
+        row.className = "jv-line jv-leaf"
+        applyAgeAttributes(row, basePath, segments, overlayPanel)
         key.foreach(row.appendChild)
         val leaf = el("span")
         leaf.className = jsonPrimitiveClass(json)
         leaf.textContent = jsonPrimitiveText(json)
         row.appendChild(leaf)
-        appendFieldRefresh(row, basePath, segments, fetchable)
+        makeValueEditable(leaf, resolvedAddr, segments, overlayPanel, json)
+        appendFieldActions(row, basePath, segments, fetchable, overlayPanel)
         row
       },
       jsonArray = arr =>
@@ -724,6 +1655,9 @@ object Main {
           basePath = basePath,
           segments = segments,
           fetchable = fetchable,
+          overlayPanel = overlayPanel,
+          parentJson = Some(json),
+          absoluteAddress = resolvedAddr,
           children = arr.toList.zipWithIndex.map { case (value, index) =>
             (index.toString, value, segments :+ index.toString)
           }
@@ -738,11 +1672,16 @@ object Main {
           basePath = basePath,
           segments = segments,
           fetchable = fetchable,
-          children = obj.toList.map { case (name, value) =>
-            (name, value, segments :+ name)
+          overlayPanel = overlayPanel,
+          parentJson = Some(json),
+          absoluteAddress = resolvedAddr,
+          children = obj.toList.collect {
+            case (name, value) if !DualDecodeAlign.isMetaKey(name) =>
+              (name, value, segments :+ name)
           }
         )
     )
+  }
 
   private def renderJsonComposite(
       forceOpen: Boolean,
@@ -753,21 +1692,28 @@ object Main {
       basePath: String,
       segments: List[String],
       fetchable: Set[String],
+      overlayPanel: Boolean,
+      parentJson: Option[Json],
+      absoluteAddress: Option[Long],
       children: List[(String, Json, List[String])]
   ): HTMLElement = {
-    val pathKey = stampKey(basePath, segments)
+    val pathKey = stampKey(basePath, segments, overlayPanel)
     val isOpen = forceOpen || jsonExpanded.contains(pathKey)
     val root = el("div")
     root.className = if (isOpen) "jv-composite" else "jv-composite collapsed"
 
     val line = el("div")
-    line.className = "jv-line"
-    line.setAttribute("data-age", refreshAge(basePath, segments).toString)
+    line.className = if (children.isEmpty) "jv-line jv-leaf" else "jv-line"
+    applyAgeAttributes(line, basePath, segments, overlayPanel)
 
-    val twist = el("span")
-    twist.className = if (children.isEmpty) "jv-twist empty" else "jv-twist"
-    twist.textContent =
-      if (children.isEmpty) "·" else if (isOpen) "▼" else "▶"
+    lazy val twist = {
+      val t = el("span")
+      t.className = "jv-twist"
+      t.textContent = if (isOpen) "▼" else "▶"
+      line.appendChild(t)
+      t
+    }
+    if (children.nonEmpty) twist
 
     val openMark = el("span")
     openMark.className = "jv-punct jv-open"
@@ -777,11 +1723,10 @@ object Main {
     previewEl.className = "jv-preview"
     previewEl.textContent = preview
 
-    line.appendChild(twist)
     key.foreach(line.appendChild)
     line.appendChild(openMark)
     line.appendChild(previewEl)
-    appendFieldRefresh(line, basePath, segments, fetchable)
+    appendFieldActions(line, basePath, segments, fetchable, overlayPanel)
     root.appendChild(line)
 
     if (children.isEmpty) {
@@ -799,6 +1744,8 @@ object Main {
             val keyEl = el("span")
             keyEl.className = "jv-key"
             keyEl.textContent = name
+            val childAddr =
+              memberAbsoluteAddress(parentJson, absoluteAddress, Some(name), Some(value))
             val li = el("li")
             li.appendChild(
               renderJsonNode(
@@ -807,7 +1754,9 @@ object Main {
                 key = Some(keyEl),
                 basePath = basePath,
                 segments = childSegments,
-                fetchable = fetchable
+                fetchable = fetchable,
+                overlayPanel = overlayPanel,
+                absoluteAddress = childAddr
               )
             )
             childUl.appendChild(li)
@@ -816,13 +1765,9 @@ object Main {
 
           val closeLine = el("div")
           closeLine.className = "jv-line jv-close"
-          val closePad = el("span")
-          closePad.className = "jv-twist empty"
-          closePad.textContent = "·"
           val closeMark = el("span")
           closeMark.className = "jv-punct"
           closeMark.textContent = closePunct
-          closeLine.appendChild(closePad)
           closeLine.appendChild(closeMark)
           root.appendChild(closeLine)
         }
@@ -850,24 +1795,445 @@ object Main {
     root
   }
 
-  private def appendFieldRefresh(
+  private def appendFieldActions(
       row: HTMLElement,
       basePath: String,
       segments: List[String],
-      fetchable: Set[String]
-  ): Unit =
-    httpPathForJsonField(basePath, segments, fetchable).foreach { httpPath =>
-      val btn = el("button").asInstanceOf[dom.html.Button]
-      btn.className = "jv-refresh"
-      btn.textContent = "↻"
-      btn.title = s"Refresh $httpPath"
-      if (fieldLoading.contains(httpPath)) btn.disabled = true
-      btn.onclick = { (e: MouseEvent) =>
-        e.stopPropagation()
-        refreshJsonField(basePath, segments, httpPath)
+      fetchable: Set[String],
+      overlayPanel: Boolean
+  ): Unit = {
+    def prepend(node: HTMLElement): Unit =
+      Option(row.firstChild) match {
+        case Some(first) => val _ = row.insertBefore(node, first)
+        case None        => row.appendChild(node)
       }
-      row.appendChild(btn)
+
+    if (overlayPanel) {
+      if (isOverlaySegmentWatched(basePath, segments)) {
+        row.classList.add("jv-watching-row")
+        val watchBtn = el("button").asInstanceOf[dom.html.Button]
+        watchBtn.className = "jv-watch jv-watching"
+        watchBtn.textContent = "◉"
+        watchBtn.title = "Watched via overlapping source field"
+        watchBtn.disabled = true
+        prepend(watchBtn)
+      }
+    } else
+      httpPathForJsonField(basePath, segments, fetchable).foreach { httpPath =>
+        if (activeWatches.contains(httpPath)) row.classList.add("jv-watching-row")
+        val watchBtn = el("button").asInstanceOf[dom.html.Button]
+        val watching = activeWatches.contains(httpPath)
+        watchBtn.className = if (watching) "jv-watch jv-watching" else "jv-watch"
+        watchBtn.textContent = if (watching) "◉" else "◎"
+        watchBtn.title =
+          if (watching) s"Stop watching $httpPath" else s"Watch $httpPath in realtime"
+        // pointerdown: click is lost when a watch rebuild replaces the button between down/up.
+        watchBtn.onpointerdown = { (e: dom.PointerEvent) =>
+          e.stopPropagation()
+          e.preventDefault()
+          toggleWatch(httpPath)
+        }
+
+        val btn = el("button").asInstanceOf[dom.html.Button]
+        btn.className = "jv-refresh"
+        btn.textContent = "↻"
+        btn.title = s"Refresh $httpPath"
+        if (fieldLoading.contains(httpPath)) btn.disabled = true
+        btn.onpointerdown = { (e: dom.PointerEvent) =>
+          e.stopPropagation()
+          e.preventDefault()
+          refreshJsonField(basePath, segments, httpPath)
+        }
+        // Left margin order: watch, then refresh (prepend reverse).
+        prepend(btn)
+        prepend(watchBtn)
+      }
+  }
+
+  private def isOverlaySegmentWatched(basePath: String, segments: List[String]): Boolean =
+    activeWatches.contains(basePath) ||
+      watchOverlaySegments.exists { case (sourcePath, overlaySegs) =>
+        (sourcePath == basePath || sourcePath.startsWith(basePath + "/")) &&
+        overlaySegs.exists(segs => segments == segs || segments.startsWith(segs))
+      }
+
+  private def toggleWatch(httpPath: String): Unit =
+    activeWatches.get(httpPath) match {
+      case Some(watchId) =>
+        deleteJson(s"/watches/$watchId").onComplete {
+          case Success(_) =>
+            activeWatches.remove(httpPath)
+            watchOverlaySegments.remove(httpPath)
+            detailViewPath.foreach(p => payloads.get(p).foreach(showDetail(p, _)))
+            setIndexStatus(s"Stopped watching $httpPath", ok = true)
+          case Failure(err) =>
+            setIndexStatus(err.getMessage, ok = false)
+        }
+      case None =>
+        postJson("/watches", Json.obj("path" -> Json.fromString(httpPath))).onComplete {
+          case Success(json) =>
+            json.hcursor.get[Int]("watchId") match {
+              case Right(watchId) =>
+                activeWatches.update(httpPath, watchId)
+                val overlaySegs = json.hcursor
+                  .downField("overlaySegments")
+                  .as[List[List[String]]]
+                  .getOrElse(Nil)
+                if (overlaySegs.nonEmpty) watchOverlaySegments.update(httpPath, overlaySegs)
+                else watchOverlaySegments.remove(httpPath)
+                detailViewPath.foreach(p => payloads.get(p).foreach(showDetail(p, _)))
+                val overlayNote =
+                  if (overlaySegs.isEmpty) ""
+                  else s" (overlay: ${overlaySegs.map(_.mkString("/")).mkString(", ")})"
+                setIndexStatus(s"Watching $httpPath (#$watchId)$overlayNote", ok = true)
+              case Left(err) =>
+                val msg = json.hcursor
+                  .get[String]("error")
+                  .toOption
+                  .getOrElse(err.message)
+                setIndexStatus(s"Watch failed: $msg", ok = false)
+            }
+          case Failure(err) =>
+            setIndexStatus(err.getMessage, ok = false)
+        }
     }
+
+  private def connectWatchSocket(): Unit = {
+    watchSocket.foreach { ws =>
+      try ws.close()
+      catch { case _: Throwable => () }
+    }
+    val proto = if (dom.window.location.protocol == "https:") "wss:" else "ws:"
+    val ws = new dom.WebSocket(s"$proto//${dom.window.location.host}/ws")
+    watchSocket = Some(ws)
+    ws.onmessage = { (event: dom.MessageEvent) =>
+      parse(event.data.toString) match {
+        case Right(json) => handleWatchSocketMessage(json)
+        case Left(_)     => ()
+      }
+    }
+    ws.onclose = { (_: dom.CloseEvent) =>
+      watchSocket = None
+      dom.window.setTimeout(() => connectWatchSocket(), 2000.0)
+    }
+    ws.onerror = { (_: dom.Event) =>
+      try ws.close()
+      catch { case _: Throwable => () }
+    }
+  }
+
+  private def handleWatchSocketMessage(json: Json): Unit = {
+    val cursor = json.hcursor
+    cursor.get[String]("type").toOption match {
+      case Some("watchesCleared") =>
+        activeWatches.clear()
+        watchOverlaySegments.clear()
+        detailViewPath.foreach(p => payloads.get(p).foreach(showDetail(p, _)))
+        setIndexStatus("DAP reconnected — watches cleared", ok = false)
+      case Some("memoryChanged") =>
+        val pathOpt = cursor.get[String]("path").toOption
+        val decodedOpt = cursor.downField("decoded").focus
+        val overlayOpt = cursor.downField("overlayDecoded").focus.filterNot(_.isNull)
+        val overlayUpdates = cursor
+          .downField("overlayUpdates")
+          .as[List[Json]]
+          .toOption
+          .getOrElse(Nil)
+          .flatMap { item =>
+            for {
+              segs <- item.hcursor.get[List[String]]("segments").toOption
+              value <- item.hcursor.downField("decoded").focus
+            } yield segs -> value
+          }
+        (pathOpt, decodedOpt) match {
+          case (Some(watchedPath), Some(decoded)) =>
+            applyWatchUpdate(watchedPath, decoded, overlayOpt, overlayUpdates)
+          case _ =>
+            ()
+        }
+      case _ =>
+        ()
+    }
+  }
+
+  private def applyWatchUpdate(
+      watchedPath: String,
+      decoded: Json,
+      overlay: Option[Json],
+      overlayUpdates: List[(List[String], Json)]
+  ): Unit = {
+    val parents =
+      payloads.keys.filter(base => watchedPath == base || watchedPath.startsWith(base + "/")).toList
+    parents.foreach { basePath =>
+      payloads.get(basePath).foreach { parent =>
+        val segments =
+          if (watchedPath == basePath) Nil
+          else watchedPath.stripPrefix(basePath + "/").split("/").toList.filter(_.nonEmpty)
+        val mergedDecoded = replaceAtPath(extractDecoded(parent), segments, decoded)
+        // DESNOTE(jbarber, 2026-07-20): Member watches send overlayUpdates without a full
+        // overlayDecoded payload. Seed an empty object when needed so byte-mapped overlay
+        // fields still patch in realtime (previously `.map` dropped updates when the parent
+        // had no overlayDecoded yet).
+        val baseOverlay =
+          (extractOverlayDecoded(parent).filterNot(_.isNull), overlay.filterNot(_.isNull)) match {
+            case (_, Some(piece)) if segments.isEmpty =>
+              Some(piece)
+            case (Some(rootOverlay), Some(piece)) =>
+              Some(replaceAtPath(rootOverlay, segments, piece))
+            case (Some(rootOverlay), None) =>
+              Some(rootOverlay)
+            case (None, Some(piece)) =>
+              Some(replaceAtPath(Json.obj(), segments, piece))
+            case (None, None) if overlayUpdates.nonEmpty =>
+              Some(Json.obj())
+            case _ =>
+              None
+          }
+        val mergedOverlay =
+          overlayUpdates.foldLeft(baseOverlay) { case (acc, (overlaySegs, value)) =>
+            Some(replaceAtPath(acc.getOrElse(Json.obj()), overlaySegs, value))
+          }
+        val updated = writeDecodedFields(parent, mergedDecoded, mergedOverlay)
+        payloads.update(basePath, updated)
+        bumpRefreshFreshnessAt(basePath, segments, overlayPanel = false)
+        if (overlay.isDefined || overlayUpdates.nonEmpty)
+          bumpRefreshFreshnessAt(basePath, segments, overlayPanel = true)
+        overlayUpdates.foreach { case (overlaySegs, _) =>
+          bumpRefreshFreshnessAt(basePath, overlaySegs, overlayPanel = true)
+        }
+        watchOverlaySegments.getOrElse(watchedPath, Nil).foreach { overlaySegs =>
+          bumpRefreshFreshnessAt(basePath, overlaySegs, overlayPanel = true)
+        }
+        if (detailViewPath.contains(basePath)) patchJsonViews(basePath, segments)
+      }
+    }
+  }
+
+  private def makeValueEditable(
+      leafEl: HTMLElement,
+      address: Option[Long],
+      segments: List[String],
+      overlayPanel: Boolean,
+      current: Json
+  ): Unit = {
+    if (address.isEmpty || current.isObject || current.isArray || current.isNull) ()
+    else {
+      val addr = address.get
+      leafEl.style.cursor = "text"
+      leafEl.title = f"Double-click to edit (0x$addr%x)"
+      leafEl.ondblclick = { (e: MouseEvent) =>
+        e.stopPropagation()
+        e.preventDefault()
+        // Prefer live DOM text (watch patches update textContent without a JSON cache).
+        val live = Option(leafEl.textContent).map(_.trim).filter(_.nonEmpty) match {
+          case Some(text) => parseEditValue(text, current)
+          case None       => current
+        }
+        beginFieldEdit(leafEl, addr, segments, overlayPanel, live)
+      }
+    }
+  }
+
+  private def beginFieldEdit(
+      leafEl: HTMLElement,
+      address: Long,
+      segments: List[String],
+      overlayPanel: Boolean,
+      current: Json
+  ): Unit = {
+    val input = dom.document.createElement("input").asInstanceOf[dom.html.Input]
+    input.className = "jv-edit"
+    input.`type` = "text"
+    input.value = editDisplayText(current)
+    val parent = leafEl.parentNode
+    if (parent != null) {
+      parent.replaceChild(input, leafEl)
+      input.focus()
+      input.select()
+      var finished = false
+      var committing = false
+      def restoreLeaf(): Unit =
+        if (input.parentNode == parent) {
+          parent.replaceChild(leafEl, input)
+        }
+      def finish(restore: Boolean): Unit =
+        if (!finished) {
+          finished = true
+          if (restore) restoreLeaf()
+          else input.disabled = true
+        }
+      def commit(): Unit =
+        if (!finished) {
+          committing = true
+          val parsed = parseEditValue(input.value, current)
+          val decodeType =
+            lastDecodeType.orElse(detailViewPath.flatMap(openTabs.get).flatMap(_.decodeType))
+          decodeType match {
+            case None =>
+              setIndexStatus("Cannot write: missing decodeType for this tab", ok = false)
+              finish(restore = true)
+            case Some(_) =>
+              finish(restore = false)
+              writeMemoryValue(address, segments, overlayPanel, parsed) {
+                case false =>
+                  // Write failed — put the leaf back so the user can try again.
+                  finished = false
+                  committing = false
+                  input.disabled = false
+                  if (input.parentNode == null && parent != null) {
+                    parent.replaceChild(input, leafEl)
+                    input.focus()
+                    input.select()
+                  }
+                case true =>
+                  ()
+              }
+          }
+        }
+      input.addEventListener(
+        "keydown",
+        { (e: KeyboardEvent) =>
+          if (e.key == "Enter" || e.keyCode == 13) {
+            e.preventDefault()
+            e.stopPropagation()
+            commit()
+          } else if (e.key == "Escape" || e.keyCode == 27) {
+            e.preventDefault()
+            finish(restore = true)
+          }
+        }
+      )
+      input.addEventListener(
+        "blur",
+        { (_: dom.FocusEvent) =>
+          // Enter disables the input and fires blur; don't treat that as cancel.
+          if (!committing) finish(restore = true)
+        }
+      )
+    }
+  }
+
+  private def editDisplayText(json: Json): String =
+    json.asString.getOrElse(jsonPrimitiveText(json))
+
+  private def parseEditValue(raw: String, previous: Json): Json = {
+    val trimmed = raw.trim
+    if (previous.isBoolean)
+      Json.fromBoolean(trimmed.equalsIgnoreCase("true") || trimmed == "1")
+    else if (previous.isNumber) {
+      io.circe.parser
+        .parse(trimmed)
+        .toOption
+        .filter(_.isNumber)
+        .orElse(Try(trimmed.toLong).toOption.map(Json.fromLong))
+        .orElse(
+          Try(trimmed.toDouble).toOption.flatMap(d => Json.fromDouble(d))
+        )
+        .getOrElse(Json.fromString(trimmed))
+    } else
+      Json.fromString(trimmed)
+  }
+
+  private def writeMemoryValue(
+      address: Long,
+      segments: List[String],
+      overlayPanel: Boolean,
+      value: Json
+  )(onCompleteResult: Boolean => Unit): Unit = {
+    val decodeType =
+      lastDecodeType.orElse(detailViewPath.flatMap(openTabs.get).flatMap(_.decodeType))
+    decodeType match {
+      case None =>
+        setIndexStatus("Cannot write: missing decodeType for this tab", ok = false)
+        onCompleteResult(false)
+      case Some(dt) =>
+        val writeSegs = segments.filterNot(DualDecodeAlign.isMetaKey)
+        val body = Json.obj(
+          "address" -> Json.fromString(f"0x$address%x"),
+          "value" -> value,
+          "decodeType" -> Json.fromString(dt),
+          "segments" -> writeSegs.asJson,
+          "overlay" -> Json.fromBoolean(overlayPanel)
+        )
+        setIndexStatus(f"Writing 0x$address%x…", ok = true)
+        putJson("/memory", body).onComplete {
+          case Success(resp) =>
+            resp.hcursor.get[String]("error").toOption match {
+              case Some(err) =>
+                setIndexStatus(s"Write failed: $err", ok = false)
+                detailViewPath.foreach(p => payloads.get(p).foreach(showDetail(p, _)))
+                onCompleteResult(false)
+              case None =>
+                setIndexStatus(f"Wrote 0x$address%x", ok = true)
+                detailViewPath.foreach(refreshPath)
+                onCompleteResult(true)
+            }
+          case Failure(err) =>
+            setIndexStatus(s"Write failed: ${err.getMessage}", ok = false)
+            detailViewPath.foreach(p => payloads.get(p).foreach(showDetail(p, _)))
+            onCompleteResult(false)
+        }
+    }
+  }
+
+  private def isPointerPointee(json: Json): Boolean =
+    json.hcursor.get[Boolean]("_pointer").toOption.contains(true)
+
+  private def appendPointerFocus(
+      line: HTMLElement,
+      basePath: String,
+      segments: List[String],
+      source: Option[Json],
+      overlay: Option[Json]
+  ): Unit =
+    source.filter(isPointerPointee).foreach { src =>
+      val btn = el("button").asInstanceOf[dom.html.Button]
+      btn.className = "jv-focus"
+      btn.textContent = "⌖"
+      val focusPath =
+        if (segments.isEmpty) basePath
+        else segments.foldLeft(basePath)((p, s) => s"$p/$s")
+      btn.title = s"Open $focusPath as root"
+      btn.onpointerdown = { (e: dom.PointerEvent) =>
+        e.stopPropagation()
+        e.preventDefault()
+        focusPointerValue(basePath, segments, src, overlay)
+      }
+      line.appendChild(btn)
+    }
+
+  private def focusPointerValue(
+      basePath: String,
+      segments: List[String],
+      source: Json,
+      overlay: Option[Json]
+  ): Unit = {
+    val focusPath =
+      if (segments.isEmpty) basePath
+      else segments.foldLeft(basePath)((p, s) => s"$p/$s")
+    httpPathForJsonField(basePath, segments, cachedFetchablePaths) match {
+      case Some(httpPath) =>
+        refreshPath(httpPath)
+      case None =>
+        val envelope = Json
+          .obj(
+            "path" -> Json.fromString(focusPath),
+            "decoded" -> source
+          )
+          .deepMerge(
+            overlay
+              .filterNot(_.isNull)
+              .map(o => Json.obj("overlayDecoded" -> o))
+              .getOrElse(Json.obj())
+          )
+        payloads.update(focusPath, envelope)
+        bumpRefreshFreshness(focusPath, source, overlay)
+        openOrFocusTab(focusPath)
+        showDetail(focusPath, envelope)
+        setIndexStatus(s"Focused $focusPath", ok = true)
+        renderResults()
+    }
+  }
 
   private def httpPathForJsonField(
       basePath: String,
@@ -879,7 +2245,39 @@ object Main {
       val path =
         if (segments.isEmpty) basePath
         else segments.foldLeft(basePath)((p, s) => s"$p/$s")
-      if (fetchable.contains(path)) Some(path) else None
+      if (isFetchablePath(path, fetchable)) Some(path)
+      else if (nestedUnderFetchableAncestor(basePath, segments, fetchable)) Some(path)
+      else None
+    }
+  }
+
+  private def isFetchablePath(path: String, fetchable: Set[String]): Boolean =
+    fetchable.contains(path) ||
+      fetchable.exists(template =>
+        template.contains("{index}") && concreteMatchesTemplate(path, template)
+      )
+
+  /** Fields nested under a fetchable ancestor (e.g. `…/player_slots/0/x` under `…/0`). */
+  private def nestedUnderFetchableAncestor(
+      basePath: String,
+      segments: List[String],
+      fetchable: Set[String]
+  ): Boolean =
+    segments.inits.toList
+      .drop(1) // exclude the full path (already checked)
+      .exists { prefix =>
+        prefix.nonEmpty && {
+          val ancestor = prefix.foldLeft(basePath)((p, s) => s"$p/$s")
+          isFetchablePath(ancestor, fetchable)
+        }
+      }
+
+  private def concreteMatchesTemplate(concrete: String, template: String): Boolean = {
+    val cParts = concrete.split('/').toList
+    val tParts = template.split('/').toList
+    cParts.length == tParts.length && cParts.zip(tParts).forall {
+      case (c, "{index}") => c.nonEmpty && c.forall(_.isDigit)
+      case (c, t)         => c == t
     }
   }
 
@@ -917,8 +2315,11 @@ object Main {
                   case (rootOverlay, _) => rootOverlay
                 }
               payloads.update(basePath, writeDecodedFields(parent, mergedDecoded, mergedOverlay))
-              bumpRefreshFreshnessAt(basePath, segments)
-              repaintJsonViews(basePath)
+              bumpRefreshFreshnessAt(basePath, segments, overlayPanel = false)
+              if (fieldOverlay.isDefined)
+                bumpRefreshFreshnessAt(basePath, segments, overlayPanel = true)
+              patchJsonViews(basePath, segments)
+              setFieldRefreshBusy(httpPath, busy = false)
               setIndexStatus(s"Refreshed $httpPath", ok = true)
           }
         }
@@ -942,44 +2343,119 @@ object Main {
   private def bumpRefreshFreshness(
       basePath: String,
       @unused decoded: Json,
-      @unused overlay: Option[Json]
+      overlay: Option[Json]
   ): Unit = {
-    refreshCount += 1
-    clearFreshUnder(basePath, Nil)
-    fieldFreshAt.update(stampKey(basePath, Nil), refreshCount)
+    stampFreshnessAt(basePath, Nil, overlayPanel = false)
+    if (overlay.isDefined) stampFreshnessAt(basePath, Nil, overlayPanel = true)
   }
 
-  private def bumpRefreshFreshnessAt(basePath: String, segments: List[String]): Unit = {
-    refreshCount += 1
-    clearFreshUnder(basePath, segments)
-    fieldFreshAt.update(stampKey(basePath, segments), refreshCount)
+  private def bumpRefreshFreshnessAt(
+      basePath: String,
+      segments: List[String],
+      overlayPanel: Boolean
+  ): Unit =
+    stampFreshnessAt(basePath, segments, overlayPanel)
+
+  private def stampFreshnessAt(
+      basePath: String,
+      segments: List[String],
+      overlayPanel: Boolean
+  ): Unit = {
+    val now = js.Date.now()
+    latestDataTime = now
+    clearFreshUnder(basePath, segments, overlayPanel)
+    fieldFreshAt.update(stampKey(basePath, segments, overlayPanel), now)
   }
 
-  private def clearFreshUnder(basePath: String, segments: List[String]): Unit = {
-    val prefix = stampKey(basePath, segments)
-    fieldFreshAt.keys.filter(k => k == prefix || k.startsWith(prefix + "/")).toList.foreach { k =>
-      fieldFreshAt.remove(k)
+  private def clearFreshUnder(
+      basePath: String,
+      segments: List[String],
+      overlayPanel: Boolean
+  ): Unit = {
+    val prefix = stampKey(basePath, segments, overlayPanel)
+    fieldFreshAt.filterInPlace { case (k, _) =>
+      !(k == prefix || k.startsWith(prefix + "/"))
     }
   }
 
   private def jsonPointer(segments: List[String]): String =
     if (segments.isEmpty) "" else segments.mkString("/", "/", "")
 
-  private def stampKey(basePath: String, segments: List[String]): String =
-    basePath + jsonPointer(segments)
+  private def stampKey(
+      basePath: String,
+      segments: List[String],
+      overlayPanel: Boolean
+  ): String = {
+    val raw = basePath + jsonPointer(segments)
+    if (overlayPanel) s"ov:$raw" else raw
+  }
 
-  private def refreshAge(basePath: String, segments: List[String]): Int = {
+  /** Epoch ms when this subtree (or nearest ancestor) was last updated. */
+  private def fieldFreshMs(
+      basePath: String,
+      segments: List[String],
+      overlayPanel: Boolean
+  ): Double = {
     var segs = segments
     while (true) {
-      fieldFreshAt.get(stampKey(basePath, segs)) match {
+      fieldFreshAt.get(stampKey(basePath, segs, overlayPanel)) match {
         case Some(stamped) =>
-          return math.min(MaxRefreshAge, math.max(0, refreshCount - stamped))
+          return stamped
         case None =>
-          if (segs.isEmpty) return 0
+          if (segs.isEmpty) return latestDataTime
           segs = segs.init
       }
     }
-    0
+    latestDataTime
+  }
+
+  /** Age in ms: how far behind the latest data (or wall clock) this field is. */
+  private def fieldAgeMs(freshMs: Double): Double = {
+    val latest = math.max(latestDataTime, js.Date.now())
+    math.max(0.0, latest - freshMs)
+  }
+
+  private def applyAgeAttributes(
+      line: HTMLElement,
+      basePath: String,
+      segments: List[String],
+      overlayPanel: Boolean
+  ): Unit = {
+    val freshMs = fieldFreshMs(basePath, segments, overlayPanel)
+    line.setAttribute("data-fresh-ms", freshMs.toString)
+    applyAgeStyle(line, fieldAgeMs(freshMs))
+  }
+
+  private def applyAgeStyle(line: HTMLElement, ageMs: Double): Unit = {
+    val (opacity, tint) = ageVisual(ageMs)
+    line.style.setProperty("--jv-fade", f"$opacity%.3f")
+    line.style.setProperty("--jv-tint", f"$tint%.3f")
+    if (ageMs >= StaleAfterMs) line.classList.add("jv-stale")
+    else line.classList.remove("jv-stale")
+  }
+
+  /** Mild fade for the first minute; a clearer (but still readable) mute after that. */
+  private def ageVisual(ageMs: Double): (Double, Double) = {
+    val sec = ageMs / 1000.0
+    if (sec <= 0) (1.0, 0.0)
+    else if (sec < 60.0) {
+      val t = sec / 60.0
+      (1.0 - t * 0.10, t * 0.22)
+    } else {
+      val extra = math.min(1.0, (sec - 60.0) / 180.0)
+      (0.82 - extra * 0.06, 0.34 + extra * 0.08)
+    }
+  }
+
+  private def refreshVisibleAgeStyles(): Unit = {
+    val lines = dom.document.querySelectorAll(".jv-line[data-fresh-ms]")
+    var i = 0
+    while (i < lines.length) {
+      val line = lines.item(i).asInstanceOf[HTMLElement]
+      val freshMs = Try(line.getAttribute("data-fresh-ms").toDouble).getOrElse(latestDataTime)
+      applyAgeStyle(line, fieldAgeMs(freshMs))
+      i += 1
+    }
   }
 
   private def extractDecoded(json: Json): Json =
@@ -1067,13 +2543,11 @@ object Main {
     )
 
   private def showIdleDetail(): Unit = {
-    val empty = byId("detail-empty")
-    val body = byId("detail-body")
-    body.setAttribute("hidden", "true")
-    empty.removeAttribute("hidden")
-    empty.textContent = "Search for a route, then press ↻ to load memory."
-    clearIndexBrowse()
-    detailViewPath = None
+    // Keep open tabs; only reset empty messaging when nothing is open.
+    if (openTabs.isEmpty) clearWorkspace()
+    else {
+      clearIndexBrowse()
+    }
   }
 
   private def clearIndexBrowse(): Unit = {
@@ -1081,6 +2555,7 @@ object Main {
     indexValues = Nil
     byId("index-bar").setAttribute("hidden", "true")
     setIndexStatus("", ok = true)
+    persistActiveTabDraft()
   }
 
   private def renderIndexBar(): Unit = {
@@ -1253,12 +2728,14 @@ object Main {
   private def loadDraftForStruct(structId: String): Unit = {
     editingStructId = Some(structId)
     inputById("edit-struct").value = structId
+    persistActiveTabDraft()
     setEditorStatus(s"Loading fields for $structId…", ok = true)
 
     def applyMembers(members: List[OverlayMemberUi]): Unit = {
       draftMembers =
         if (members.nonEmpty) members
         else List(OverlayMemberUi("field0", "u8", isArray = false, None, false))
+      persistActiveTabDraft()
       renderFieldEditor()
       setEditorStatus(s"Loaded ${draftMembers.size} field(s).", ok = true)
     }
@@ -1291,6 +2768,7 @@ object Main {
 
   private def setEditorOpen(open: Boolean): Unit = {
     editorOpen = open
+    persistActiveTabDraft()
     val body = byId("detail-body")
     val editorBody = byId("editor-body")
     val chevron = byId("editor-chevron")
@@ -1380,6 +2858,7 @@ object Main {
           val a = draftMembers(index - 1)
           val b = draftMembers(index)
           draftMembers = draftMembers.updated(index - 1, b).updated(index, a)
+          persistActiveTabDraft()
           renderFieldEditor()
         }
       }
@@ -1393,6 +2872,7 @@ object Main {
           val a = draftMembers(index)
           val b = draftMembers(index + 1)
           draftMembers = draftMembers.updated(index, b).updated(index + 1, a)
+          persistActiveTabDraft()
           renderFieldEditor()
         }
       }
@@ -1405,6 +2885,7 @@ object Main {
         draftMembers = draftMembers.zipWithIndex.collect {
           case (m, i) if i != index => m
         }
+        persistActiveTabDraft()
         renderFieldEditor()
       }
 
@@ -1444,6 +2925,7 @@ object Main {
     }.toList
     if (synced.nonEmpty || rows.length == 0) {
       draftMembers = synced
+      persistActiveTabDraft()
     }
   }
 
@@ -1458,6 +2940,7 @@ object Main {
       setEditorStatus("Each field needs a typeId.", ok = false)
     } else {
       editingStructId = Some(structId)
+      persistActiveTabDraft()
       val updatedStructs =
         overlays.structs + (structId -> OverlayStructDefUi(draftMembers))
       val updatedNew =
@@ -1504,6 +2987,7 @@ object Main {
         )
         editingStructId = Some(id)
         draftMembers = members
+        persistActiveTabDraft()
         inputById("new-struct-id").value = ""
         inputById("edit-struct").value = id
         renderTypeDatalists()
@@ -1522,12 +3006,60 @@ object Main {
             overlays = saved
             setEditorStatus("Overlays applied.", ok = true)
             loadTypesAndOverlays()
-            selected.foreach(refreshPath)
+            // DESNOTE(jbarber, 2026-07-20): Watch bindings capture overlay field maps at
+            // subscribe time. Re-subscribe after Apply so source watches expand to the new
+            // overlapping overlay members and keep them updated over /ws. Refresh every open
+            // tab path so overlay panes stay current across the workspace.
+            resubscribeAllWatches(() => refreshOpenTabPayloads())
           case Left(err) =>
             setEditorStatus(s"Bad overlay response: ${err.getMessage}", ok = false)
         }
       case Failure(err) =>
         setEditorStatus(err.getMessage, ok = false)
+    }
+  }
+
+  private def refreshOpenTabPayloads(): Unit = {
+    val paths = openTabs.keys.toList
+    if (paths.isEmpty) activeTabPath.orElse(selected).foreach(refreshPath)
+    else paths.foreach(refreshPath)
+  }
+
+  /** Cancel and re-create every active watch so overlay segment maps match the current document. */
+  private def resubscribeAllWatches(onDone: () => Unit): Unit = {
+    val paths = activeWatches.keys.toList
+    if (paths.isEmpty) {
+      onDone()
+    } else {
+      val cancels = Future.sequence(paths.flatMap { path =>
+        activeWatches.get(path).map { watchId =>
+          deleteJson(s"/watches/$watchId").transform {
+            case Success(_) => Success(path)
+            case Failure(_) => Success(path)
+          }
+        }
+      })
+      cancels.onComplete { _ =>
+        activeWatches.clear()
+        watchOverlaySegments.clear()
+        val subscribes = Future.sequence(paths.map { path =>
+          postJson("/watches", Json.obj("path" -> Json.fromString(path))).map { json =>
+            json.hcursor.get[Int]("watchId").toOption.foreach { watchId =>
+              activeWatches.update(path, watchId)
+              val overlaySegs = json.hcursor
+                .downField("overlaySegments")
+                .as[List[List[String]]]
+                .getOrElse(Nil)
+              if (overlaySegs.nonEmpty) watchOverlaySegments.update(path, overlaySegs)
+            }
+            path
+          }
+        })
+        subscribes.onComplete { _ =>
+          detailViewPath.foreach(p => payloads.get(p).foreach(showDetail(p, _)))
+          onDone()
+        }
+      }
     }
   }
 
@@ -1547,6 +3079,37 @@ object Main {
         banner.className = "visible"
         banner.textContent = text
     }
+  }
+
+  private def showToast(title: String, message: String): Unit = {
+    val host = byId("toast-host")
+    val toast = el("div")
+    toast.className = "toast"
+    toast.setAttribute("role", "status")
+
+    val body = el("div")
+    body.className = "toast-body"
+    val titleEl = el("p")
+    titleEl.className = "toast-title"
+    titleEl.textContent = title
+    val msgEl = el("p")
+    msgEl.className = "toast-message"
+    msgEl.textContent = message
+    body.appendChild(titleEl)
+    body.appendChild(msgEl)
+
+    val dismiss = el("button").asInstanceOf[dom.html.Button]
+    dismiss.className = "toast-dismiss"
+    dismiss.setAttribute("type", "button")
+    dismiss.textContent = "×"
+    dismiss.title = "Dismiss"
+    dismiss.onclick = (_: MouseEvent) => {
+      val _ = host.removeChild(toast)
+    }
+
+    toast.appendChild(body)
+    toast.appendChild(dismiss)
+    host.appendChild(toast)
   }
 
   private def shortenPath(path: String): String =
@@ -1596,6 +3159,48 @@ object Main {
           case Right(json) => json
           case Left(err)   => throw new RuntimeException(err.message)
         }
+      }
+    }
+  }
+
+  private def postJson(path: String, payload: Json): Future[Json] = {
+    val init = new RequestInit {
+      method = HttpMethod.POST
+      body = payload.noSpaces
+      headers = js.Dictionary("Content-Type" -> "application/json")
+    }
+    dom.fetch(path, init).toFuture.flatMap { response =>
+      response.text().toFuture.map { text =>
+        parse(text) match {
+          case Right(json) =>
+            if (!response.ok)
+              throw new RuntimeException(
+                json.hcursor.get[String]("error").toOption.getOrElse(s"HTTP ${response.status}")
+              )
+            json
+          case Left(err) =>
+            throw new RuntimeException(
+              if (!response.ok) s"HTTP ${response.status}: $text" else err.message
+            )
+        }
+      }
+    }
+  }
+
+  private def deleteJson(path: String): Future[Json] = {
+    val init = new RequestInit {
+      method = HttpMethod.DELETE
+    }
+    dom.fetch(path, init).toFuture.flatMap { response =>
+      response.text().toFuture.map { text =>
+        if (!response.ok)
+          throw new RuntimeException(s"HTTP ${response.status}: $text")
+        if (text.trim.isEmpty) Json.obj()
+        else
+          parse(text) match {
+            case Right(json) => json
+            case Left(err)   => throw new RuntimeException(err.message)
+          }
       }
     }
   }

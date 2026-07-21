@@ -14,7 +14,9 @@ final case class ReadPlan(
     cStringPointer: Boolean,
     cStringPointerArray: Boolean = false,
     /** Byte stride between array elements when symbol size exceeds packed layout width. */
-    elementStrideBytes: Option[Int] = None
+    elementStrideBytes: Option[Int] = None,
+    /** Element count when this read decodes a root-level array (enclosing unwrap). */
+    arrayLength: Option[Int] = None
 )
 final case class PointerChainPlan(
     pointeeType: IrType,
@@ -40,6 +42,11 @@ sealed trait MemberSubRoute {
   def endian: IrEndian
 }
 object MemberSubRoute {
+  // DESNOTE(jbarber, 2026-07-20): Enclosing outputs unwrap a lone array member into a ListType
+  // read (e.g. Melee `player_slots`). Indexed element routes use `$basePath/{index}` with no
+  // member-name segment; this sentinel marks those synthetic ValueSubRoutes.
+  val RootArrayMemberName: String = ""
+
   final case class ValueSubRoute(
       memberName: String,
       baseAddress: Long,

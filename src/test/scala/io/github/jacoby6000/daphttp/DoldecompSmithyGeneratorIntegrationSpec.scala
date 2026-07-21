@@ -682,6 +682,128 @@ class DoldecompSmithyGeneratorIntegrationSpec extends AnyFunSuite {
     assert(plans.routes("/api/DolDecompApi/start_event_rules").reads.head.decodeCodec.nonEmpty)
   }
 
+  test("incomplete u32 bitfield units use bits-used size (StartMeleeRules-like)") {
+    val tmp = java.nio.file.Files.createTempDirectory("dap-u32-bitfields")
+    try {
+      val hdr = tmp.resolve("rules.h")
+      val symbols = tmp.resolve("symbols.txt")
+      java.nio.file.Files.writeString(
+        hdr,
+        """
+          |typedef unsigned char u8;
+          |typedef unsigned short u16;
+          |typedef unsigned int u32;
+          |typedef signed int s32;
+          |typedef float f32;
+          |struct StartMeleeRules {
+          |    u32 x0_0 : 3;
+          |    u32 x0_3 : 3;
+          |    u32 x0_6 : 1;
+          |    u32 x0_7 : 1;
+          |    u32 x1_0 : 1;
+          |    u32 x1_1 : 1;
+          |    u32 x1_2 : 1;
+          |    u32 x1_3 : 1;
+          |    u32 x1_4 : 1;
+          |    u32 x1_5 : 1;
+          |    u32 x1_6 : 1;
+          |    u32 x1_7 : 1;
+          |    u32 x2_0 : 1;
+          |    u32 x2_1 : 1;
+          |    u32 x2_2 : 1;
+          |    u32 x2_3 : 1;
+          |    u32 x2_4 : 1;
+          |    u32 x2_5 : 1;
+          |    u32 x2_6 : 1;
+          |    u32 x2_7 : 1;
+          |    u32 x3_0 : 1;
+          |    u32 x3_1 : 1;
+          |    u32 x3_2 : 1;
+          |    u32 x3_3 : 1;
+          |    u32 x3_4 : 1;
+          |    u32 x3_5 : 1;
+          |    u32 x3_6 : 1;
+          |    u32 x3_7 : 1;
+          |    u32 x4_0 : 1;
+          |    u32 x4_1 : 1;
+          |    u32 x4_2 : 1;
+          |    u32 x4_3 : 1;
+          |    u32 x4_4 : 1;
+          |    u32 x4_5 : 1;
+          |    u32 x4_6 : 1;
+          |    u32 x4_7 : 1;
+          |    u32 x5_0 : 1;
+          |    u32 x5_1 : 1;
+          |    u32 x5_2 : 1;
+          |    u32 x5_3 : 1;
+          |    u32 x5_4 : 1;
+          |    u32 x5_5 : 1;
+          |    u32 x5_6 : 1;
+          |    u32 x5_7 : 1;
+          |    u8 x6;
+          |    u8 x7;
+          |    u8 is_teams;
+          |    u8 x9;
+          |    u8 xA;
+          |    u8 xB;
+          |    u8 xC;
+          |    u8 xD;
+          |    u16 xE;
+          |    u32 x10;
+          |    u8 x14;
+          |    u32 x18;
+          |    u32 x1C_pad[(0x20 - 0x1C) / 4];
+          |    u64 x20;
+          |    s32 x28;
+          |    f32 x2C;
+          |    f32 x30;
+          |    f32 x34;
+          |    void (*on_unpause_override)(int);
+          |    void (*on_pause_override)(int);
+          |    int (*check_for_pauser_override)(void);
+          |    void (*x44)(void);
+          |    void (*x48)(void);
+          |    void (*x4C)(void);
+          |    void (*x50)(u8);
+          |    u32* x54;
+          |    u32* x58;
+          |    u8 pad_x5C[0x60 - 0x5C];
+          |};
+          |struct StartMeleeRules g_rules;
+          |""".stripMargin
+      )
+      java.nio.file.Files.writeString(
+        symbols,
+        "g_rules = .data:0x80000000; // type:object size:0x60 scope:global ctype:StartMeleeRules\n"
+      )
+
+      val generation = DoldecompIrGenerator
+        .generateFromPaths(symbols, List(tmp), "example.rules", "Api", 32)
+        .toOption
+        .get
+      val root = generation.services.head.operations.head.output.members.head.target
+        .asInstanceOf[IrType.MemoryMappedStruct]
+      assert(root.declaredSizeBits.contains(0x60), s"sizeof=${root.declaredSizeBits}")
+      assert(root.members.find(_.name == "x6").flatMap(_.offsetBytes).contains(6))
+      assert(root.members.find(_.name == "x20").flatMap(_.offsetBytes).contains(0x20))
+      assert(root.members.find(_.name == "onUnpauseOverride").flatMap(_.offsetBytes).contains(0x38))
+      assert(root.members.find(_.name == "padX5C").flatMap(_.offsetBytes).contains(0x5c))
+
+      val codec = HttpRouteIrEmitter.compileCodec(root, IrEndian.Big, Some(32))
+      assert(codec.isRight, codec)
+      val decoded =
+        codec.toOption.get.decode(scodec.bits.BitVector(Array.fill[Byte](0x60)(0)))
+      assert(decoded.isSuccessful, decoded)
+    } finally {
+      java.nio.file.Files
+        .walk(tmp)
+        .sorted(java.util.Comparator.reverseOrder())
+        .forEach { p =>
+          val _ = java.nio.file.Files.deleteIfExists(p)
+        }
+    }
+  }
+
   test("packs structs from member types; offset comments are documentation") {
     val fixtureRoot = Paths.get("src/test/resources/doldecomp-fixture-offsets")
     val generation = DoldecompIrGenerator

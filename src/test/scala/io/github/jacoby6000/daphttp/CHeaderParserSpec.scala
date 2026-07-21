@@ -2,6 +2,8 @@ package io.github.jacoby6000.daphttp
 
 import org.scalatest.funsuite.AnyFunSuite
 
+import java.nio.file.Files
+
 class CHeaderParserSpec extends AnyFunSuite {
   test("parses typedef struct declarations") {
     val source =
@@ -467,6 +469,211 @@ class CHeaderParserSpec extends AnyFunSuite {
     assert(declaration.isArray)
     assert(declaration.declaratorLength.contains(2))
     assert(declaration.pointerDepth == 2)
+  }
+
+  test("parses anonymous in-struct structs under the field declarator name") {
+    val source =
+      """
+        |typedef struct MatchState {
+        |    u8 unk_0;
+        |    struct {
+        |        u8 x0;
+        |        u8 slot_type;
+        |        u8 x4_b0 : 1;
+        |        u8 x4_b1 : 1;
+        |        u8 respawn_timer;
+        |    } FighterMatchInfo[6];
+        |    u32 frame_count;
+        |} MatchState;
+        |""".stripMargin
+
+    val structs = CHeaderParser.parse(source).toMap
+    assert(structs.contains("MatchState"))
+    assert(
+      structs.contains("FighterMatchInfo"),
+      s"expected anonymous nested struct registered as FighterMatchInfo; got ${structs.keys.toList}"
+    )
+
+    val fields = CHeaderParser.extractFields(structs("MatchState"))
+    val fighter = fields.find(f => CHeaderParser.fieldName(f.declarator) == "FighterMatchInfo")
+    assert(fighter.isDefined)
+    assert(fighter.get.typeName == "FighterMatchInfo")
+    assert(CHeaderParser.arrayLength(fighter.get.declarator).contains(6))
+
+    val nestedFields = CHeaderParser.extractFields(structs("FighterMatchInfo"))
+    assert(
+      nestedFields.map(f => CHeaderParser.fieldName(f.declarator)).toSet == Set(
+        "x0",
+        "slot_type",
+        "x4_b0",
+        "x4_b1",
+        "respawn_timer"
+      )
+    )
+  }
+
+  test("anonymous inline struct arrays become ListType of struct in IR") {
+    val tmp = Files.createTempDirectory("dap-anon-inline-struct")
+    try {
+      val hdr = tmp.resolve("match.h")
+      val symbols = tmp.resolve("symbols.txt")
+      Files.writeString(
+        hdr,
+        """
+          |typedef struct MatchState {
+          |    u8 unk_0;
+          |    struct {
+          |        u8 x0;
+          |        u8 slot_type;
+          |        u8 x4_b0 : 1;
+          |        u8 x4_b1 : 1;
+          |        u8 respawn_timer;
+          |    } FighterMatchInfo[6];
+          |    u32 frame_count;
+          |} MatchState;
+          |MatchState gMatchState;
+          |""".stripMargin
+      )
+      Files.writeString(
+        symbols,
+        "gMatchState = .data:0x80000000; // type:object size:0x40 scope:global ctype:MatchState\n"
+      )
+      val generation = DoldecompIrGenerator
+        .generateFromPaths(symbols, List(tmp), "example.match", "Api", 32)
+        .toOption
+        .get
+      val root = generation.services.head.operations.head.output.members.head.target
+        .asInstanceOf[IrType.MemoryMappedStruct]
+      val fighter = root.members.find(_.name == "fighterMatchInfo").get
+      assert(fighter.isArray)
+      assert(fighter.arrayLength.contains(6))
+      val list = fighter.target.asInstanceOf[IrType.ListType]
+      val elem = list.element.asInstanceOf[IrType.MemoryMappedStruct]
+      assert(elem.members.map(_.name).contains("slotType"))
+      assert(elem.members.map(_.name).contains("respawnTimer"))
+      assert(!fighter.target.isInstanceOf[IrType.Primitive])
+    } finally {
+      Files
+        .walk(tmp)
+        .sorted(java.util.Comparator.reverseOrder())
+        .forEach { p =>
+          val _ = Files.deleteIfExists(p)
+        }
+    }
+  }
+
+  test("lbl_8046B6A0-like parent with anonymous FighterMatchInfo still decodes") {
+    val tmp = Files.createTempDirectory("dap-match-parent-decode")
+    try {
+      val hdr = tmp.resolve("match.h")
+      val symbols = tmp.resolve("symbols.txt")
+      Files.writeString(
+        hdr,
+        """
+          |typedef unsigned char u8;
+          |typedef signed char s8;
+          |typedef unsigned short u16;
+          |typedef unsigned int u32;
+          |typedef signed int s32;
+          |typedef float f32;
+          |struct MatchState {
+          |    u8 unk_0;
+          |    s8 pauser;
+          |    u8 pause_timer;
+          |    u8 unk_3;
+          |    u8 unpause_timer;
+          |    u8 hud_enabled;
+          |    u8 terminate_match;
+          |    u8 is_singleplayer;
+          |    u8 match_result;
+          |    u8 unk_9;
+          |    u8 unk_A;
+          |    u8 unk_B;
+          |    u8 unk_C;
+          |    u8 unk_D;
+          |    u8 match_over;
+          |    u8 unk_F;
+          |    s32 unk_10;
+          |    s32 unk_14;
+          |    u8 unk_18;
+          |    u32* unk_1C;
+          |    u32* unk_20;
+          |    u32 frame_count;
+          |    u32 timer_seconds;
+          |    u16 unk_2C;
+          |    u16 unk_2E;
+          |    u8 unk_30;
+          |    f32 unk_34;
+          |    struct {
+          |        u8 x0;
+          |        u8 x1;
+          |        u8 slot_type;
+          |        s8 spawn_point;
+          |        u8 x4_b0 : 1;
+          |        u8 x4_b1 : 1;
+          |        u8 x4_b2 : 1;
+          |        u8 x4_b3 : 1;
+          |        u8 x4_b4 : 1;
+          |        u8 x4_b5 : 1;
+          |        u8 x4_b6 : 1;
+          |        u8 x4_b7 : 1;
+          |        u8 x5;
+          |        u16 x6;
+          |        u8 x8;
+          |        u8 x9;
+          |        u8 respawn_timer;
+          |        u8 xB;
+          |        u16 xC;
+          |    } FighterMatchInfo[6];
+          |    char pad_8C[0x24C - 0x8C];
+          |    u32 after;
+          |} MatchState;
+          |MatchState gMatchState;
+          |""".stripMargin
+      )
+      Files.writeString(
+        symbols,
+        "gMatchState = .data:0x80000000; // type:object size:0x250 scope:global ctype:MatchState\n"
+      )
+
+      val padLen = CHeaderParser
+        .extractFields(CHeaderParser.parse(Files.readString(hdr)).toMap.apply("MatchState"))
+        .find(f => CHeaderParser.fieldName(f.declarator) == "pad_8C")
+        .flatMap(f => CHeaderParser.arrayLength(f.declarator))
+      assert(padLen.contains(0x1c0), s"pad_8C length=$padLen")
+
+      val generation = DoldecompIrGenerator
+        .generateFromPaths(symbols, List(tmp), "example.match", "Api", 32)
+        .toOption
+        .get
+      val root = generation.services.head.operations.head.output.members.head.target
+        .asInstanceOf[IrType.MemoryMappedStruct]
+      val fighter = root.members.find(_.name == "fighterMatchInfo").get
+      val list = fighter.target.asInstanceOf[IrType.ListType]
+      val elem = list.element.asInstanceOf[IrType.MemoryMappedStruct]
+      val elemSize = HttpRouteIrEmitter.sizeBytesForType(elem, Some(32))
+      assert(
+        elemSize.contains(0xe),
+        s"FighterMatchInfo element size=$elemSize members=${elem.members.map(m => m.name -> m.target)}"
+      )
+
+      val parentSize = HttpRouteIrEmitter.sizeBytesForType(root, Some(32))
+      assert(parentSize.isRight, s"parent size failed: $parentSize warnings=${generation.warnings}")
+
+      val codec = HttpRouteIrEmitter.compileCodec(root, IrEndian.Big, Some(32))
+      assert(codec.isRight, s"codec failed: $codec")
+      val bytes = Array.fill[Byte](parentSize.toOption.get)(0)
+      val decoded = codec.toOption.get.decode(scodec.bits.BitVector(bytes))
+      assert(decoded.isSuccessful, s"decode failed: $decoded")
+      assert(decoded.require.value.hcursor.downField("fighterMatchInfo").focus.exists(_.isArray))
+    } finally {
+      Files
+        .walk(tmp)
+        .sorted(java.util.Comparator.reverseOrder())
+        .forEach { p =>
+          val _ = Files.deleteIfExists(p)
+        }
+    }
   }
 
   test("registers globals defined with an inline struct definition") {

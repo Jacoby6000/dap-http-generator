@@ -120,7 +120,68 @@
       font-size: 0.82rem;
       display: flex;
       flex-direction: column;
-      gap: 0.75rem;
+      gap: 0;
+      padding: 0;
+      overflow: hidden;
+    }
+    #detail-empty {
+      padding: 0.75rem 1rem 1.5rem;
+    }
+    #tab-bar {
+      display: none;
+      flex: 0 0 auto;
+      align-items: stretch;
+      gap: 0;
+      overflow-x: auto;
+      overflow-y: hidden;
+      border-bottom: 1px solid var(--border);
+      background: var(--bg);
+      min-height: 2rem;
+    }
+    #tab-bar.has-tabs { display: flex; }
+    .tab {
+      display: flex;
+      align-items: center;
+      gap: 0.35rem;
+      flex: 0 0 auto;
+      max-width: 16rem;
+      padding: 0.4rem 0.35rem 0.4rem 0.65rem;
+      border-right: 1px solid var(--border);
+      border-radius: 0;
+      background: transparent;
+      color: var(--muted);
+      font-family: "IBM Plex Mono", monospace;
+      font-size: 0.75rem;
+      cursor: pointer;
+      white-space: nowrap;
+      user-select: none;
+    }
+    .tab:hover { background: var(--hover); color: var(--text); }
+    .tab.active {
+      background: var(--panel);
+      color: var(--text);
+      box-shadow: inset 0 -2px 0 var(--accent);
+    }
+    .tab-label {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      min-width: 0;
+    }
+    .tab-close {
+      flex: 0 0 auto;
+      background: transparent;
+      border: 1px solid transparent;
+      color: var(--muted);
+      padding: 0 0.25rem;
+      font-size: 0.85rem;
+      line-height: 1;
+      border-radius: 3px;
+      cursor: pointer;
+    }
+    .tab-close:hover {
+      color: var(--text);
+      border-color: var(--border);
+      background: var(--panel-2);
     }
     #detail-body {
       display: flex;
@@ -129,6 +190,8 @@
       min-height: 0;
       flex: 1;
       height: 100%;
+      padding: 0.75rem 1rem 1.5rem;
+      overflow: auto;
     }
     .toolbar {
       display: flex;
@@ -163,7 +226,10 @@
       user-select: none;
       font-family: "IBM Plex Mono", monospace;
     }
-    .twist.empty { visibility: hidden; }
+    .twist.empty {
+      visibility: hidden;
+      pointer-events: none;
+    }
     .label {
       cursor: pointer;
       overflow: hidden;
@@ -190,7 +256,7 @@
       margin: 0;
       font-family: "IBM Plex Mono", monospace;
       font-size: 0.82rem;
-      line-height: 1.45;
+      line-height: 1.25;
       overflow: auto;
       flex: 1;
       min-height: 0;
@@ -202,23 +268,48 @@
     }
     .json-view.plain.error { color: var(--err); }
     .jv-line {
-      display: flex;
-      flex-wrap: wrap;
-      align-items: baseline;
-      gap: 0.25rem;
-      padding: 0.1rem 0.25rem;
-      margin: 0.05rem 0;
-      border-radius: 3px;
+      /* DESNOTE(jbarber, 2026-07-20): Block + inline-block gutter, not flex. Watch/refresh
+         sit in a left action gutter (absolute). Do not insert placeholder .jv-twist.empty
+         nodes — even with display:none they interacted badly with dual-row grid line boxes
+         (large top/bottom gaps). Leaf/close lines reserve the twist column via padding. */
+      display: block;
+      position: relative;
+      line-height: 1.25;
+      padding: 0 0.2rem 0 2.6rem;
+      margin: 0;
+      min-height: 0;
+      min-width: 0;
+      border-radius: 2px;
+      opacity: var(--jv-fade, 1);
+      background: linear-gradient(
+        90deg,
+        rgba(120, 130, 145, var(--jv-tint, 0)) 0%,
+        rgba(120, 130, 145, calc(var(--jv-tint, 0) * 0.4)) 65%,
+        transparent 100%
+      );
+      transition: opacity 0.4s ease, background 0.4s ease;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    /* Leaf/close rows have no twist element — pad past the twist column to align with keys. */
+    .jv-line.jv-leaf,
+    .jv-line.jv-close {
+      padding-left: calc(2.6rem + 1.1rem);
     }
     .jv-twist {
+      display: inline-block;
       width: 1.1rem;
-      flex: 0 0 1.1rem;
       text-align: center;
       color: var(--muted);
       cursor: pointer;
       user-select: none;
+      vertical-align: baseline;
+      line-height: inherit;
     }
-    .jv-twist.empty { visibility: hidden; cursor: default; }
+    .jv-twist.empty {
+      display: none !important;
+    }
     .jv-key { color: var(--accent); }
     .jv-key::after { content: ":"; color: var(--muted); margin-left: 0.1rem; }
     .jv-null, .jv-bool { color: #c792ea; }
@@ -226,68 +317,88 @@
     .jv-str { color: #c3e88d; }
     .jv-punct { color: var(--muted); }
     .jv-preview { color: var(--muted); font-size: 0.75rem; }
-    .jv-refresh {
+    .jv-refresh,
+    .jv-watch {
+      position: absolute;
+      top: 0;
+      display: inline-block;
       background: transparent;
       border: 1px solid transparent;
-      padding: 0 0.25rem;
+      padding: 0 0.15rem;
+      margin: 0;
       font-family: "IBM Plex Mono", monospace;
       font-size: 0.72rem;
       color: var(--muted);
       cursor: pointer;
-      line-height: 1.2;
+      line-height: inherit;
+      height: auto;
+      min-height: 0;
+      appearance: none;
+      z-index: 1;
     }
+    .jv-watch { left: 0.05rem; }
+    .jv-refresh { left: 1.2rem; }
     .jv-refresh:hover {
       color: var(--accent);
       border-color: var(--border);
       background: var(--hover);
     }
     .jv-refresh:disabled { opacity: 0.45; cursor: wait; }
-    .jv-line[data-age="0"] { background: none; opacity: 1; }
-    .jv-line[data-age="1"] {
-      background: linear-gradient(90deg, rgba(120,130,145,0.18) 0%, rgba(120,130,145,0.07) 65%, transparent 100%);
-      opacity: 0.96;
+    .jv-watch:hover {
+      color: var(--accent);
+      border-color: var(--border);
+      background: var(--hover);
     }
-    .jv-line[data-age="2"] {
-      background: linear-gradient(90deg, rgba(120,130,145,0.24) 0%, rgba(120,130,145,0.10) 65%, transparent 100%);
-      opacity: 0.92;
+    .jv-watch.jv-watching {
+      color: var(--ok);
     }
-    .jv-line[data-age="3"] {
-      background: linear-gradient(90deg, rgba(120,130,145,0.30) 0%, rgba(120,130,145,0.12) 65%, transparent 100%);
-      opacity: 0.88;
+    .jv-focus {
+      display: inline-block;
+      margin-left: 0.35rem;
+      background: transparent;
+      border: 1px solid transparent;
+      padding: 0 0.15rem;
+      font-family: "IBM Plex Mono", monospace;
+      font-size: 0.75rem;
+      color: var(--muted);
+      cursor: pointer;
+      line-height: inherit;
+      vertical-align: baseline;
+      appearance: none;
     }
-    .jv-line[data-age="4"] {
-      background: linear-gradient(90deg, rgba(120,130,145,0.36) 0%, rgba(120,130,145,0.14) 65%, transparent 100%);
-      opacity: 0.84;
+    .jv-focus:hover {
+      color: var(--accent);
+      border-color: var(--border);
+      background: var(--hover);
     }
-    .jv-line[data-age="5"] {
-      background: linear-gradient(90deg, rgba(120,130,145,0.42) 0%, rgba(120,130,145,0.17) 65%, transparent 100%);
-      opacity: 0.80;
+    .jv-edit {
+      font-family: "IBM Plex Mono", monospace;
+      font-size: inherit;
+      line-height: inherit;
+      color: var(--text);
+      background: #1a2332;
+      border: 1px solid var(--accent);
+      border-radius: 2px;
+      padding: 0 0.25rem;
+      margin: 0;
+      min-width: 4rem;
+      max-width: 100%;
     }
-    .jv-line[data-age="6"] {
-      background: linear-gradient(90deg, rgba(120,130,145,0.48) 0%, rgba(120,130,145,0.19) 65%, transparent 100%);
-      opacity: 0.76;
+    .jv-line.jv-watching-row {
+      outline: 1px solid rgba(62, 207, 142, 0.35);
     }
-    .jv-line[data-age="7"] {
-      background: linear-gradient(90deg, rgba(120,130,145,0.54) 0%, rgba(120,130,145,0.22) 65%, transparent 100%);
-      opacity: 0.72;
-    }
-    .jv-line[data-age="8"] {
-      background: linear-gradient(90deg, rgba(120,130,145,0.60) 0%, rgba(120,130,145,0.24) 65%, transparent 100%);
-      opacity: 0.68;
-    }
-    .jv-line[data-age="9"] {
-      background: linear-gradient(90deg, rgba(120,130,145,0.66) 0%, rgba(120,130,145,0.26) 65%, transparent 100%);
-      opacity: 0.64;
-    }
-    .jv-line[data-age="10"] {
-      background: linear-gradient(90deg, rgba(120,130,145,0.72) 0%, rgba(120,130,145,0.29) 65%, transparent 100%);
-      opacity: 0.58;
+    .jv-line.jv-stale {
+      filter: saturate(0.85);
     }
     .jv-children {
       list-style: none;
       margin: 0;
       padding-left: 1.1rem;
       border-left: 1px solid var(--border);
+    }
+    .jv-children > li {
+      margin: 0;
+      padding: 0;
     }
     .jv-composite.collapsed > .jv-children,
     .jv-composite.collapsed > .jv-close { display: none; }
@@ -309,17 +420,153 @@
       font-size: 0.85rem;
     }
     #error-banner.visible { display: block; }
-    .detail-grid {
-      display: grid;
-      grid-template-columns: 1fr 1fr;
-      gap: 0.75rem;
+    #toast-host {
+      position: fixed;
+      top: 4.25rem;
+      right: 1rem;
+      z-index: 40;
+      display: flex;
+      flex-direction: column;
+      gap: 0.5rem;
+      max-width: min(28rem, calc(100vw - 2rem));
+      pointer-events: none;
+    }
+    .toast {
+      pointer-events: auto;
+      display: flex;
+      align-items: flex-start;
+      gap: 0.65rem;
+      padding: 0.7rem 0.75rem;
+      border: 1px solid var(--err);
+      border-radius: 6px;
+      background: #2a181a;
+      color: var(--text);
+      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+      font-size: 0.82rem;
+      line-height: 1.4;
+      animation: toast-in 0.18s ease-out;
+    }
+    .toast-body {
+      flex: 1 1 auto;
+      min-width: 0;
+    }
+    .toast-title {
+      font-weight: 600;
+      color: var(--err);
+      margin: 0 0 0.25rem;
+      font-family: "IBM Plex Sans", sans-serif;
+      font-size: 0.78rem;
+      letter-spacing: 0.02em;
+    }
+    .toast-message {
+      margin: 0;
+      color: var(--text);
+      white-space: pre-wrap;
+      word-break: break-word;
+      max-height: 12rem;
+      overflow: auto;
+      font-family: "IBM Plex Mono", monospace;
+      font-size: 0.75rem;
+    }
+    .toast-dismiss {
+      flex: 0 0 auto;
+      background: transparent;
+      border: 1px solid transparent;
+      color: var(--muted);
+      cursor: pointer;
+      font-size: 1rem;
+      line-height: 1;
+      padding: 0.1rem 0.35rem;
+      border-radius: 4px;
+    }
+    .toast-dismiss:hover {
+      color: var(--text);
+      border-color: var(--border);
+      background: var(--hover);
+    }
+    @keyframes toast-in {
+      from { opacity: 0; transform: translateY(-0.35rem); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+    .detail-dual {
+      display: flex;
+      flex-direction: column;
       min-height: 0;
       flex: 1 1 auto;
+      background: var(--panel-2);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      overflow: hidden;
     }
-    #detail-body.editor-open .detail-grid {
+    #detail-body.editor-open .detail-dual {
       flex: 1 1 50%;
       max-height: 50%;
     }
+    .dual-header-row {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 0;
+      flex: 0 0 auto;
+      border-bottom: 1px solid var(--border);
+      background: var(--bg);
+    }
+    .dual-header-row h2 {
+      margin: 0;
+      padding: 0.55rem 0.75rem;
+      font-size: 0.75rem;
+      font-weight: 600;
+      color: var(--muted);
+      font-family: "IBM Plex Sans", sans-serif;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+    }
+    .dual-header-row h2 + h2 {
+      border-left: 1px solid var(--border);
+    }
+    .detail-dual > .path {
+      padding: 0.35rem 0.75rem;
+      border-bottom: 1px solid var(--border);
+      color: var(--accent);
+      font-size: 0.75rem;
+    }
+    .dual-scroll {
+      flex: 1 1 auto;
+      min-height: 0;
+      overflow: auto;
+      padding: 0.35rem 0;
+    }
+    .dual-row {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 0;
+      align-items: baseline;
+      margin: 0;
+      line-height: 1.25;
+    }
+    .dual-cell {
+      min-width: 0;
+      border-left: 1px solid transparent;
+    }
+    .dual-cell + .dual-cell {
+      border-left-color: var(--border);
+    }
+    .dual-cell.missing .jv-line {
+      color: var(--muted);
+      opacity: 0.55;
+    }
+    .dual-children {
+      list-style: none;
+      margin: 0;
+      padding: 0;
+    }
+    .dual-children > li {
+      margin: 0;
+      padding: 0;
+    }
+    .jv-composite.collapsed > .dual-children,
+    .jv-composite.collapsed > .dual-close { display: none; }
+    .jv-composite.collapsed > .dual-row .jv-open { display: none; }
+    .jv-composite:not(.collapsed) > .dual-row .jv-preview { display: none; }
     .detail-card {
       background: var(--panel-2);
       border: 1px solid var(--border);
@@ -497,7 +744,9 @@
     #editor-status.err { color: var(--err); }
     #editor-status.ok { color: var(--ok); }
     @media (max-width: 1100px) {
-      .detail-grid { grid-template-columns: 1fr; }
+      .dual-header-row,
+      .dual-row { grid-template-columns: 1fr; }
+      .dual-cell + .dual-cell { border-left-color: transparent; border-top: 1px dashed var(--border); }
       .field-row {
         grid-template-columns: 1fr 1fr;
       }
@@ -511,6 +760,7 @@
   </style>
 </head>
 <body>
+  <div id="toast-host" aria-live="polite"></div>
   <header>
     <h1>dap-http</h1>
     <form class="search" id="search-form" action="#" onsubmit="return false;">
@@ -530,6 +780,8 @@
     <section id="tree-panel">
       <div class="toolbar">
         <button type="button" id="clear-results">Clear results</button>
+        <button type="button" id="expand-tree">Expand all</button>
+        <button type="button" id="collapse-tree">Collapse all</button>
         <button type="button" id="refresh-visible">Refresh visible</button>
       </div>
       <div id="error-banner"></div>
@@ -537,6 +789,7 @@
     </section>
     <section id="detail-panel">
       <div class="empty" id="detail-empty">Search for a route, then press ↻ to load memory.</div>
+      <div id="tab-bar" role="tablist" aria-label="Open structs"></div>
       <div id="detail-body" hidden>
         <div id="index-bar" hidden>
           <div id="index-inputs"></div>
@@ -545,16 +798,13 @@
           <button type="button" id="index-next" title="Next index">Next ▶</button>
           <span class="index-status" id="index-status"></span>
         </div>
-        <div class="detail-grid">
-          <div class="detail-card">
+        <div class="detail-dual">
+          <div class="dual-header-row">
             <h2>Source decode</h2>
-            <div class="path" id="detail-path"></div>
-            <div id="detail-decoded" class="json-view"></div>
-          </div>
-          <div class="detail-card">
             <h2>Overlay decode</h2>
-            <div id="detail-overlay" class="json-view plain">No overlay applied for this type.</div>
           </div>
+          <div class="path" id="detail-path"></div>
+          <div id="detail-dual" class="json-view dual-scroll"></div>
         </div>
         <div id="editor-panel" hidden>
           <button type="button" id="editor-toggle" aria-expanded="false">

@@ -139,6 +139,16 @@ object HttpRouteIrEmitter {
     }
   }
 
+  /** Compile a JSON memory codec for nested member-path reads/watches. */
+  def codecForType(
+      irType: IrType,
+      endian: IrEndian,
+      wordSize: Option[Int]
+  ): Option[Codec[Json]] = {
+    val errors = ListBuffer.empty[String]
+    compileJsonCodecForType(irType, endian, wordSize, errors, "member-path")
+  }
+
   /** Inject `_address` hex fields into every decoded struct (and struct array element). */
   def annotateDecodedAddresses(
       irType: IrType,
@@ -168,7 +178,9 @@ object HttpRouteIrEmitter {
       case Some(obj) =>
         val errors = ListBuffer.empty[String]
         val offsets = computeMemberOffsets(struct, wordSize, errors)
-        val withoutPrior = obj.filterKeys(_ != "_address")
+        val withoutPrior =
+          obj.filterKeys(k => k != "_address" && k != "_offsets" && k != "_pointer")
+        val wasPointer = obj("_pointer").flatMap(_.asBoolean).contains(true)
         val annotatedMembers = struct.members.foldLeft(withoutPrior) { (acc, member) =>
           acc(member.name) match {
             case None =>
@@ -181,10 +193,24 @@ object HttpRouteIrEmitter {
               )
           }
         }
-        Json.obj(
-          (("_address" -> Json.fromString(formatHexAddress(baseAddress))) +:
-            annotatedMembers.toList): _*
-        )
+        // DESNOTE(jbarber, 2026-07-20): `_offsets` lets the dual decode UI align source vs
+        // overlay fields by byte offset (renames share a row; missing sides leave gaps).
+        // `_pointer` marks values that were followed from a pointer slot so the UI can focus
+        // the pointee as a root tab.
+        val offsetFields =
+          struct.members.flatMap { member =>
+            if (!annotatedMembers.contains(member.name)) None
+            else
+              offsets.get(member.name).map { off =>
+                member.name -> Json.fromInt(off)
+              }
+          }
+        val meta =
+          List(
+            "_address" -> Json.fromString(formatHexAddress(baseAddress)),
+            "_offsets" -> Json.obj(offsetFields: _*)
+          ) ++ (if (wasPointer) List("_pointer" -> Json.True) else Nil)
+        Json.obj((meta ++ annotatedMembers.toList): _*)
     }
 
   private def annotateMemberAddresses(
@@ -305,10 +331,51 @@ object HttpRouteIrEmitter {
       readPlan.decodeType match {
         case Some(struct: IrType.Struct) =>
           buildSubRoutesForStruct(struct, readPlan.address, defaultEndian, wordSizeBits, errors)
+        case Some(list: IrType.ListType) =>
+          buildRootArraySubRoute(readPlan, list, wordSizeBits, errors).toList
         case _ =>
           Nil
       }
     }
+
+  /** Indexed element routes for a root-level array read (`$basePath/0`, `$basePath/1`, …). */
+  private def buildRootArraySubRoute(
+      readPlan: ReadPlan,
+      list: IrType.ListType,
+      wordSizeBits: Int,
+      errors: ListBuffer[String]
+  ): Option[MemberSubRoute.ValueSubRoute] = {
+    val endian = readPlan.endian
+    val elemSize = pointeeSizeBytes(list.element, Some(wordSizeBits), errors)
+    val stride = readPlan.elementStrideBytes.orElse(elemSize)
+    val length = readPlan.arrayLength.orElse {
+      for {
+        size <- elemSize.orElse(stride)
+        if size > 0 && readPlan.sizeBytes % size == 0
+      } yield readPlan.sizeBytes / size
+    }
+    Some(
+      MemberSubRoute.ValueSubRoute(
+        memberName = MemberSubRoute.RootArrayMemberName,
+        baseAddress = readPlan.address,
+        memberOffsetBytes = 0,
+        isArray = true,
+        arrayLength = length,
+        wordSizeBits = wordSizeBits,
+        endian = endian,
+        valueType = Some(list.element),
+        elementSizeBytes = elemSize,
+        elementStrideBytes = stride,
+        decodeCodec = compileJsonCodecForType(
+          list.element,
+          endian,
+          Some(wordSizeBits),
+          errors,
+          s"${readPlan.path}/[element]"
+        )
+      )
+    )
+  }
 
   private def buildSubRoutesForStruct(
       struct: IrType.Struct,
@@ -348,34 +415,39 @@ object HttpRouteIrEmitter {
       context: String
   ): Option[MemberSubRoute.PointerSubRoute] = {
     val pointeeType = member.target match {
-      case listType: IrType.ListType                                => Some(listType.element)
-      case _ if member.primitiveOverride.contains(IrPrimitive.Char) =>
-        Some(IrType.Primitive(IrPrimitive.Char))
-      case _ => None
+      case _: IrType.FunctionPointer =>
+        None
+      case listType: IrType.ListType =>
+        listType.element match {
+          case _: IrType.FunctionPointer => None
+          case element                   => Some(element)
+        }
+      case other if member.isPointer =>
+        Some(other)
+      case _ =>
+        None
     }
-    pointeeType.flatMap { ptype =>
+    pointeeType.map { ptype =>
       val isCharPointee = ptype == IrType.Primitive(IrPrimitive.Char) ||
         member.primitiveOverride.contains(IrPrimitive.Char)
-      Some(
-        MemberSubRoute.PointerSubRoute(
-          memberName = member.name,
-          baseAddress = baseAddress,
-          memberOffsetBytes = memberOffset,
-          isArray = member.isArray,
-          arrayLength = member.arrayLength,
-          wordSizeBits = wordSizeBits,
-          endian = endian,
-          pointeeType = Some(ptype),
-          pointeeSizeBytes = pointeeSizeBytes(ptype, Some(wordSizeBits), errors),
-          pointeeDecodeCodec = compileJsonCodecForType(
-            ptype,
-            endian,
-            Some(wordSizeBits),
-            errors,
-            context
-          ),
-          followCString = isCharPointee
-        )
+      MemberSubRoute.PointerSubRoute(
+        memberName = member.name,
+        baseAddress = baseAddress,
+        memberOffsetBytes = memberOffset,
+        isArray = member.isArray,
+        arrayLength = member.arrayLength,
+        wordSizeBits = wordSizeBits,
+        endian = endian,
+        pointeeType = Some(ptype),
+        pointeeSizeBytes = pointeeSizeBytes(ptype, Some(wordSizeBits), errors),
+        pointeeDecodeCodec = compileJsonCodecForType(
+          ptype,
+          endian,
+          Some(wordSizeBits),
+          errors,
+          context
+        ),
+        followCString = isCharPointee
       )
     }
   }
@@ -547,7 +619,8 @@ object HttpRouteIrEmitter {
                       decodeCodec = decodeCodec,
                       cStringPointer = isCharPointer && !member.isArray,
                       cStringPointerArray = isCharPointer && member.isArray,
-                      elementStrideBytes = arrayElementStrideBytes(member, wordSize)
+                      elementStrideBytes = arrayElementStrideBytes(member, wordSize),
+                      arrayLength = if (member.isArray) member.arrayLength else None
                     )
                   }
                 }.toList

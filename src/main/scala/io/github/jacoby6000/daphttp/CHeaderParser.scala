@@ -555,15 +555,34 @@ object CHeaderParser {
         member.getDeclSpecifier match {
           case nested: IASTCompositeTypeSpecifier
               if nested.getKey == IASTCompositeTypeSpecifier.k_struct || nested.getKey == IASTCompositeTypeSpecifier.k_union =>
-            val tagName =
-              Option(nested.getName).map(_.toString.trim).filter(_.nonEmpty)
-            tagName.toList.map(_ -> nested) ++ extractNestedStructs(nested)
+            // DESNOTE(jbarber, 2026-07-20): Anonymous `struct { … } field;` has no tag, so we
+            // invent a type name from the declarator (same idea as anonymous in-struct enums).
+            // Without this, fields fall through typeForName to LongWord and decode as ints.
+            val names = nestedCompositeTypeNames(member, nested)
+            names.map(_ -> nested) ++ extractNestedStructs(nested)
           case _ =>
             Nil
         }
       case _ =>
         Nil
     }
+
+  /** Tag name if present; otherwise the first field declarator name for anonymous composites. */
+  private[daphttp] def nestedCompositeTypeNames(
+      member: IASTSimpleDeclaration,
+      nested: IASTCompositeTypeSpecifier
+  ): List[String] = {
+    val tagName =
+      Option(nested.getName).map(_.toString.trim).filter(_.nonEmpty)
+    if (tagName.nonEmpty) {
+      tagName.toList
+    } else {
+      member.getDeclarators.toList
+        .map(extractDeclaratorName)
+        .filter(_.nonEmpty)
+        .take(1)
+    }
+  }
 
   private def extractEnumDefinitions(
       declaration: IASTDeclaration,
@@ -717,7 +736,20 @@ object CHeaderParser {
             unionCounter += 1
             unionSpec.getMembers.toList.flatMap {
               case unionMember: IASTSimpleDeclaration =>
-                val baseType = normalizeTypeName(unionMember.getDeclSpecifier.getRawSignature)
+                val baseType = unionMember.getDeclSpecifier match {
+                  case nested: IASTCompositeTypeSpecifier
+                      if nested.getKey == IASTCompositeTypeSpecifier.k_struct ||
+                        nested.getKey == IASTCompositeTypeSpecifier.k_union =>
+                    nestedCompositeTypeNames(unionMember, nested).headOption.getOrElse {
+                      normalizeTypeName(unionMember.getDeclSpecifier.getRawSignature)
+                    }
+                  case enumSpec: IASTEnumerationSpecifier =>
+                    enumerationTypeNames(unionMember, enumSpec).headOption.getOrElse {
+                      normalizeTypeName(enumSpec.getRawSignature)
+                    }
+                  case _ =>
+                    normalizeTypeName(unionMember.getDeclSpecifier.getRawSignature)
+                }
                 unionMember.getDeclarators.toList.flatMap { declarator =>
                   Option.when(extractDeclaratorName(declarator).nonEmpty) {
                     StructFieldDecl(baseType, declarator, unionGroup, bitFieldWidth(declarator))
@@ -727,10 +759,9 @@ object CHeaderParser {
             }
           case structSpec: IASTCompositeTypeSpecifier
               if structSpec.getKey == IASTCompositeTypeSpecifier.k_struct =>
-            val baseType = Option(structSpec.getName)
-              .map(_.toString.trim)
-              .filter(_.nonEmpty)
-              .getOrElse(normalizeTypeName(member.getDeclSpecifier.getRawSignature))
+            val baseType = nestedCompositeTypeNames(member, structSpec).headOption.getOrElse {
+              normalizeTypeName(member.getDeclSpecifier.getRawSignature)
+            }
             member.getDeclarators.toList.flatMap { declarator =>
               Option.when(extractDeclaratorName(declarator).nonEmpty) {
                 StructFieldDecl(baseType, declarator, unionGroup = None, bitFieldWidth(declarator))

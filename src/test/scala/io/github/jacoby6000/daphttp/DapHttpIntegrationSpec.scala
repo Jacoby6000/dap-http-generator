@@ -125,6 +125,21 @@ class DapHttpIntegrationSpec extends AnyFunSuite {
                   "continue",
                   Json.obj("allThreadsContinued" -> Json.True)
                 )
+              case Some("request") if command.contains("writeMemory") =>
+                val dataB64 =
+                  cursor.flatMap(_.downField("arguments").downField("data").as[String].toOption)
+                val nbytes = dataB64
+                  .flatMap { b64 =>
+                    try Some(Base64.getDecoder.decode(b64).length)
+                    catch { case _: IllegalArgumentException => None }
+                  }
+                  .getOrElse(0)
+                writeResponse(
+                  out,
+                  requestSeq,
+                  "writeMemory",
+                  Json.obj("bytesWritten" -> Json.fromInt(nbytes))
+                )
               case _ =>
                 keepReading = false
             }

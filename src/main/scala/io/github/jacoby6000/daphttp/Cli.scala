@@ -410,17 +410,30 @@ object Cli
         config.dapConnectTimeoutMs,
         config.dapConnectRetryMs
       )
+      watchService <- RealtimeWatchService.create(dapClient, plansRef, overlaysRef)
       _ <- dapClient.startConnectionManager()
-      app = HttpLoggingMiddleware(
-        DapHttpServerMain
-          .routes(plansRef, dapClient, overlaysRef, config.overlaysPath)
-          .orNotFound
-      )
+      _ <- watchService.start()
       exit <- EmberServerBuilder
         .default[IO]
         .withHost(Host.fromString(config.bindHost).getOrElse(Host.fromString("0.0.0.0").get))
         .withPort(Port.fromInt(config.bindPort).getOrElse(Port.fromInt(8080).get))
-        .withHttpApp(app)
+        // DESNOTE(jbarber, 2026-07-20): Default Ember idle is 60s, which drops quiet /ws
+        // sockets. Server Ping frames keep them alive; this is a safety margin for brief gaps.
+        .withIdleTimeout(5.minutes)
+        .withHttpWebSocketApp { wsBuilder =>
+          HttpLoggingMiddleware(
+            DapHttpServerMain
+              .routes(
+                plansRef,
+                dapClient,
+                overlaysRef,
+                config.overlaysPath,
+                watchService,
+                wsBuilder
+              )
+              .orNotFound
+          )
+        }
         .build
         .use(_ => IO.never)
         .as(ExitCode.Success)

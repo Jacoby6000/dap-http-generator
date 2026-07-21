@@ -835,10 +835,18 @@ object DoldecompIrGenerator {
     def flushPending(): Unit =
       if (pending.nonEmpty) {
         val bitfields = pending.toList
+        // DESNOTE(jbarber, 2026-07-20): Size incomplete bitfield units by bits used
+        // (rounded up to a whole byte), not the full declared type width. GCC would keep a
+        // trailing `u32` unit at 32 bits even when only 16 are used; Metrowerks / doldecomp
+        // Melee headers (e.g. StartMeleeRules `x0_*`…`x5_*` then `u8 x6`) expect the tighter
+        // 6-byte layout so later offsetof pads like `pad_x5C[0x60 - 0x5C]` stay correct.
+        // Allocation still splits when a unit of `typeBits` fills; only the last partial unit
+        // shrinks. See https://github.com/doldecomp/melee
+        val storageBits = ((pendingUsedBits + 7) / 8) * 8
         groups += BitmaskFieldGroup(
           name = bitmaskGroupName(bitfields),
           fields = bitfields,
-          storageBits = pendingTypeBits
+          storageBits = storageBits
         )
         pending.clear()
         pendingType = None
