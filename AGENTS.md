@@ -218,7 +218,8 @@ flowchart LR
   structs, typedefs, and enums across scanned files keep the first definition and emit one summarized
   warning per kind. Pass `--report <path>` to write a Markdown file with the full per-name /
   per-symbol detail behind those summaries. `cheaders-smithy` fails when the service has zero
-  operations.
+  operations. Non-fatal layout/array-bound notes go through `DiagnosticSink` so they appear in
+  console, `IrGenerationResult.warnings`, and `IrDiagnostics.otherWarnings` (Markdown report).
 - C typedefs of `int`/`float`/… (e.g. melee `enum_t`, `MessageBufferID`) set `primitiveOverride` so
   `IrSizingWarnings` does not treat them as ambiguous Smithy prelude Integer/Float.
 - First `sbt` invocation downloads sbt/Scala launchers and Coursier deps; expect a slow cold start.

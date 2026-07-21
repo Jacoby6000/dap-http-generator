@@ -54,6 +54,7 @@ object DoldecompIrGenerator {
       extraDataSections: Set[String] = Set.empty
   ): IrGenerationResult = {
     val corpus = CheadersCorpus.load(headerRoots)
+    val diagnosticsSink = DiagnosticSink.forDoldecomp
     DapHttpLoggers.irSourceDoldecomp.info(
       "Generating IR from {} symbol(s) across {} header root(s) ({} source file(s))",
       Integer.valueOf(symbols.size),
@@ -79,7 +80,7 @@ object DoldecompIrGenerator {
     val fieldInitializerLengths = typeCorpus.fieldInitializerLengths
     val typedefs = typeCorpus.typedefs.values
     val sectionResult = SectionFilter.filterDataSymbols(symbols, extraDataSections)
-    sectionResult.warnings.foreach(w => DapHttpLoggers.irSourceDoldecomp.warn("{}", w))
+    sectionResult.warnings.foreach(w => diagnosticsSink.warn(DiagnosticCategory.Section, w))
     val dataObjectSymbols = sectionResult.dataSymbols
     val warnings = mutable.ListBuffer.empty[String]
     warnings ++= sectionResult.warnings
@@ -88,7 +89,7 @@ object DoldecompIrGenerator {
     warnings ++= typeCorpus.typedefs.warnings
     warnings ++= enumParse.warnings
     (macroLoad.warnings ++ typeCorpus.structs.warnings ++ typeCorpus.typedefs.warnings ++ enumParse.warnings)
-      .foreach(w => DapHttpLoggers.irSourceDoldecomp.warn("{}", w))
+      .foreach(w => diagnosticsSink.warn(DiagnosticCategory.Conflict, w))
 
     val unresolvedSymbols = mutable.ListBuffer.empty[String]
     val resolvedSymbols = dataObjectSymbols.flatMap { symbol =>
@@ -120,7 +121,8 @@ object DoldecompIrGenerator {
         conflictingEnums = enumParse.conflicts,
         enumEvaluationWarnings = enumParse.warnings.filterNot(_.contains("Conflicting enum")),
         includeHints = includeHints.toList,
-        otherWarnings = (otherWarnings ++ extras).toList,
+        otherWarnings =
+          (otherWarnings ++ diagnosticsSink.reportOtherWarnings ++ extras).toList.distinct,
         headerRoots = headerRoots.map(_.toString),
         sourceFileCount = corpus.files.size,
         symbolCount = symbols.size,
@@ -136,7 +138,7 @@ object DoldecompIrGenerator {
       val message =
         s"Skipping ${unresolvedSymbols.size} object symbol(s) with no ctype and no matching global C declaration under --headers: $names$suffix."
       warnings += message
-      DapHttpLoggers.irSourceDoldecomp.warn("{}", message)
+      diagnosticsSink.warn(DiagnosticCategory.Symbol, message)
     }
 
     if (resolvedSymbols.isEmpty) {
@@ -144,7 +146,7 @@ object DoldecompIrGenerator {
         if (!warnings.exists(_.contains("matching global C declaration"))) {
           val message = "No data object symbols with a matching C declaration were found."
           warnings += message
-          DapHttpLoggers.irSourceDoldecomp.warn("{}", message)
+          diagnosticsSink.warn(DiagnosticCategory.Symbol, message)
           List(message)
         } else {
           Nil
@@ -206,7 +208,7 @@ object DoldecompIrGenerator {
 
       if (validResolved.isEmpty) {
         IrGenerationResult(
-          warnings.toList,
+          (warnings ++= diagnosticsSink.reportOtherWarnings).toList.distinct,
           Nil,
           baseDiagnostics(
             resolvedCount = resolvedSymbols.size,
@@ -328,7 +330,8 @@ object DoldecompIrGenerator {
                     members = rawMembers,
                     commentOffsets = structMemberOffsets,
                     arrayConstants = arrayConstants,
-                    wordSizeBits = wordSizeBits
+                    wordSizeBits = wordSizeBits,
+                    diagnostics = diagnosticsSink
                   )
                   val unpacked = IrType.MemoryMappedStruct(
                     id = ShapeId.from(s"$namespace#$name"),
@@ -343,10 +346,9 @@ object DoldecompIrGenerator {
                       // unresolved flexible array should not abort the whole Melee corpus. Warn and
                       // keep the unpacked members so other symbols can still load.
                       errs.foreach { err =>
-                        DapHttpLoggers.irSourceDoldecomp.warn(
-                          "Failed to pack struct '{}': {}",
-                          name,
-                          err
+                        diagnosticsSink.warn(
+                          DiagnosticCategory.Layout,
+                          s"Failed to pack struct '$name': $err"
                         )
                       }
                       unpacked
@@ -356,8 +358,7 @@ object DoldecompIrGenerator {
                     fields.map(f => CHeaderParser.fieldName(f.declarator)),
                     packed.members,
                     structMemberOffsets
-                  )
-                    .foreach(msg => DapHttpLoggers.irSourceDoldecomp.warn(msg))
+                  ).foreach(msg => diagnosticsSink.warn(DiagnosticCategory.Layout, msg))
                   packed
                 } finally {
                   buildingStructs -= name
@@ -585,7 +586,7 @@ object DoldecompIrGenerator {
         }
 
         val result = IrGenerationResult(
-          warnings = warnings.toList,
+          warnings = (warnings ++= diagnosticsSink.reportOtherWarnings).toList.distinct,
           services = List(
             IrService(
               name = serviceName,
@@ -718,7 +719,8 @@ object DoldecompIrGenerator {
       members: List[IrMember],
       commentOffsets: Map[(String, String), Int],
       arrayConstants: Map[String, Int],
-      wordSizeBits: Int
+      wordSizeBits: Int,
+      diagnostics: DiagnosticSink = DiagnosticSink.silent
   ): List[IrMember] = {
     val fieldNames = fields.map(f => CHeaderParser.fieldName(f.declarator))
     val fieldByCamel = fieldNames.map(n => toCamelCase(n) -> n).toMap
@@ -732,11 +734,9 @@ object DoldecompIrGenerator {
           .flatMap(f => CHeaderParser.arrayBoundExpression(f.declarator))
         bound.foreach { expr =>
           if (!arrayConstants.contains(expr)) {
-            DapHttpLoggers.irSourceDoldecomp.warn(
-              "{}.{}: unable to resolve array bound '{}' (not in enumerator/macro constant table)",
-              structName,
-              cName,
-              expr
+            diagnostics.warn(
+              DiagnosticCategory.ArrayBound,
+              s"$structName.$cName: unable to resolve array bound '$expr' (not in enumerator/macro constant table)"
             )
           }
         }
@@ -749,12 +749,9 @@ object DoldecompIrGenerator {
         ) match {
           case Some(length) =>
             val boundNote = bound.map(b => s" (bound '$b' unresolved)").getOrElse("")
-            DapHttpLoggers.irSourceDoldecomp.warn(
-              "{}.{}: inferred arrayLength={} from offset comments{}",
-              structName,
-              cName,
-              Integer.valueOf(length),
-              boundNote
+            diagnostics.warn(
+              DiagnosticCategory.ArrayBound,
+              s"$structName.$cName: inferred arrayLength=$length from offset comments$boundNote"
             )
             ensureArrayListTarget(member.copy(arrayLength = Some(length)), structName)
           case None =>
