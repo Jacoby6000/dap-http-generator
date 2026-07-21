@@ -6,6 +6,7 @@ import io.circe.syntax._
 import io.github.jacoby6000.daphttp.DapAddress
 import io.github.jacoby6000.daphttp.DualChild
 import io.github.jacoby6000.daphttp.DualDecodeAlign
+import io.github.jacoby6000.daphttp.IndexPath
 import io.github.jacoby6000.daphttp.OverlayMember
 import io.github.jacoby6000.daphttp.OverlayNewStruct
 import io.github.jacoby6000.daphttp.OverlayStructDef
@@ -13,6 +14,7 @@ import io.github.jacoby6000.daphttp.RouteTreeNode
 import io.github.jacoby6000.daphttp.RoutesResponse
 import io.github.jacoby6000.daphttp.TypeCatalogEntry
 import io.github.jacoby6000.daphttp.TypeOverlayDocument
+import io.github.jacoby6000.daphttp.WatchPathMatch
 import org.scalajs.dom
 import org.scalajs.dom.HTMLElement
 import org.scalajs.dom.HTMLInputElement
@@ -1490,11 +1492,12 @@ object Main {
   }
 
   private def isOverlaySegmentWatched(basePath: String, segments: List[String]): Boolean =
-    activeWatches.contains(basePath) ||
-      watchOverlaySegments.exists { case (sourcePath, overlaySegs) =>
-        (sourcePath == basePath || sourcePath.startsWith(basePath + "/")) &&
-        overlaySegs.exists(segs => segments == segs || segments.startsWith(segs))
-      }
+    WatchPathMatch.isOverlaySegmentWatched(
+      basePath,
+      segments,
+      activeWatches.keys,
+      watchOverlaySegments
+    )
 
   private def toggleWatch(httpPath: String): Unit =
     activeWatches.get(httpPath) match {
@@ -2211,7 +2214,7 @@ object Main {
         byId("index-bar").removeAttribute("hidden")
         val host = byId("index-inputs")
         host.innerHTML = ""
-        val slotCount = countIndexSlots(template)
+        val slotCount = IndexPath.countSlots(template)
         val values =
           if (indexValues.length == slotCount) indexValues
           else List.fill(slotCount)(0)
@@ -2258,11 +2261,11 @@ object Main {
         setIndexStatus("No indexed route selected.", ok = false)
       case Some(template) =>
         val normalized =
-          if (indices.length == countIndexSlots(template)) indices
-          else List.fill(countIndexSlots(template))(0)
+          if (indices.length == IndexPath.countSlots(template)) indices
+          else List.fill(IndexPath.countSlots(template))(0)
         indexValues = normalized
         renderIndexBar()
-        val path = substituteIndices(template, normalized)
+        val path = IndexPath.substitute(template, normalized)
         selected = Some(path)
         refreshPath(path)
     }
@@ -2284,74 +2287,13 @@ object Main {
     status.className = "index-status" + (if (message.isEmpty) "" else if (ok) " ok" else " err")
   }
 
-  private def countIndexSlots(path: String): Int =
-    path.split('/').count(_ == "{index}")
-
-  private def substituteIndices(template: String, indices: List[Int]): String = {
-    var remaining = indices
-    template
-      .split('/')
-      .map {
-        case "{index}" =>
-          val v = remaining.headOption.getOrElse(0)
-          remaining = remaining.drop(1)
-          v.toString
-        case other => other
-      }
-      .mkString("/")
+  private def resolveIndexBrowse(path: String): Option[(String, List[Int])] = {
+    val templates = collectNodes(catalog).map(_.path).filter(_.contains("{index}")).distinct
+    IndexPath.resolveBrowse(path, templates, indexTemplate, indexValues)
   }
-
-  private def extractIndices(template: String, concrete: String): Option[List[Int]] = {
-    val t = template.split('/')
-    val c = concrete.split('/')
-    if (t.length != c.length) None
-    else {
-      val pairs = t.zip(c)
-      if (
-        pairs.forall {
-          case ("{index}", seg) => seg.nonEmpty && seg.forall(_.isDigit)
-          case (a, b)           => a == b
-        }
-      )
-        Some(pairs.collect { case ("{index}", seg) => seg.toInt }.toList)
-      else None
-    }
-  }
-
-  private def resolveIndexBrowse(path: String): Option[(String, List[Int])] =
-    if (path.contains("{index}")) {
-      val slots = countIndexSlots(path)
-      val values =
-        if (indexTemplate.contains(path) && indexValues.length == slots) indexValues
-        else List.fill(slots)(0)
-      Some((path, values))
-    } else {
-      val templates = collectNodes(catalog).map(_.path).filter(_.contains("{index}")).distinct
-      templates.view
-        .flatMap(t => extractIndices(t, path).map(t -> _))
-        .headOption
-        .orElse {
-          val parts = path.split('/').toList
-          val nums = parts.reverse.takeWhile(s => s.nonEmpty && s.forall(_.isDigit)).reverse
-          if (nums.isEmpty) None
-          else {
-            val base = parts.dropRight(nums.length).mkString("/")
-            val template =
-              (parts.dropRight(nums.length) ++ List.fill(nums.length)("{index}")).mkString("/")
-            if (templates.exists(t => t == template || t.startsWith(base + "/")))
-              Some((template, nums.map(_.toInt)))
-            else None
-          }
-        }
-    }
 
   private def concretePathForSelection(path: String): String =
-    if (!path.contains("{index}")) path
-    else
-      indexTemplate
-        .filter(_ == path)
-        .map(t => substituteIndices(t, indexValues))
-        .getOrElse(path)
+    IndexPath.concretePath(path, indexTemplate, indexValues)
 
   private def decodeFailed(json: Json): Boolean = {
     val cursor = json.hcursor
