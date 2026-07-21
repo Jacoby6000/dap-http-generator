@@ -89,19 +89,21 @@ flowchart LR
   SmithyIrGenerator --> IR
   DoldecompIrGenerator --> IR
 
-  IR --> HttpRouteIrEmitter
-  IR --> SmithyIrEmitter
+  IR --> RoutePlanEmitter
+  IR --> IrJsonCodecs
 
   subgraph Outputs
-    subgraph http
-        HttpRouteIrEmitter --> Routes["HTTP routes"]
-    end
-    subgraph smithyOut [Smithy]
-        SmithyIrEmitter --> SMOUT["Smithy Models"]
-    end
+  subgraph http
+  RoutePlanEmitter --> Routes["HTTP routes"]
+  IrJsonCodecs --> Routes
+  end
+  subgraph smithyOut [Smithy]
+  SmithyIrEmitter --> SMOUT["Smithy Models"]
+  end
   end
 ```
 
+`HttpRouteIrEmitter` remains a compatibility façade over `RoutePlanEmitter` + `IrJsonCodecs`.
 `SmithyIrEmitter` builds a Smithy `Model` with smithy-model shape builders and serializes it via
 `SmithyIdlModelSerializer` (do not hand-render Smithy IDL text).
 
