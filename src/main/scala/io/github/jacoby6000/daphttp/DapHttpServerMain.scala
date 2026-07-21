@@ -1652,7 +1652,8 @@ object DapHttpServerMain extends IOApp {
         case (Right(size), Right(codec)) =>
           dapClient.readMemory(addr, size).flatMap {
             case Left(_) =>
-              IO.pure(Json.Null)
+              // Distinguish unread/unreachable pointees from NULL (addr == 0 → Json.Null above).
+              IO.pure(Json.fromLong(addr))
             case Right(data) =>
               val decoded = Try(Base64.getDecoder.decode(data)).toOption
                 .flatMap(bytes => codec.decode(BitVector(bytes)).toOption.map(_.value))

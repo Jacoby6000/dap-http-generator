@@ -1635,6 +1635,10 @@ object DoldecompIrGenerator {
           merged(name) = definition
         case Some(existing) if definition.values.size > existing.values.size =>
           merged(name) = definition
+        case Some(existing)
+            if definition.values.size == existing.values.size &&
+              hasCountSentinel(definition) && !hasCountSentinel(existing) =>
+          merged(name) = definition
         case _ =>
           ()
       }
@@ -1647,6 +1651,11 @@ object DoldecompIrGenerator {
       conflicts = later.conflicts
     )
   }
+
+  private def hasCountSentinel(definition: CEnumDefinition): Boolean =
+    definition.values.exists { v =>
+      v.name.endsWith("_Count") || v.name.endsWith("_SelfCount")
+    }
 
   private def speculateMissingIncludePaths(
       headerRoots: List[Path],

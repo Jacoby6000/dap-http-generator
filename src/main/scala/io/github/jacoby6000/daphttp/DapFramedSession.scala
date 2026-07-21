@@ -133,19 +133,22 @@ private[daphttp] final class DapFramedSession(
               .downField("supportsConfigurationDoneRequest")
               .as[Boolean]
               .getOrElse(false)
-            if (needsConfigurationDone) {
-              val configSeq = nextSeq()
-              val configFuture = new CompletableFuture[Either[String, Json]]()
-              pending.put(Integer.valueOf(configSeq), configFuture)
-              writeRequest(configSeq, "configurationDone", None)
-              awaitFuture(configFuture, configSeq, "configurationDone", timeoutMs).map { _ =>
-                initialized.set(true)
-                ()
+            // DESNOTE(jbarber, 2026-07-21): Mark the session initialized after the initialize
+            // response (and initialized event) so a failed configurationDone cannot restart the
+            // full handshake on this connection — adapters typically reject a second initialize.
+            // See https://microsoft.github.io/debug-adapter-protocol/overview#initializing
+            val configResult =
+              if (needsConfigurationDone) {
+                val configSeq = nextSeq()
+                val configFuture = new CompletableFuture[Either[String, Json]]()
+                pending.put(Integer.valueOf(configSeq), configFuture)
+                writeRequest(configSeq, "configurationDone", None)
+                awaitFuture(configFuture, configSeq, "configurationDone", timeoutMs).map(_ => ())
+              } else {
+                Right(())
               }
-            } else {
-              initialized.set(true)
-              Right(())
-            }
+            initialized.set(true)
+            configResult
           }
         }
       }
