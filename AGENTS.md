@@ -133,9 +133,10 @@ flowchart LR
   No IR or DAP runtime.
 - **ui (Scala.js)** — browser explorer under `modules/ui/`; depends on `api-models` JS.
   `Compile / resourceGenerators` copies `fastOptJS` + `index.html` into `web/` resources
-  served at `/` and `/assets/main.js`. The explorer keeps the full `/routes` catalog in memory
-  but only renders search results in the left panel (name/struct/field substring, or `0x…`
-  address match against tree node addresses).
+  served at `/` and `/assets/main.js`. Dual source/overlay JSON rendering and watch patches
+  live in `DualDecodeSupport` (mixed into `Main`). The explorer keeps the full `/routes`
+  catalog in memory but only renders search results in the left panel (name/struct/field
+  substring, or `0x…` address match against tree node addresses).
 
 ### HTTP surface
 
