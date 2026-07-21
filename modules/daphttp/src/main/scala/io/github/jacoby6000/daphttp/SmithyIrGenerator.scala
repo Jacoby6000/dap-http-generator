@@ -19,94 +19,24 @@ import scala.jdk.OptionConverters._
 import scala.util.Try
 
 object SmithyIrGenerator {
-  private val DapStructTrait = ShapeId.from("com.jacoby6000.daphttp#dapStruct")
-  private val BitmaskTrait = ShapeId.from("com.jacoby6000.daphttp#bitmask")
-  private val SizeTrait = ShapeId.from("com.jacoby6000.daphttp#size")
-  private val PaddingTrait = ShapeId.from("com.jacoby6000.daphttp#padding")
-  private val PointerTrait = ShapeId.from("com.jacoby6000.daphttp#pointer")
-  private val ArrayTrait = ShapeId.from("com.jacoby6000.daphttp#array")
-  private val LengthTrait = ShapeId.from("com.jacoby6000.daphttp#length")
-  private val EndianTrait = ShapeId.from("com.jacoby6000.daphttp#endian")
-  private val WordSizeTrait = ShapeId.from("com.jacoby6000.daphttp#wordSize")
-  private val StaticAddressTrait = ShapeId.from("com.jacoby6000.daphttp#staticAddress")
-  private val PointerDepthTrait = ShapeId.from("com.jacoby6000.daphttp#pointerDepth")
-  private val OuterArrayLengthTrait = ShapeId.from("com.jacoby6000.daphttp#outerArrayLength")
-  private val FollowCStringTrait = ShapeId.from("com.jacoby6000.daphttp#followCString")
-  private val PointeeShapeTrait = ShapeId.from("com.jacoby6000.daphttp#pointeeShape")
-  private val FunctionPointerTrait = ShapeId.from("com.jacoby6000.daphttp#functionPointer")
-  private val HttpTrait = ShapeId.from("smithy.api#http")
-  sealed trait PrimitiveTrait {
-    def traitId: ShapeId
-    def primitive: IrPrimitive
-  }
-  object PrimitiveTrait {
-    case object U8 extends PrimitiveTrait {
-      override val traitId: ShapeId = ShapeId.from("com.jacoby6000.daphttp#u8")
-      override val primitive: IrPrimitive = IrPrimitive.U8
-    }
-    case object S8 extends PrimitiveTrait {
-      override val traitId: ShapeId = ShapeId.from("com.jacoby6000.daphttp#s8")
-      override val primitive: IrPrimitive = IrPrimitive.S8
-    }
-    case object U16 extends PrimitiveTrait {
-      override val traitId: ShapeId = ShapeId.from("com.jacoby6000.daphttp#u16")
-      override val primitive: IrPrimitive = IrPrimitive.U16
-    }
-    case object S16 extends PrimitiveTrait {
-      override val traitId: ShapeId = ShapeId.from("com.jacoby6000.daphttp#s16")
-      override val primitive: IrPrimitive = IrPrimitive.S16
-    }
-    case object U32 extends PrimitiveTrait {
-      override val traitId: ShapeId = ShapeId.from("com.jacoby6000.daphttp#u32")
-      override val primitive: IrPrimitive = IrPrimitive.U32
-    }
-    case object S32 extends PrimitiveTrait {
-      override val traitId: ShapeId = ShapeId.from("com.jacoby6000.daphttp#s32")
-      override val primitive: IrPrimitive = IrPrimitive.S32
-    }
-    case object U64 extends PrimitiveTrait {
-      override val traitId: ShapeId = ShapeId.from("com.jacoby6000.daphttp#u64")
-      override val primitive: IrPrimitive = IrPrimitive.U64
-    }
-    case object S64 extends PrimitiveTrait {
-      override val traitId: ShapeId = ShapeId.from("com.jacoby6000.daphttp#s64")
-      override val primitive: IrPrimitive = IrPrimitive.S64
-    }
-    case object U128 extends PrimitiveTrait {
-      override val traitId: ShapeId = ShapeId.from("com.jacoby6000.daphttp#u128")
-      override val primitive: IrPrimitive = IrPrimitive.U128
-    }
-    case object S128 extends PrimitiveTrait {
-      override val traitId: ShapeId = ShapeId.from("com.jacoby6000.daphttp#s128")
-      override val primitive: IrPrimitive = IrPrimitive.S128
-    }
-    case object F8 extends PrimitiveTrait {
-      override val traitId: ShapeId = ShapeId.from("com.jacoby6000.daphttp#f8")
-      override val primitive: IrPrimitive = IrPrimitive.F8
-    }
-    case object F16 extends PrimitiveTrait {
-      override val traitId: ShapeId = ShapeId.from("com.jacoby6000.daphttp#f16")
-      override val primitive: IrPrimitive = IrPrimitive.F16
-    }
-    case object F32 extends PrimitiveTrait {
-      override val traitId: ShapeId = ShapeId.from("com.jacoby6000.daphttp#f32")
-      override val primitive: IrPrimitive = IrPrimitive.F32
-    }
-    case object F64 extends PrimitiveTrait {
-      override val traitId: ShapeId = ShapeId.from("com.jacoby6000.daphttp#f64")
-      override val primitive: IrPrimitive = IrPrimitive.F64
-    }
-    case object Char extends PrimitiveTrait {
-      override val traitId: ShapeId = ShapeId.from("com.jacoby6000.daphttp#char")
-      override val primitive: IrPrimitive = IrPrimitive.Char
-    }
-
-    val All: List[PrimitiveTrait] =
-      List(U8, S8, U16, S16, U32, S32, U64, S64, U128, S128, F8, F16, F32, F64, Char)
-    val PrimitiveByTraitId: Map[ShapeId, IrPrimitive] = All.map(t => t.traitId -> t.primitive).toMap
-  }
-  private val BytesShape = ShapeId.from("com.jacoby6000.daphttp#Bytes")
-  private val BitsShape = ShapeId.from("com.jacoby6000.daphttp#Bits")
+  private val DapStructTrait = DapSmithyTraits.DapStruct
+  private val BitmaskTrait = DapSmithyTraits.Bitmask
+  private val SizeTrait = DapSmithyTraits.Size
+  private val PaddingTrait = DapSmithyTraits.Padding
+  private val PointerTrait = DapSmithyTraits.Pointer
+  private val ArrayTrait = DapSmithyTraits.Array
+  private val LengthTrait = DapSmithyTraits.Length
+  private val EndianTrait = DapSmithyTraits.Endian
+  private val WordSizeTrait = DapSmithyTraits.WordSize
+  private val StaticAddressTrait = DapSmithyTraits.StaticAddress
+  private val PointerDepthTrait = DapSmithyTraits.PointerDepth
+  private val OuterArrayLengthTrait = DapSmithyTraits.OuterArrayLength
+  private val FollowCStringTrait = DapSmithyTraits.FollowCString
+  private val PointeeShapeTrait = DapSmithyTraits.PointeeShape
+  private val FunctionPointerTrait = DapSmithyTraits.FunctionPointer
+  private val HttpTrait = DapSmithyTraits.Http
+  private val BytesShape = DapSmithyTraits.Bytes
+  private val BitsShape = DapSmithyTraits.Bits
 
   def generateFromModel(model: Model): Either[List[String], List[IrService]] = {
     val errors = ListBuffer.empty[String]
@@ -366,7 +296,7 @@ object SmithyIrGenerator {
 
   private def memberPrimitiveOverride(member: MemberShape): Option[IrPrimitive] = {
     member.getAllTraits.keySet.asScala.collectFirst(Function.unlift { traitId =>
-      PrimitiveTrait.PrimitiveByTraitId.get(traitId)
+      DapSmithyTraits.PrimitiveByTraitId.get(traitId)
     })
   }
 

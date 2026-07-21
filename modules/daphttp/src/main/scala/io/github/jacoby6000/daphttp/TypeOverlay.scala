@@ -32,43 +32,8 @@ object TypeOverlay {
 
   private val OverlayNamespace = "overlay"
 
-  private val PrimitiveByAlias: Map[String, IrPrimitive] = {
-    import IrPrimitive._
-    Map(
-      "u8" -> U8,
-      "uint8" -> U8,
-      "s8" -> S8,
-      "int8" -> S8,
-      "u16" -> U16,
-      "uint16" -> U16,
-      "s16" -> S16,
-      "int16" -> S16,
-      "u32" -> U32,
-      "uint32" -> U32,
-      "s32" -> S32,
-      "int32" -> S32,
-      "u64" -> U64,
-      "uint64" -> U64,
-      "s64" -> S64,
-      "int64" -> S64,
-      "u128" -> U128,
-      "s128" -> S128,
-      "f8" -> F8,
-      "f16" -> F16,
-      "f32" -> F32,
-      "float" -> F32,
-      "f64" -> F64,
-      "double" -> F64,
-      "char" -> Char,
-      "bool" -> Bool,
-      "boolean" -> Bool,
-      "longword" -> LongWord,
-      "pointer" -> LongWord
-    )
-  }
-
   def isPrimitiveAlias(raw: String): Boolean =
-    PrimitiveByAlias.contains(raw.trim.toLowerCase)
+    IrPrimitiveAliases.isKnown(raw)
 
   def resolveTypeId(
       typeId: String,
@@ -78,7 +43,7 @@ object TypeOverlay {
     val raw = typeId.trim
     if (raw.isEmpty) Left("typeId must be non-empty.")
     else
-      PrimitiveByAlias.get(raw.toLowerCase) match {
+      IrPrimitiveAliases.fromAlias(raw) match {
         case Some(primitive) =>
           Right(IrType.Primitive(primitive))
         case None =>
@@ -189,9 +154,7 @@ object TypeOverlay {
   ): List[TypeCatalogEntry] = {
     val index = buildTypeIndex(services)
     val primitives =
-      PrimitiveByAlias.keys.toList.sorted.distinct.map(alias =>
-        TypeCatalogEntry(alias, "primitive")
-      )
+      IrPrimitiveAliases.catalogAliases.map(alias => TypeCatalogEntry(alias, "primitive"))
     val fromIndex = index.toList
       .sortBy(_._1.toString)
       .flatMap {
@@ -321,28 +284,8 @@ object TypeOverlay {
       }
   }
 
-  private def primitiveAlias(kind: IrPrimitive): String = {
-    import IrPrimitive._
-    kind match {
-      case U8       => "u8"
-      case S8       => "s8"
-      case U16      => "u16"
-      case S16      => "s16"
-      case U32      => "u32"
-      case S32      => "s32"
-      case U64      => "u64"
-      case S64      => "s64"
-      case U128     => "u128"
-      case S128     => "s128"
-      case F8       => "f8"
-      case F16      => "f16"
-      case F32      => "f32"
-      case F64      => "f64"
-      case Char     => "char"
-      case Bool     => "bool"
-      case LongWord => "longWord"
-    }
-  }
+  private def primitiveAlias(kind: IrPrimitive): String =
+    IrPrimitiveAliases.canonical(kind)
 
   def affectsDecode(
       irType: IrType,
@@ -540,7 +483,7 @@ object TypeOverlay {
       wordSize: Option[Int]
   ): Option[(IrType, Option[IrPrimitive])] = {
     val raw = member.typeId.trim
-    PrimitiveByAlias.get(raw.toLowerCase) match {
+    IrPrimitiveAliases.fromAlias(raw) match {
       case Some(primitive) =>
         Some((IrType.Primitive(primitive), None))
       case None =>

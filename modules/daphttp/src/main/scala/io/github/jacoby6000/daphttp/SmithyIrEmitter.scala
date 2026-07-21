@@ -22,10 +22,10 @@ import java.util.function.Consumer
 import scala.jdk.CollectionConverters._
 
 object SmithyIrEmitter {
-  private val TraitsNamespace = "com.jacoby6000.daphttp"
+  private val TraitsNamespace = DapSmithyTraits.Namespace
   private def TraitsPath: Path = SmithyModelLoader.traitsPath
-  private val BytesShapeId = ShapeId.from(s"$TraitsNamespace#Bytes")
-  private val BitsShapeId = ShapeId.from(s"$TraitsNamespace#Bits")
+  private val BytesShapeId = DapSmithyTraits.Bytes
+  private val BitsShapeId = DapSmithyTraits.Bits
 
   private final case class CollectionState(
       shapes: List[(ShapeId, IrType)] = Nil,
@@ -414,44 +414,13 @@ object SmithyIrEmitter {
     }
 
   private def primitiveTraitFor(kind: IrPrimitive): Option[String] =
-    kind match {
-      case IrPrimitive.U8                          => Some("u8")
-      case IrPrimitive.S8                          => Some("s8")
-      case IrPrimitive.U16                         => Some("u16")
-      case IrPrimitive.S16                         => Some("s16")
-      case IrPrimitive.U32                         => Some("u32")
-      case IrPrimitive.S32                         => Some("s32")
-      case IrPrimitive.U64                         => Some("u64")
-      case IrPrimitive.S64                         => Some("s64")
-      case IrPrimitive.U128                        => Some("u128")
-      case IrPrimitive.S128                        => Some("s128")
-      case IrPrimitive.F8                          => Some("f8")
-      case IrPrimitive.F16                         => Some("f16")
-      case IrPrimitive.F32                         => Some("f32")
-      case IrPrimitive.F64                         => Some("f64")
-      case IrPrimitive.Char                        => Some("char")
-      case IrPrimitive.Bool | IrPrimitive.LongWord =>
-        None
-    }
+    DapSmithyTraits.traitNameFor(kind)
 
   private def preludeShapeId(kind: IrPrimitive): ShapeId =
-    ShapeId.from(s"smithy.api#${smithyPreludeName(kind)}")
-
-  private def smithyPreludeName(kind: IrPrimitive): String =
-    kind match {
-      case IrPrimitive.Bool                                                      => "Boolean"
-      case IrPrimitive.Char                                                      => "Byte"
-      case IrPrimitive.U8 | IrPrimitive.S8                                       => "Byte"
-      case IrPrimitive.U16 | IrPrimitive.S16 | IrPrimitive.U32 | IrPrimitive.S32 => "Integer"
-      case IrPrimitive.U64 | IrPrimitive.S64 | IrPrimitive.U128 | IrPrimitive.S128 |
-          IrPrimitive.LongWord =>
-        "Long"
-      case IrPrimitive.F8 | IrPrimitive.F16 | IrPrimitive.F32 => "Float"
-      case IrPrimitive.F64                                    => "Double"
-    }
+    DapSmithyTraits.preludeShapeId(kind)
 
   private def traitId(name: String): ShapeId =
-    ShapeId.from(s"$TraitsNamespace#$name")
+    DapSmithyTraits.traitId(name)
 
   private def annotationTrait(name: String): Trait =
     new DynamicTrait(traitId(name), Node.objectNode())
