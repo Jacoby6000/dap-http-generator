@@ -94,13 +94,16 @@ object JsonMemoryEncoder {
                       if (member.isArray && !member.isPointer) {
                         tail match {
                           case indexStr :: rest if indexStr.forall(_.isDigit) =>
-                            val index = indexStr.toInt
-                            val stride = arrayStrideBytes(member, wordSizeBits).getOrElse(0)
-                            val elemOff = off + index * stride
-                            if (rest.isEmpty)
-                              Right((nextType, member.copy(isArray = false), elemOff))
-                            else
-                              go(nextType, rest, elemOff, Some(member.copy(isArray = false)))
+                            indexStr.toIntOption
+                              .toRight(s"Invalid or oversized index '$indexStr'")
+                              .flatMap { index =>
+                                val stride = arrayStrideBytes(member, wordSizeBits).getOrElse(0)
+                                val elemOff = off + index * stride
+                                if (rest.isEmpty)
+                                  Right((nextType, member.copy(isArray = false), elemOff))
+                                else
+                                  go(nextType, rest, elemOff, Some(member.copy(isArray = false)))
+                              }
                           case _ =>
                             Left(s"Array field '${member.name}' requires an index segment.")
                         }
@@ -120,12 +123,13 @@ object JsonMemoryEncoder {
               }
             case list: IrType.ListType =>
               if (head.forall(_.isDigit)) {
-                val index = head.toInt
-                HttpRouteIrEmitter.sizeBytesForType(list.element, wordSizeBits) match {
-                  case Right(elemSize) =>
-                    go(list.element, tail, baseOffset + index * elemSize, parentMember)
-                  case Left(errs) =>
-                    Left(errs.mkString("; "))
+                head.toIntOption.toRight(s"Invalid or oversized index '$head'").flatMap { index =>
+                  HttpRouteIrEmitter.sizeBytesForType(list.element, wordSizeBits) match {
+                    case Right(elemSize) =>
+                      go(list.element, tail, baseOffset + index * elemSize, parentMember)
+                    case Left(errs) =>
+                      Left(errs.mkString("; "))
+                  }
                 }
               } else Left(s"Expected array index, got '$head'")
             case other =>

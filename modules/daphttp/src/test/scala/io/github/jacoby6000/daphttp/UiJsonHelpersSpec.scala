@@ -21,6 +21,12 @@ final class JsonPathSpec extends AnyFunSuite {
     assert(JsonPath.get(updated, List("a")).contains(Json.fromInt(1)))
     assert(JsonPath.get(updated, List("b", "c")).contains(Json.fromInt(9)))
   }
+
+  test("oversized digit indices do not throw") {
+    val json = Json.arr(Json.fromInt(1), Json.fromInt(2))
+    assert(JsonPath.get(json, List("99999999999999999999")).isEmpty)
+    assert(JsonPath.replace(json, List("99999999999999999999"), Json.fromInt(3)) == json)
+  }
 }
 
 final class DecodedPayloadSpec extends AnyFunSuite {

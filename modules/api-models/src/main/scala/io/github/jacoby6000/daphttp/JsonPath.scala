@@ -2,8 +2,6 @@ package io.github.jacoby6000.daphttp
 
 import io.circe.Json
 
-import scala.util.Try
-
 /** Navigate and update Circe JSON by field/index segment lists. */
 object JsonPath {
   def get(json: Json, segments: List[String]): Option[Json] =
@@ -13,7 +11,7 @@ object JsonPath {
           .flatMap(_.apply(seg))
           .orElse(
             j.asArray.flatMap { arr =>
-              Try(seg.toInt).toOption.flatMap(i => arr.lift(i))
+              seg.toIntOption.flatMap(i => arr.lift(i))
             }
           )
       }
@@ -30,7 +28,7 @@ object JsonPath {
           case None =>
             json.asArray match {
               case Some(arr) =>
-                Try(head.toInt).toOption match {
+                head.toIntOption match {
                   case Some(index) if index >= 0 && index < arr.size =>
                     Json.fromValues(arr.updated(index, replace(arr(index), tail, value)))
                   case _ => json
