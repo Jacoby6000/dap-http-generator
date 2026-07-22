@@ -179,7 +179,7 @@ private[daphttp] object WebAppRoutes {
                   for {
                     plans <- plansRef.get
                     typeIndex = TypeOverlay.buildTypeIndex(plans.services)
-                    response <- normalizeOverlayKeys(document, typeIndex) match {
+                    response <- TypeOverlay.normalizeOverlayKeys(document, typeIndex) match {
                       case Left(errors) =>
                         BadRequest(Json.obj("errors" -> errors.asJson))
                       case Right(normalized) =>
@@ -228,48 +228,6 @@ private[daphttp] object WebAppRoutes {
       "count" -> Json.fromInt(w.count),
       "overlaySegments" -> w.overlayFields.map(f => f.segments.asJson).asJson
     )
-
-  /** Prefer canonical `namespace#name` keys so overlay lookup matches IR shape ids. */
-  private def normalizeOverlayKeys(
-      document: TypeOverlayDocument,
-      typeIndex: Map[ShapeId, IrType]
-  ): Either[List[String], TypeOverlayDocument] = {
-    val errors = ListBuffer.empty[String]
-    val mapped = document.structs.toList.flatMap { case (key, defn) =>
-      val shapeIdOpt: Option[ShapeId] =
-        try
-          if (key.contains("#")) Some(ShapeId.from(key))
-          else {
-            val matches = typeIndex.keys.filter(_.getName == key).toList.distinct
-            matches match {
-              case List(one) => Some(one)
-              case Nil       => Some(TypeOverlay.normalizeShapeId(key))
-              case many      =>
-                // DESNOTE(jbarber, 2026-07-21): Same leaf name in multiple IR namespaces —
-                // refuse rather than collectFirst's arbitrary pick.
-                val ids = many.map(_.toString).sorted.mkString(", ")
-                errors += s"structs key '$key' is ambiguous; matches [$ids]. Use a fully-qualified id."
-                None
-            }
-          }
-        catch {
-          case _: IllegalArgumentException =>
-            Some(TypeOverlay.normalizeShapeId(key))
-        }
-      shapeIdOpt.map(id => (id.toString, key, defn))
-    }
-    val collisions = mapped
-      .groupBy(_._1)
-      .collect {
-        case (canonical, group) if group.size > 1 =>
-          val keys = group.map(_._2).mkString(", ")
-          s"structs keys [$keys] collide after normalization to $canonical."
-      }
-      .toList
-    val allErrors = errors.toList ++ collisions
-    if (allErrors.nonEmpty) Left(allErrors)
-    else Right(document.copy(structs = mapped.map { case (c, _, d) => c -> d }.toMap))
-  }
 
   private def validateOverlayTypes(
       document: TypeOverlayDocument,

@@ -59,14 +59,23 @@ object DecodedPayload {
   def decodeFailed(json: Json): Boolean = {
     val cursor = json.hcursor
     val topError = cursor.get[String]("error").toOption.exists(_.nonEmpty)
-    val reads = cursor.downField("reads")
-    if (reads.succeeded) {
-      val read = reads.downArray
-      val readError = read.get[String]("error").toOption.exists(_.nonEmpty)
-      val decoded = read.downField("decoded").focus
-      topError || readError || decoded.forall(_.isNull)
-    } else {
-      topError || cursor.downField("decoded").focus.forall(_.isNull)
+    cursor.downField("reads").focus match {
+      case Some(readsJson) =>
+        readsJson.asArray match {
+          case Some(reads) if reads.isEmpty =>
+            // DESNOTE(jbarber, 2026-07-21): Empty `reads: []` is a valid non-DAP envelope;
+            // do not treat a missing reads[0].decoded as failure.
+            topError
+          case Some(reads) =>
+            val read = reads.head.hcursor
+            val readError = read.get[String]("error").toOption.exists(_.nonEmpty)
+            val decoded = read.downField("decoded").focus
+            topError || readError || decoded.forall(_.isNull)
+          case None =>
+            topError || cursor.downField("decoded").focus.forall(_.isNull)
+        }
+      case None =>
+        topError || cursor.downField("decoded").focus.forall(_.isNull)
     }
   }
 

@@ -507,7 +507,8 @@ object DapHttpServerMain {
         case Right(data) =>
           Try(Base64.getDecoder.decode(data)).toOption match {
             case Some(bytes) =>
-              Right(PointerChainResolver.pointerValue(bytes, sub.endian))
+              val raw = PointerChainResolver.pointerValue(bytes.take(wordBytes), sub.endian)
+              Right(maskToWordSize(raw, Some(sub.wordSizeBits)))
             case None =>
               Left("Failed to decode pointer bytes from DAP response.")
           }
@@ -604,12 +605,14 @@ object DapHttpServerMain {
     val wordBytes = chain.wordSizeBits / 8
 
     def readPointer(address: Long): IO[Either[String, Long]] =
-      dapClient.readMemory(address, wordBytes).map {
+      dapClient.readMemory(maskToWordSize(address, Some(chain.wordSizeBits)), wordBytes).map {
         case Left(error) => Left(error)
         case Right(data) =>
           Try(Base64.getDecoder.decode(data)).toOption match {
-            case Some(bytes) => Right(PointerChainResolver.pointerValue(bytes, chain.endian))
-            case None        => Left("Failed to decode pointer bytes from DAP response.")
+            case Some(bytes) =>
+              val raw = PointerChainResolver.pointerValue(bytes.take(wordBytes), chain.endian)
+              Right(maskToWordSize(raw, Some(chain.wordSizeBits)))
+            case None => Left("Failed to decode pointer bytes from DAP response.")
           }
       }
 

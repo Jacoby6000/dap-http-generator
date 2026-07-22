@@ -360,8 +360,19 @@ object Cli
             }
         }
       }
+      typeIndex = TypeOverlay.buildTypeIndex(plans.services)
+      normalizedOverlays <- IO.pure {
+        TypeOverlay.normalizeOverlayKeys(overlayDocument, typeIndex) match {
+          case Right(doc) => doc
+          case Left(errs) =>
+            System.err.println(
+              s"Ignoring overlays from ${config.overlaysPath.getOrElse("?")}: ${errs.mkString("; ")}"
+            )
+            TypeOverlayDocument.empty
+        }
+      }
       overlaysRef <- Ref.of[IO, OverlayEngine](
-        OverlayEngine.fromServices(overlayDocument, plans.services)
+        OverlayEngine.fromServices(normalizedOverlays, plans.services)
       )
       dapClient = DapClients.create(
         config.dapPipe,

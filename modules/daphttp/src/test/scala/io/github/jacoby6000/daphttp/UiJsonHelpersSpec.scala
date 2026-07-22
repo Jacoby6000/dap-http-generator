@@ -100,6 +100,20 @@ final class DecodedPayloadSpec extends AnyFunSuite {
     )
     assert(DecodedPayload.extractDecoded(written) == Json.fromInt(2))
   }
+
+  test("decodeFailed does not treat empty reads as failure") {
+    assert(!DecodedPayload.decodeFailed(Json.obj("reads" -> Json.arr())))
+    assert(
+      DecodedPayload.decodeFailed(
+        Json.obj("reads" -> Json.arr(Json.obj("decoded" -> Json.Null)))
+      )
+    )
+    assert(
+      !DecodedPayload.decodeFailed(
+        Json.obj("reads" -> Json.arr(Json.obj("decoded" -> Json.fromInt(1))))
+      )
+    )
+  }
 }
 
 final class FetchableRoutePathSpec extends AnyFunSuite {
