@@ -21,6 +21,11 @@ final class IndexPathSpec extends AnyFunSuite {
     )
     assert(IndexPath.extractIndices("/api/slots/{index}", "/api/other/1").isEmpty)
     assert(IndexPath.extractIndices("/api/slots/{index}", "/api/slots/x").isEmpty)
+    assert(
+      IndexPath
+        .extractIndices("/api/slots/{index}", "/api/slots/99999999999999999999")
+        .isEmpty
+    )
   }
 
   test("resolveBrowse keeps current values for the same template") {

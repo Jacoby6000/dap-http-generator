@@ -19,20 +19,29 @@ object IndexPath {
       .mkString("/")
   }
 
+  // DESNOTE(jbarber, 2026-07-21): Digit-only strings can still overflow Int; use toIntOption
+  // so oversized catalog/selection segments yield None instead of throwing.
+  private def parseIndexSegment(seg: String): Option[Int] =
+    if (seg.nonEmpty && seg.forall(_.isDigit)) seg.toIntOption
+    else None
+
   def extractIndices(template: String, concrete: String): Option[List[Int]] = {
     val t = template.split('/')
     val c = concrete.split('/')
     if (t.length != c.length) None
     else {
-      val pairs = t.zip(c)
-      if (
-        pairs.forall {
-          case ("{index}", seg) => seg.nonEmpty && seg.forall(_.isDigit)
-          case (a, b)           => a == b
-        }
-      )
-        Some(pairs.collect { case ("{index}", seg) => seg.toInt }.toList)
-      else None
+      val indices = List.newBuilder[Int]
+      val ok = t.zip(c).forall {
+        case ("{index}", seg) =>
+          parseIndexSegment(seg) match {
+            case Some(n) =>
+              indices += n
+              true
+            case None => false
+          }
+        case (a, b) => a == b
+      }
+      if (ok) Some(indices.result()) else None
     }
   }
 
@@ -55,15 +64,19 @@ object IndexPath {
         .headOption
         .orElse {
           val parts = path.split('/').toList
-          val nums = parts.reverse.takeWhile(s => s.nonEmpty && s.forall(_.isDigit)).reverse
+          val nums = parts.reverse.takeWhile(s => parseIndexSegment(s).isDefined).reverse
           if (nums.isEmpty) None
           else {
-            val base = parts.dropRight(nums.length).mkString("/")
-            val template =
-              (parts.dropRight(nums.length) ++ List.fill(nums.length)("{index}")).mkString("/")
-            if (catalogTemplates.exists(t => t == template || t.startsWith(base + "/")))
-              Some((template, nums.map(_.toInt)))
-            else None
+            val parsed = nums.flatMap(parseIndexSegment)
+            if (parsed.length != nums.length) None
+            else {
+              val base = parts.dropRight(nums.length).mkString("/")
+              val template =
+                (parts.dropRight(nums.length) ++ List.fill(nums.length)("{index}")).mkString("/")
+              if (catalogTemplates.exists(t => t == template || t.startsWith(base + "/")))
+                Some((template, parsed))
+              else None
+            }
           }
         }
     }
