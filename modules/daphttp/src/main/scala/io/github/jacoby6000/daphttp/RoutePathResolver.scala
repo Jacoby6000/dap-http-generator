@@ -88,12 +88,11 @@ private[daphttp] object RoutePathResolver {
               s"$basePath/"
             ) && path.length > basePath.length =>
           val suffix = path.stripPrefix(s"$basePath/")
-          if (
-            suffix.nonEmpty && suffix
-              .split("/")
-              .forall(segment => segment.nonEmpty && segment.forall(_.isDigit))
-          ) {
-            Some(plan -> suffix.split("/").map(_.toInt).toList)
+          val segments = suffix.split("/").toList
+          if (segments.nonEmpty && segments.forall(seg => seg.nonEmpty && seg.forall(_.isDigit))) {
+            val indices = segments.flatMap(_.toIntOption)
+            if (indices.length == segments.length) Some(plan -> indices)
+            else None
           } else {
             None
           }
@@ -120,7 +119,7 @@ private[daphttp] object RoutePathResolver {
                   case Nil if sub.isArray =>
                     None
                   case indexStr :: Nil if sub.isArray && indexStr.forall(_.isDigit) =>
-                    Some((plan, sub, Some(indexStr.toInt)))
+                    indexStr.toIntOption.map(i => (plan, sub, Some(i)))
                   case _ =>
                     None
                 }
@@ -139,7 +138,7 @@ private[daphttp] object RoutePathResolver {
       .flatMap { sub =>
         parts match {
           case indexStr :: Nil if indexStr.forall(_.isDigit) =>
-            Some((plan, sub, Some(indexStr.toInt)))
+            indexStr.toIntOption.map(i => (plan, sub, Some(i)))
           case _ =>
             None
         }

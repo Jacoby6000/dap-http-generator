@@ -124,6 +124,55 @@ class TypeOverlaySpec extends AnyFunSuite {
     assert(fields.head.typeId == "u32")
   }
 
+  test("fieldsFor refuses ambiguous short IR ids") {
+    val otherPad = padDemo.copy(id = ShapeId.from("other#PadDemo"))
+    val multi = List(
+      IrService(
+        name = "Api",
+        wordSizeBits = Some(32),
+        defaultEndian = IrEndian.Big,
+        operations = List(
+          IrOperation(
+            name = "GetPadDemo",
+            routePath = "/api/Api/GetPadDemo",
+            output = IrType.EnclosingStruct(
+              id = id("GetPadDemoOutput"),
+              members = List(
+                member("value", padDemo).copy(
+                  id = id("GetPadDemoOutput_value"),
+                  staticAddress = Some(0x1000L),
+                  offsetBytes = None
+                )
+              ),
+              declaredSizeBytes = None
+            )
+          ),
+          IrOperation(
+            name = "GetOtherPad",
+            routePath = "/api/Api/GetOtherPad",
+            output = IrType.EnclosingStruct(
+              id = id("GetOtherPadOutput"),
+              members = List(
+                member("value", otherPad).copy(
+                  id = id("GetOtherPadOutput_value"),
+                  staticAddress = Some(0x2000L),
+                  offsetBytes = None
+                )
+              ),
+              declaredSizeBytes = None
+            )
+          )
+        )
+      )
+    )
+    assert(TypeOverlay.fieldsFor(multi, TypeOverlayDocument.empty, "PadDemo").isEmpty)
+    assert(
+      TypeOverlay
+        .fieldsFor(multi, TypeOverlayDocument.empty, id("PadDemo").toString)
+        .exists(_.map(_.name) == List("x0", "padF"))
+    )
+  }
+
   test("widening a field absorbs following pad bytes when types stay naturally aligned") {
     val source = IrType.MemoryMappedStruct(
       id = id("WideDemo"),

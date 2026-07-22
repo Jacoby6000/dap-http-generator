@@ -267,12 +267,19 @@ object TypeOverlay {
       catch { case _: IllegalArgumentException => None }
     byFull
       .orElse {
-        val normalized = normalizeShapeId(raw)
-        index.get(normalized).collect { case s: IrType.Struct => s }
-      }
-      .orElse {
-        index.collectFirst {
-          case (id, s: IrType.Struct) if id.getName == raw => s
+        if (raw.contains("#")) {
+          val normalized = normalizeShapeId(raw)
+          index.get(normalized).collect { case s: IrType.Struct => s }
+        } else {
+          // DESNOTE(jbarber, 2026-07-21): Unqualified names must be unique across namespaces —
+          // collectFirst would pick an arbitrary struct (PUT /overlays already rejects this).
+          val matches = index.collect {
+            case (id, s: IrType.Struct) if id.getName == raw => s
+          }.toList
+          matches match {
+            case List(one) => Some(one)
+            case _         => None
+          }
         }
       }
   }

@@ -144,5 +144,6 @@ class RoutePathResolverSpec extends AnyFunSuite {
         .swap
         .exists(_.contains("cannot be watched directly"))
     )
+    assert(RoutePathResolver.resolveForHttp("/api/Demo/table/99999999999", chainRoutes).isEmpty)
   }
 }

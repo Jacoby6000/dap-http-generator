@@ -945,7 +945,7 @@ object DapHttpServerMain {
               }
           }
         case _ =>
-          IO.pure(Json.fromLong(rawAddr))
+          IO.pure(Json.fromLong(addr))
       }
     }
   }
