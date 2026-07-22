@@ -36,7 +36,11 @@ object OverlayDocumentOps {
       members: List[OverlayMember]
   ): TypeOverlayDocument = {
     val normalized = normalizeNewStructId(structId)
-    val updatedStructs = document.structs + (structId -> OverlayStructDef(members))
+    // DESNOTE(jbarber, 2026-07-21): Always persist under the normalized key and drop the
+    // raw/alternate spelling so Apply with `Foo` cannot leave a second `overlay#Foo` entry
+    // (or the reverse) that Reset and TypeOverlay lookup would disagree about.
+    val updatedStructs =
+      (document.structs - structId - normalized) + (normalized -> OverlayStructDef(members))
     val updatedNew = document.newStructs.map { ns =>
       if (normalizeNewStructId(ns.id) == normalized) ns.copy(members = members)
       else ns

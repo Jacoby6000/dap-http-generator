@@ -4,14 +4,14 @@ import io.circe.Json
 
 /** Read/write `decoded` / `overlayDecoded` on DAP HTTP response envelopes. */
 object DecodedPayload {
-  def extractDecoded(json: Json): Json =
-    json.hcursor
-      .downField("reads")
-      .downArray
-      .downField("decoded")
-      .focus
-      .orElse(json.hcursor.downField("decoded").focus)
-      .getOrElse(json)
+  def extractDecoded(json: Json): Json = {
+    val cursor = json.hcursor
+    val reads = cursor.downField("reads")
+    if (reads.succeeded)
+      reads.downArray.downField("decoded").focus.getOrElse(Json.Null)
+    else
+      cursor.downField("decoded").focus.getOrElse(Json.Null)
+  }
 
   def extractOverlayDecoded(json: Json): Option[Json] =
     json.hcursor
@@ -53,12 +53,16 @@ object DecodedPayload {
 
   def decodeFailed(json: Json): Boolean = {
     val cursor = json.hcursor
-    val hasError = cursor.get[String]("error").toOption.exists(_.nonEmpty)
-    val decodedFocus = cursor
-      .downField("decoded")
-      .focus
-      .orElse(cursor.downField("reads").downArray.downField("decoded").focus)
-    hasError || decodedFocus.exists(_.isNull)
+    val topError = cursor.get[String]("error").toOption.exists(_.nonEmpty)
+    val reads = cursor.downField("reads")
+    if (reads.succeeded) {
+      val read = reads.downArray
+      val readError = read.get[String]("error").toOption.exists(_.nonEmpty)
+      val decoded = read.downField("decoded").focus
+      topError || readError || decoded.forall(_.isNull)
+    } else {
+      topError || cursor.downField("decoded").focus.forall(_.isNull)
+    }
   }
 
   def decodeErrorMessage(json: Json): String =
@@ -66,5 +70,8 @@ object DecodedPayload {
       .get[String]("error")
       .toOption
       .filter(_.nonEmpty)
+      .orElse(
+        json.hcursor.downField("reads").downArray.get[String]("error").toOption.filter(_.nonEmpty)
+      )
       .getOrElse("Decode returned null / empty result.")
 }

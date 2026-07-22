@@ -45,6 +45,26 @@ final class DecodedPayloadSpec extends AnyFunSuite {
     assert(DecodedPayload.decodeFailed(Json.obj("decoded" -> Json.Null)))
     assert(!DecodedPayload.decodeFailed(Json.obj("decoded" -> Json.fromInt(1))))
   }
+
+  test("decodeFailed and extractDecoded honor reads[0] errors") {
+    val failedRead = Json.obj(
+      "reads" -> Json.arr(
+        Json.obj("path" -> Json.fromString("/api/x"), "error" -> Json.fromString("dap down"))
+      )
+    )
+    assert(DecodedPayload.decodeFailed(failedRead))
+    assert(DecodedPayload.decodeErrorMessage(failedRead) == "dap down")
+    assert(DecodedPayload.extractDecoded(failedRead).isNull)
+  }
+
+  test("extractDecoded does not fall back to the envelope when reads is present") {
+    val envelope = Json.obj(
+      "route" -> Json.fromString("/api/x"),
+      "reads" -> Json.arr(Json.obj("path" -> Json.fromString("/api/x")))
+    )
+    assert(DecodedPayload.extractDecoded(envelope).isNull)
+    assert(DecodedPayload.decodeFailed(envelope))
+  }
 }
 
 final class FetchableRoutePathSpec extends AnyFunSuite {
