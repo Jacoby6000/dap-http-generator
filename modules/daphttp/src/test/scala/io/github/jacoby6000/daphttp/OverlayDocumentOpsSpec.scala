@@ -74,6 +74,31 @@ final class OverlayDocumentOpsSpec extends AnyFunSuite {
     assert(!next.structs.contains("overlay#Player"))
   }
 
+  test("membersForStruct and removeStructOverlay resolve namespaced IR keys") {
+    val doc = TypeOverlayDocument(
+      structs = Map("game#Player" -> OverlayStructDef(List(member.copy(name = "hp")))),
+      newStructs = Nil
+    )
+    assert(
+      OverlayDocumentOps
+        .membersForStruct(doc, "Player")
+        .contains(List(member.copy(name = "hp")))
+    )
+    val after = OverlayDocumentOps.removeStructOverlay(doc, "Player")
+    assert(after.structs.isEmpty)
+  }
+
+  test("applyStructMembers reuses existing namespaced IR key") {
+    val doc = TypeOverlayDocument(
+      structs = Map("game#Player" -> OverlayStructDef(List(member))),
+      newStructs = Nil
+    )
+    val next =
+      OverlayDocumentOps.applyStructMembers(doc, "Player", List(member.copy(name = "hp")))
+    assert(next.structs.keySet == Set("game#Player"))
+    assert(next.structs("game#Player").members.head.name == "hp")
+  }
+
   test("addNewStruct rejects duplicates") {
     val doc = TypeOverlayDocument.empty
     OverlayDocumentOps.addNewStruct(doc, "Foo", List(member)) match {
@@ -121,5 +146,28 @@ final class OverlayDocumentOpsSpec extends AnyFunSuite {
     val after = OverlayDocumentOps.removeStructOverlay(doc, "Foo")
     assert(after.structs.isEmpty)
     assert(after.newStructs.isEmpty)
+  }
+
+  test("membersForStruct and remove resolve unqualified IR ids after PUT canonicalize") {
+    val doc = TypeOverlayDocument(
+      structs = Map("game#Player" -> OverlayStructDef(List(member.copy(name = "hp")))),
+      newStructs = Nil
+    )
+    assert(
+      OverlayDocumentOps
+        .membersForStruct(doc, "Player")
+        .contains(List(member.copy(name = "hp")))
+    )
+    val withClientKey = doc.copy(
+      structs = doc.structs + ("overlay#Player" -> OverlayStructDef(List(member.copy(name = "x"))))
+    )
+    assert(
+      OverlayDocumentOps
+        .membersForStruct(withClientKey, "Player")
+        .contains(List(member.copy(name = "hp")))
+    )
+    val after = OverlayDocumentOps.removeStructOverlay(withClientKey, "Player")
+    assert(!after.structs.contains("game#Player"))
+    assert(after.structs.contains("overlay#Player"))
   }
 }

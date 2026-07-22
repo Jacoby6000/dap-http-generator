@@ -65,6 +65,21 @@ final class DecodedPayloadSpec extends AnyFunSuite {
     assert(DecodedPayload.extractDecoded(envelope).isNull)
     assert(DecodedPayload.decodeFailed(envelope))
   }
+
+  test("extractOverlayDecoded does not fall back past a reads envelope") {
+    val envelope = Json.obj(
+      "overlayDecoded" -> Json.fromString("top"),
+      "reads" -> Json.arr(Json.obj("path" -> Json.fromString("/api/x")))
+    )
+    assert(DecodedPayload.extractOverlayDecoded(envelope).isEmpty)
+    assert(
+      DecodedPayload
+        .extractOverlayDecoded(
+          Json.obj("overlayDecoded" -> Json.fromString("flat"))
+        )
+        .contains(Json.fromString("flat"))
+    )
+  }
 }
 
 final class FetchableRoutePathSpec extends AnyFunSuite {

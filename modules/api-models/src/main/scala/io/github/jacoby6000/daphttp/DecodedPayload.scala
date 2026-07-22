@@ -13,13 +13,12 @@ object DecodedPayload {
       cursor.downField("decoded").focus.getOrElse(Json.Null)
   }
 
-  def extractOverlayDecoded(json: Json): Option[Json] =
-    json.hcursor
-      .downField("reads")
-      .downArray
-      .downField("overlayDecoded")
-      .focus
-      .orElse(json.hcursor.downField("overlayDecoded").focus)
+  def extractOverlayDecoded(json: Json): Option[Json] = {
+    val cursor = json.hcursor
+    val reads = cursor.downField("reads")
+    if (reads.succeeded) reads.downArray.downField("overlayDecoded").focus
+    else cursor.downField("overlayDecoded").focus
+  }
 
   def writeDecodedFields(
       payload: Json,
