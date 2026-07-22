@@ -114,16 +114,9 @@ class TypeOverlaySpec extends AnyFunSuite {
   }
 
   test("fieldsFor resolves short id to unique namespaced overlay") {
-    val overlayMember = OverlayMember(
-      name = "renamed",
-      typeId = "u32",
-      isArray = false,
-      arrayLength = None,
-      isPointer = false,
-      bitWidth = None
-    )
     val document = TypeOverlayDocument(
-      structs = Map(id("PadDemo").toString -> OverlayStructDef(List(overlayMember))),
+      structs =
+        Map(id("PadDemo").toString -> OverlayStructDef(List(OverlayMember("renamed", "u32")))),
       newStructs = Nil
     )
     val fields = TypeOverlay.fieldsFor(services, document, "PadDemo").get
