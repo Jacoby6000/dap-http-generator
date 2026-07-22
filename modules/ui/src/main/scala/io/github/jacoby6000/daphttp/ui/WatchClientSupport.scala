@@ -6,8 +6,8 @@ import io.github.jacoby6000.daphttp.DecodedPayload
 import io.github.jacoby6000.daphttp.JsonPath
 import io.github.jacoby6000.daphttp.WatchPathMatch
 import org.scalajs.dom
+import org.scalajs.macrotaskexecutor.MacrotaskExecutor.Implicits._
 
-import scala.concurrent.ExecutionContext.Implicits.global
 import scala.concurrent.Future
 import scala.util.Failure
 import scala.util.Success

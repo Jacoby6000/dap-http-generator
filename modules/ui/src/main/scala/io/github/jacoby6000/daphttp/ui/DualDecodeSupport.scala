@@ -88,7 +88,7 @@ private[ui] trait DualDecodeSupport {
     right.appendChild(rightLine)
     row.appendChild(left)
     row.appendChild(right)
-    host.appendChild(row)
+    val _ = host.appendChild(row)
   }
 
   protected def setDualDecodeView(
@@ -101,7 +101,7 @@ private[ui] trait DualDecodeSupport {
     val host = byId("detail-dual")
     host.innerHTML = ""
     host.className = "json-view dual-scroll"
-    host.appendChild(
+    val _ = host.appendChild(
       renderDualNode(
         source = Some(source),
         overlay = overlay,
@@ -692,7 +692,7 @@ private[ui] trait DualDecodeSupport {
           }
           closeRow.appendChild(closeCell(sourcePresent))
           closeRow.appendChild(closeCell(overlayPresent))
-          root.appendChild(closeRow)
+          val _ = root.appendChild(closeRow)
         }
 
       if (isOpen) ensureChildren()

@@ -13,8 +13,8 @@ ThisBuild / scalacOptions ++= Seq(
   "-Wdead-code",
   "-Wextra-implicit",
   "-Wnumeric-widen",
-  "-Xlint:implicit-recursion",
-  "-Wunused:imports,patvars,privates,locals,explicits,implicits",
+  "-Woctal-literal",
+  "-Wunused:_",
   "-Wvalue-discard"
 )
 
@@ -45,20 +45,12 @@ lazy val ui = project
   .settings(
     name := "dap-http-ui",
     scalaJSUseMainModuleInitializer := true,
-    // DESNOTE(jbarber, 2026-07-18): Scala.js DOM / Promise interop is noisy under the JVM
-    // module's strict -Xlint/-Wunused settings; keep those fatal warnings on the server.
-    // DESNOTE(jbarber, 2026-07-21): Keep `-Wunused:imports` after stripping the broader
-    // `-Wunused:…` bundle so scalafix OrganizeImports / RemoveUnused still run on UI
-    // (`scalafixAll --check` in CI).
-    scalacOptions --= Seq(
-      "-Xlint:_",
-      "-Wunused:imports,patvars,privates,locals,explicits,implicits",
-      "-Wvalue-discard"
-    ),
-    scalacOptions += "-Wunused:imports",
-    scalacOptions += "-P:scalajs:nowarnGlobalExecutionContext",
+    // DESNOTE(jbarber, 2026-07-21): Prefer macrotask EC over ExecutionContext.global so
+    // Scala.js does not warn (fatal under -Xfatal-warnings) about microtask starvation.
+    // See https://github.com/scala-js/scala-js-macrotask-executor
     libraryDependencies ++= Seq(
       "org.scala-js" %%% "scalajs-dom" % "2.8.0",
+      "org.scala-js" %%% "scala-js-macrotask-executor" % "1.1.1",
       "io.circe" %%% "circe-core" % circeVersion,
       "io.circe" %%% "circe-parser" % circeVersion,
       "io.circe" %%% "circe-generic" % circeVersion

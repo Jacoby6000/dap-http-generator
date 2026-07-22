@@ -23,9 +23,9 @@ import org.scalajs.dom.HttpMethod
 import org.scalajs.dom.KeyboardEvent
 import org.scalajs.dom.MouseEvent
 import org.scalajs.dom.RequestInit
+import org.scalajs.macrotaskexecutor.MacrotaskExecutor.Implicits._
 
 import scala.annotation.unused
-import scala.concurrent.ExecutionContext.Implicits.global
 import scala.concurrent.Future
 import scala.scalajs.js
 import scala.util.Failure
@@ -156,7 +156,7 @@ object Main extends DualDecodeSupport with OverlayEditorSupport with WatchClient
     loadCatalog()
     loadTypesAndOverlays()
     connectWatchSocket()
-    js.timers.setInterval(2000)(refreshVisibleAgeStyles())
+    val _ = js.timers.setInterval(2000)(refreshVisibleAgeStyles())
   }
 
   protected def loadTypesAndOverlays(): Unit = {
@@ -378,7 +378,7 @@ object Main extends DualDecodeSupport with OverlayEditorSupport with WatchClient
       val ul = el("ul")
       ul.className = "tree"
       visible.foreach(n => ul.appendChild(renderNode(n)))
-      root.appendChild(ul)
+      val _ = root.appendChild(ul)
     }
   }
 
@@ -770,13 +770,6 @@ object Main extends DualDecodeSupport with OverlayEditorSupport with WatchClient
     if (activeTabPath.contains(path)) renderIndexBar()
   }
 
-  private def setPlainView(id: String, text: String, error: Boolean = false): Unit = {
-    val host = byId(id)
-    host.innerHTML = ""
-    host.className = if (error) "json-view plain error" else "json-view plain"
-    host.textContent = text
-  }
-
   protected def appendFieldActions(
       row: HTMLElement,
       basePath: String,
@@ -787,7 +780,7 @@ object Main extends DualDecodeSupport with OverlayEditorSupport with WatchClient
     def prepend(node: HTMLElement): Unit =
       Option(row.firstChild) match {
         case Some(first) => val _ = row.insertBefore(node, first)
-        case None        => row.appendChild(node)
+        case None        => val _ = row.appendChild(node)
       }
 
     if (overlayPanel) {
@@ -877,7 +870,7 @@ object Main extends DualDecodeSupport with OverlayEditorSupport with WatchClient
       var committing = false
       def restoreLeaf(): Unit =
         if (input.parentNode == parent) {
-          parent.replaceChild(leafEl, input)
+          val _ = parent.replaceChild(leafEl, input)
         }
       def finish(restore: Boolean): Unit =
         if (!finished) {
@@ -1378,7 +1371,7 @@ object Main extends DualDecodeSupport with OverlayEditorSupport with WatchClient
 
     toast.appendChild(body)
     toast.appendChild(dismiss)
-    host.appendChild(toast)
+    val _ = host.appendChild(toast)
   }
 
   private def shortenPath(path: String): String =

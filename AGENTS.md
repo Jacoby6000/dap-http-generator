@@ -163,6 +163,10 @@ flowchart LR
 ### Non-obvious caveats
 
 - `scalafmtOnCompile := true`, so `sbt compile` will reformat sources in place.
+- All modules share fatal warnings: `-Xfatal-warnings`, `-Xlint:_`, `-Wunused:_`, plus
+  `-Wdead-code` / `-Wextra-implicit` / `-Wnumeric-widen` / `-Woctal-literal` / `-Wvalue-discard`.
+  The Scala.js UI uses `MacrotaskExecutor` instead of `ExecutionContext.global` so the
+  microtask EC warning stays fatal rather than being silenced with a compiler flag.
 - Pin `sbt-scalafix` to `0.14.5` (not 0.14.6/0.14.7): those versions intermittently fail
   `scalafixAll` while sbt copies test-resource fixtures (`Unable to load symbol table: …/*.tmp`).
   See https://github.com/scalacenter/scalafix/issues/2469.

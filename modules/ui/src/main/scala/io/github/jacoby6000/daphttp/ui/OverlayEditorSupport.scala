@@ -10,8 +10,8 @@ import org.scalajs.dom
 import org.scalajs.dom.HTMLElement
 import org.scalajs.dom.HTMLInputElement
 import org.scalajs.dom.MouseEvent
+import org.scalajs.macrotaskexecutor.MacrotaskExecutor.Implicits._
 
-import scala.concurrent.ExecutionContext.Implicits.global
 import scala.concurrent.Future
 import scala.scalajs.js
 import scala.util.Failure
