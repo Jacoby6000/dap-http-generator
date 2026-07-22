@@ -274,7 +274,8 @@ object DapHttpServerMain {
         resolvePointerChainAddress(chain, chainSegments, dapClient).flatMap {
           case Left(error) =>
             BadRequest(Json.obj("error" -> Json.fromString(error)))
-          case Right(structAddress) =>
+          case Right(rawAddress) =>
+            val structAddress = maskToWordSize(rawAddress, Some(chain.wordSizeBits))
             if (shouldFollowCString(chain)) {
               readNullTerminatedCString(dapClient, structAddress).flatMap { value =>
                 Ok(

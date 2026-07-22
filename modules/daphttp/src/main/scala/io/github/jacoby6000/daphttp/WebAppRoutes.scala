@@ -234,21 +234,29 @@ private[daphttp] object WebAppRoutes {
       document: TypeOverlayDocument,
       typeIndex: Map[ShapeId, IrType]
   ): Either[List[String], TypeOverlayDocument] = {
-    val mapped = document.structs.toList.map { case (key, defn) =>
-      val canonical =
-        try {
-          val shapeId =
-            if (key.contains("#")) ShapeId.from(key)
-            else
-              typeIndex
-                .collectFirst { case (id, _) if id.getName == key => id }
-                .getOrElse(TypeOverlay.normalizeShapeId(key))
-          shapeId.toString
-        } catch {
+    val errors = ListBuffer.empty[String]
+    val mapped = document.structs.toList.flatMap { case (key, defn) =>
+      val shapeIdOpt: Option[ShapeId] =
+        try
+          if (key.contains("#")) Some(ShapeId.from(key))
+          else {
+            val matches = typeIndex.keys.filter(_.getName == key).toList.distinct
+            matches match {
+              case List(one) => Some(one)
+              case Nil       => Some(TypeOverlay.normalizeShapeId(key))
+              case many      =>
+                // DESNOTE(jbarber, 2026-07-21): Same leaf name in multiple IR namespaces —
+                // refuse rather than collectFirst's arbitrary pick.
+                val ids = many.map(_.toString).sorted.mkString(", ")
+                errors += s"structs key '$key' is ambiguous; matches [$ids]. Use a fully-qualified id."
+                None
+            }
+          }
+        catch {
           case _: IllegalArgumentException =>
-            TypeOverlay.normalizeShapeId(key).toString
+            Some(TypeOverlay.normalizeShapeId(key))
         }
-      (canonical, key, defn)
+      shapeIdOpt.map(id => (id.toString, key, defn))
     }
     val collisions = mapped
       .groupBy(_._1)
@@ -258,7 +266,8 @@ private[daphttp] object WebAppRoutes {
           s"structs keys [$keys] collide after normalization to $canonical."
       }
       .toList
-    if (collisions.nonEmpty) Left(collisions)
+    val allErrors = errors.toList ++ collisions
+    if (allErrors.nonEmpty) Left(allErrors)
     else Right(document.copy(structs = mapped.map { case (c, _, d) => c -> d }.toMap))
   }
 

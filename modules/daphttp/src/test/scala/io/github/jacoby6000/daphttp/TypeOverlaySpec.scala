@@ -439,4 +439,75 @@ class TypeOverlaySpec extends AnyFunSuite {
       .unsafeRunSync()
     assert(badPut.status == Status.BadRequest)
   }
+
+  test("PUT /overlays rejects ambiguous unqualified struct keys") {
+    val otherPad = padDemo.copy(id = ShapeId.from("other#PadDemo"))
+    val multi = List(
+      IrService(
+        name = "Api",
+        wordSizeBits = Some(32),
+        defaultEndian = IrEndian.Big,
+        operations = List(
+          IrOperation(
+            name = "GetPadDemo",
+            routePath = "/api/Api/GetPadDemo",
+            output = IrType.EnclosingStruct(
+              id = id("GetPadDemoOutput"),
+              members = List(
+                member("value", padDemo).copy(
+                  id = id("GetPadDemoOutput_value"),
+                  staticAddress = Some(0x1000L),
+                  offsetBytes = None
+                )
+              ),
+              declaredSizeBytes = None
+            )
+          ),
+          IrOperation(
+            name = "GetOtherPad",
+            routePath = "/api/Api/GetOtherPad",
+            output = IrType.EnclosingStruct(
+              id = id("GetOtherPadOutput"),
+              members = List(
+                member("value", otherPad).copy(
+                  id = id("GetOtherPadOutput_value"),
+                  staticAddress = Some(0x2000L),
+                  offsetBytes = None
+                )
+              ),
+              declaredSizeBytes = None
+            )
+          )
+        )
+      )
+    )
+    val plans = HttpRouteIrEmitter.emitRoutePlansFromIr(multi)
+    assert(plans.errors.isEmpty)
+    val plansRef = Ref.unsafe[IO, RoutePlansLoadResult](plans)
+    val overlaysRef =
+      Ref.unsafe[IO, OverlayEngine](OverlayEngine.fromServices(TypeOverlayDocument.empty, multi))
+    val dapClient = new DapClient {
+      override def readMemory(address: Long, sizeBytes: Int): IO[Either[String, String]] =
+        IO.pure(Right(Base64.getEncoder.encodeToString(Array.fill(sizeBytes)(0.toByte))))
+      override def continueExecution(threadId: Option[Int] = None): IO[Either[String, Json]] = {
+        val _ = threadId
+        IO.pure(Right(Json.obj()))
+      }
+    }
+    val app =
+      DapHttpServerMain.routes(plansRef, dapClient, overlaysRef, None).orNotFound
+    val ambiguousPut = app
+      .run(
+        Request[IO](Method.PUT, uri"/overlays").withEntity(
+          TypeOverlayDocument(
+            structs = Map("PadDemo" -> OverlayStructDef(List(OverlayMember("wide", "u32"))))
+          ).asJson
+        )
+      )
+      .unsafeRunSync()
+    assert(ambiguousPut.status == Status.BadRequest)
+    val body =
+      ambiguousPut.body.compile.toVector.unsafeRunSync().map(_.toChar).mkString
+    assert(body.contains("ambiguous"))
+  }
 }

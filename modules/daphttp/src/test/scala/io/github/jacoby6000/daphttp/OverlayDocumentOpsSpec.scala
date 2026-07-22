@@ -186,4 +186,17 @@ final class OverlayDocumentOpsSpec extends AnyFunSuite {
     assert(OverlayDocumentOps.membersForStruct(doc, "Player").isEmpty)
     assert(OverlayDocumentOps.removeStructOverlay(doc, "Player") == doc)
   }
+
+  test("bare key among namespaced peers is still ambiguous") {
+    val doc = TypeOverlayDocument(
+      structs = Map(
+        "Player" -> OverlayStructDef(List(member.copy(name = "bare"))),
+        "game#Player" -> OverlayStructDef(List(member.copy(name = "a"))),
+        "other#Player" -> OverlayStructDef(List(member.copy(name = "b")))
+      ),
+      newStructs = Nil
+    )
+    assert(OverlayDocumentOps.uniqueMatchingStructKey(doc, "Player").isEmpty)
+    assert(OverlayDocumentOps.membersForStruct(doc, "Player").isEmpty)
+  }
 }

@@ -34,17 +34,11 @@ object OverlayDocumentOps {
   def uniqueMatchingStructKey(
       document: TypeOverlayDocument,
       structId: String
-  ): Option[String] = {
-    val trimmed = structId.trim
-    val normalizedNew = normalizeNewStructId(trimmed)
-    val keys = matchingStructKeys(document, trimmed)
-    keys match {
-      case List(one)                            => Some(one)
-      case many if many.contains(trimmed)       => Some(trimmed)
-      case many if many.contains(normalizedNew) => Some(normalizedNew)
-      case _                                    => None
+  ): Option[String] =
+    matchingStructKeys(document, structId) match {
+      case List(one) => Some(one)
+      case _         => None
     }
-  }
 
   def membersForStruct(
       document: TypeOverlayDocument,
