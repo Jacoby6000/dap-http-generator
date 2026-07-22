@@ -223,16 +223,24 @@ private[daphttp] object DapProxyRoutes {
       .orElse(services.headOption)
     val wordSize = owningService.flatMap(_.wordSizeBits)
     val endian = owningService.map(_.defaultEndian).getOrElse(IrEndian.Big)
-    val rootTypeOpt = shapeIdOpt.flatMap { shapeId =>
-      typeIndex.get(shapeId).orElse {
-        typeIndex.collectFirst {
-          case (id, t) if id.getName == decodeType || id.toString == decodeType => t
-        }
+    val leafLookup =
+      shapeIdOpt match {
+        case Some(shapeId) if typeIndex.contains(shapeId) =>
+          Right(typeIndex.get(shapeId))
+        case _ =>
+          TypeOverlay.uniqueTypeByLeafName(typeIndex, decodeType)
       }
-    }
 
-    rootTypeOpt match {
-      case None =>
+    leafLookup match {
+      case Left(ambiguous) =>
+        BadRequest(
+          Json.obj(
+            "command" -> Json.fromString("writeMemory"),
+            "success" -> Json.False,
+            "message" -> Json.fromString(ambiguous)
+          )
+        )
+      case Right(None) =>
         BadRequest(
           Json.obj(
             "command" -> Json.fromString("writeMemory"),
@@ -240,7 +248,7 @@ private[daphttp] object DapProxyRoutes {
             "message" -> Json.fromString(s"Unknown decodeType: $decodeType")
           )
         )
-      case Some(rootType) =>
+      case Right(Some(rootType)) =>
         val resolvedRoot =
           if (useOverlay)
             TypeOverlay

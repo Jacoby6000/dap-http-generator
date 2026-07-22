@@ -253,7 +253,12 @@ private[ui] trait OverlayEditorSupport {
         case None =>
           editingStructId = Some(structId)
           persistActiveTabDraft()
-          putOverlays(OverlayDocumentOps.applyStructMembers(overlays, structId, draftMembers))
+          OverlayDocumentOps.applyStructMembers(overlays, structId, draftMembers) match {
+            case Left(err) =>
+              setEditorStatus(err, ok = false)
+            case Right(next) =>
+              putOverlays(next)
+          }
       }
     }
   }

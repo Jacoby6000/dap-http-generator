@@ -50,7 +50,10 @@ final class OverlayDocumentOpsSpec extends AnyFunSuite {
       newStructs = List(OverlayNewStruct("overlay#N", List(member)))
     )
     val next =
-      OverlayDocumentOps.applyStructMembers(doc, "overlay#N", List(member.copy(name = "z")))
+      OverlayDocumentOps
+        .applyStructMembers(doc, "overlay#N", List(member.copy(name = "z")))
+        .toOption
+        .get
     assert(next.structs("overlay#N").members.head.name == "z")
     assert(next.newStructs.head.members.head.name == "z")
   }
@@ -60,7 +63,8 @@ final class OverlayDocumentOpsSpec extends AnyFunSuite {
       structs = Map("Foo" -> OverlayStructDef(List(member))),
       newStructs = List(OverlayNewStruct("overlay#Foo", List(member)))
     )
-    val next = OverlayDocumentOps.applyStructMembers(doc, "Foo", List(member.copy(name = "z")))
+    val next =
+      OverlayDocumentOps.applyStructMembers(doc, "Foo", List(member.copy(name = "z"))).toOption.get
     assert(!next.structs.contains("Foo"))
     assert(next.structs("overlay#Foo").members.head.name == "z")
     assert(next.newStructs.head.members.head.name == "z")
@@ -69,7 +73,10 @@ final class OverlayDocumentOpsSpec extends AnyFunSuite {
   test("applyStructMembers keeps unqualified IR overlay keys") {
     val doc = TypeOverlayDocument.empty
     val next =
-      OverlayDocumentOps.applyStructMembers(doc, "Player", List(member.copy(name = "hp")))
+      OverlayDocumentOps
+        .applyStructMembers(doc, "Player", List(member.copy(name = "hp")))
+        .toOption
+        .get
     assert(next.structs.contains("Player"))
     assert(!next.structs.contains("overlay#Player"))
   }
@@ -94,7 +101,10 @@ final class OverlayDocumentOpsSpec extends AnyFunSuite {
       newStructs = Nil
     )
     val next =
-      OverlayDocumentOps.applyStructMembers(doc, "Player", List(member.copy(name = "hp")))
+      OverlayDocumentOps
+        .applyStructMembers(doc, "Player", List(member.copy(name = "hp")))
+        .toOption
+        .get
     assert(next.structs.keySet == Set("game#Player"))
     assert(next.structs("game#Player").members.head.name == "hp")
   }
@@ -185,6 +195,19 @@ final class OverlayDocumentOpsSpec extends AnyFunSuite {
     assert(OverlayDocumentOps.uniqueMatchingStructKey(doc, "Player").isEmpty)
     assert(OverlayDocumentOps.membersForStruct(doc, "Player").isEmpty)
     assert(OverlayDocumentOps.removeStructOverlay(doc, "Player") == doc)
+  }
+
+  test("applyStructMembers refuses ambiguous short names") {
+    val doc = TypeOverlayDocument(
+      structs = Map(
+        "game#Player" -> OverlayStructDef(List(member.copy(name = "a"))),
+        "other#Player" -> OverlayStructDef(List(member.copy(name = "b")))
+      ),
+      newStructs = Nil
+    )
+    assert(
+      OverlayDocumentOps.applyStructMembers(doc, "Player", List(member.copy(name = "hp"))).isLeft
+    )
   }
 
   test("bare key among namespaced peers is still ambiguous") {

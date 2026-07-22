@@ -63,17 +63,19 @@ private[daphttp] object MemberPathResolver {
       .flatMap { v =>
         parts match {
           case indexStr :: rest if indexStr.forall(_.isDigit) =>
-            val index = indexStr.toInt
-            val stride = v.elementStrideBytes.getOrElse(v.elementSizeBytes.getOrElse(0))
-            val elemAddr = v.baseAddress + index.toLong * stride.toLong
-            if (rest.isEmpty)
-              atSubRoute(basePath, parentAddr, v, elemAddr)
-            else
-              v.valueType
-                .toRight(s"Root array element has no value type")
-                .flatMap(t =>
-                  descend(basePath, parentAddr, t, elemAddr, rest, v.endian, v.wordSizeBits)
-                )
+            indexStr.toIntOption.toRight(s"Invalid or oversized index '$indexStr'").flatMap {
+              index =>
+                val stride = v.elementStrideBytes.getOrElse(v.elementSizeBytes.getOrElse(0))
+                val elemAddr = v.baseAddress + index.toLong * stride.toLong
+                if (rest.isEmpty)
+                  atSubRoute(basePath, parentAddr, v, elemAddr)
+                else
+                  v.valueType
+                    .toRight(s"Root array element has no value type")
+                    .flatMap(t =>
+                      descend(basePath, parentAddr, t, elemAddr, rest, v.endian, v.wordSizeBits)
+                    )
+            }
           case _ =>
             Left("Root array path requires a numeric index")
         }
@@ -92,18 +94,20 @@ private[daphttp] object MemberPathResolver {
       case Some(v: MemberSubRoute.ValueSubRoute) if v.isArray =>
         parts.drop(1) match {
           case indexStr :: rest if indexStr.forall(_.isDigit) =>
-            val index = indexStr.toInt
-            val stride = v.elementStrideBytes.getOrElse(v.elementSizeBytes.getOrElse(0))
-            val elemAddr =
-              v.baseAddress + v.memberOffsetBytes.toLong + index.toLong * stride.toLong
-            if (rest.isEmpty)
-              atSubRoute(basePath, parentAddr, v, elemAddr)
-            else
-              v.valueType
-                .toRight(s"Array member '${v.memberName}' has no element type")
-                .flatMap(t =>
-                  descend(basePath, parentAddr, t, elemAddr, rest, v.endian, v.wordSizeBits)
-                )
+            indexStr.toIntOption.toRight(s"Invalid or oversized index '$indexStr'").flatMap {
+              index =>
+                val stride = v.elementStrideBytes.getOrElse(v.elementSizeBytes.getOrElse(0))
+                val elemAddr =
+                  v.baseAddress + v.memberOffsetBytes.toLong + index.toLong * stride.toLong
+                if (rest.isEmpty)
+                  atSubRoute(basePath, parentAddr, v, elemAddr)
+                else
+                  v.valueType
+                    .toRight(s"Array member '${v.memberName}' has no element type")
+                    .flatMap(t =>
+                      descend(basePath, parentAddr, t, elemAddr, rest, v.endian, v.wordSizeBits)
+                    )
+            }
           case _ =>
             Left(s"Array member '${v.memberName}' requires a numeric index")
         }
@@ -137,9 +141,9 @@ private[daphttp] object MemberPathResolver {
               )
             )
           case indexStr :: Nil if p.isArray && indexStr.forall(_.isDigit) =>
-            val addr =
-              p.baseAddress + p.memberOffsetBytes.toLong + indexStr.toInt.toLong * wordBytes
-            Right(
+            indexStr.toIntOption.toRight(s"Invalid or oversized index '$indexStr'").map { index =>
+              val addr =
+                p.baseAddress + p.memberOffsetBytes.toLong + index.toLong * wordBytes
               ResolvedMemberRead(
                 address = addr,
                 sizeBytes = wordBytes,
@@ -151,7 +155,7 @@ private[daphttp] object MemberPathResolver {
                 parentPath = basePath,
                 isPointerSlot = true
               )
-            )
+            }
           case _ =>
             Left(
               s"Cannot watch through pointer '${p.memberName}'; focus the pointee first."

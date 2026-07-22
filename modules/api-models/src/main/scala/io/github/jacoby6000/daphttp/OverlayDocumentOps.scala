@@ -67,28 +67,35 @@ object OverlayDocumentOps {
       document: TypeOverlayDocument,
       structId: String,
       members: List[OverlayMember]
-  ): TypeOverlayDocument = {
+  ): Either[String, TypeOverlayDocument] = {
     val trimmed = structId.trim
     val normalizedNew = normalizeNewStructId(trimmed)
     val matchesNew =
       document.newStructs.exists(ns => normalizeNewStructId(ns.id) == normalizedNew)
     // DESNOTE(jbarber, 2026-07-21): Only force `overlay#…` when editing a client-created
     // struct. Unqualified IR names keep/reuse a unique existing `ns#Name` key when present so
-    // PUT round-trips and TypeOverlay.structDefFor stay aligned. Ambiguous short names (two
-    // namespaces with the same leaf) leave other keys alone and write the short id.
-    val existing = uniqueMatchingStructKey(document, trimmed)
-    val key =
-      if (matchesNew) normalizedNew
-      else existing.getOrElse(trimmed)
-    val updatedStructs =
-      (document.structs -- existing.toList - trimmed - normalizedNew) + (key -> OverlayStructDef(
-        members
-      ))
-    val updatedNew = document.newStructs.map { ns =>
-      if (normalizeNewStructId(ns.id) == normalizedNew) ns.copy(members = members)
-      else ns
+    // PUT round-trips and TypeOverlay.structDefFor stay aligned. Ambiguous short names must
+    // not invent a bare key beside multiple namespaced overlays.
+    val matches = matchingStructKeys(document, trimmed)
+    if (!matchesNew && matches.size > 1)
+      Left(
+        s"Struct id '$trimmed' is ambiguous across [${matches.mkString(", ")}]; use a fully-qualified id."
+      )
+    else {
+      val existing = uniqueMatchingStructKey(document, trimmed)
+      val key =
+        if (matchesNew) normalizedNew
+        else existing.getOrElse(trimmed)
+      val updatedStructs =
+        (document.structs -- existing.toList - trimmed - normalizedNew) + (key -> OverlayStructDef(
+          members
+        ))
+      val updatedNew = document.newStructs.map { ns =>
+        if (normalizeNewStructId(ns.id) == normalizedNew) ns.copy(members = members)
+        else ns
+      }
+      Right(document.copy(structs = updatedStructs, newStructs = updatedNew))
     }
-    document.copy(structs = updatedStructs, newStructs = updatedNew)
   }
 
   def removeStructOverlay(

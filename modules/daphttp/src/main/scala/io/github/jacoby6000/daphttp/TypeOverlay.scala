@@ -60,11 +60,10 @@ object TypeOverlay {
               typeIndex.get(shapeId) match {
                 case Some(found) => Right(found)
                 case None        =>
-                  typeIndex.collectFirst {
-                    case (id, tpe) if id.getName == raw => tpe
-                  } match {
-                    case Some(found) => Right(found)
-                    case None        => Left(s"Unknown typeId '$typeId'.")
+                  uniqueTypeByLeafName(typeIndex, raw) match {
+                    case Right(Some(found)) => Right(found)
+                    case Right(None)        => Left(s"Unknown typeId '$typeId'.")
+                    case Left(err)          => Left(err)
                   }
               }
           }
@@ -75,6 +74,23 @@ object TypeOverlay {
     val trimmed = raw.trim
     if (trimmed.contains("#")) ShapeId.from(trimmed)
     else ShapeId.from(s"$OverlayNamespace#$trimmed")
+  }
+
+  /** Unique IR type for an unqualified leaf name, or an ambiguity error. */
+  private[daphttp] def uniqueTypeByLeafName(
+      typeIndex: Map[ShapeId, IrType],
+      leafName: String
+  ): Either[String, Option[IrType]] = {
+    val matches = typeIndex.collect {
+      case (id, tpe) if id.getName == leafName => id -> tpe
+    }.toList
+    matches match {
+      case Nil          => Right(None)
+      case List((_, t)) => Right(Some(t))
+      case many         =>
+        val ids = many.map(_._1.toString).sorted.mkString(", ")
+        Left(s"Type id '$leafName' is ambiguous; matches [$ids]. Use a fully-qualified id.")
+    }
   }
 
   def validate(document: TypeOverlayDocument): Either[List[String], TypeOverlayDocument] = {
@@ -573,10 +589,8 @@ object TypeOverlay {
                       )
                     )
                   case None =>
-                    typeIndex.collectFirst {
-                      case (id, tpe) if id.getName == raw => tpe
-                    } match {
-                      case Some(found) =>
+                    uniqueTypeByLeafName(typeIndex, raw) match {
+                      case Right(Some(found)) =>
                         Some(
                           (
                             rewriteTypeInner(
@@ -590,8 +604,11 @@ object TypeOverlay {
                             None
                           )
                         )
-                      case None =>
+                      case Right(None) =>
                         errors += s"Unknown typeId '${member.typeId}'."
+                        None
+                      case Left(err) =>
+                        errors += err
                         None
                     }
                 }
