@@ -113,6 +113,24 @@ class TypeOverlaySpec extends AnyFunSuite {
     assert(fields(1).arrayLength.contains(6))
   }
 
+  test("fieldsFor resolves short id to unique namespaced overlay") {
+    val overlayMember = OverlayMember(
+      name = "renamed",
+      typeId = "u32",
+      isArray = false,
+      arrayLength = None,
+      isPointer = false,
+      bitWidth = None
+    )
+    val document = TypeOverlayDocument(
+      structs = Map(id("PadDemo").toString -> OverlayStructDef(List(overlayMember))),
+      newStructs = Nil
+    )
+    val fields = TypeOverlay.fieldsFor(services, document, "PadDemo").get
+    assert(fields.map(_.name) == List("renamed"))
+    assert(fields.head.typeId == "u32")
+  }
+
   test("widening a field absorbs following pad bytes when types stay naturally aligned") {
     val source = IrType.MemoryMappedStruct(
       id = id("WideDemo"),

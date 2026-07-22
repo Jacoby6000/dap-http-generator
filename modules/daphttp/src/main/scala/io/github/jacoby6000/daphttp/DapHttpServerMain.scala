@@ -1071,7 +1071,8 @@ object DapHttpServerMain {
     pointer match {
       case None          => IO.pure(Json.Null)
       case Some(address) =>
-        readNullTerminatedCString(dapClient, address).map(Json.fromString)
+        val masked = maskToWordSize(address, readPlan.wordSizeBits)
+        readNullTerminatedCString(dapClient, masked).map(Json.fromString)
     }
   }
 }

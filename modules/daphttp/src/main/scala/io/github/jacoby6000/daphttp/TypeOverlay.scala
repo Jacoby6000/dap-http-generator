@@ -222,23 +222,29 @@ object TypeOverlay {
     val trimmed = typeId.trim
     if (trimmed.isEmpty) None
     else {
-      val shapeIdOpt =
-        try
-          Some(
-            if (trimmed.contains("#")) ShapeId.from(trimmed)
-            else normalizeShapeId(trimmed)
-          )
-        catch {
-          case _: IllegalArgumentException => None
-        }
-      shapeIdOpt.flatMap { shapeId =>
-        structDefFor(document, shapeId)
-          .map(_.members)
-          .orElse {
-            val index = buildTypeIndex(services)
-            resolveIndexedStruct(trimmed, index).map(_.members.map(catalogField))
+      // Prefer OverlayDocumentOps so short ids resolve unique `ns#Name` overlay keys the same
+      // way as the explorer editor after PUT canonicalize.
+      OverlayDocumentOps
+        .membersForStruct(document, trimmed)
+        .orElse {
+          val shapeIdOpt =
+            try
+              Some(
+                if (trimmed.contains("#")) ShapeId.from(trimmed)
+                else normalizeShapeId(trimmed)
+              )
+            catch {
+              case _: IllegalArgumentException => None
+            }
+          shapeIdOpt.flatMap { shapeId =>
+            structDefFor(document, shapeId)
+              .map(_.members)
+              .orElse {
+                val index = buildTypeIndex(services)
+                resolveIndexedStruct(trimmed, index).map(_.members.map(catalogField))
+              }
           }
-      }
+        }
     }
   }
 

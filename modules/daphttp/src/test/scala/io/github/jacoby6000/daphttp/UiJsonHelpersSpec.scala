@@ -80,6 +80,20 @@ final class DecodedPayloadSpec extends AnyFunSuite {
         .contains(Json.fromString("flat"))
     )
   }
+
+  test("writeDecodedFields keeps empty reads as a reads envelope") {
+    val payload = Json.obj("reads" -> Json.arr())
+    val written =
+      DecodedPayload.writeDecodedFields(payload, Json.fromInt(2), Some(Json.fromInt(3)))
+    assert(written.hcursor.downField("decoded").focus.isEmpty)
+    assert(
+      written.hcursor.downField("reads").downArray.get[Int]("decoded").contains(2)
+    )
+    assert(
+      written.hcursor.downField("reads").downArray.get[Int]("overlayDecoded").contains(3)
+    )
+    assert(DecodedPayload.extractDecoded(written) == Json.fromInt(2))
+  }
 }
 
 final class FetchableRoutePathSpec extends AnyFunSuite {

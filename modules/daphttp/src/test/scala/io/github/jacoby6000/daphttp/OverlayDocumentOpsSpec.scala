@@ -170,4 +170,20 @@ final class OverlayDocumentOpsSpec extends AnyFunSuite {
     assert(!after.structs.contains("game#Player"))
     assert(after.structs.contains("overlay#Player"))
   }
+
+  test("ambiguous short IR names do not wipe multiple namespaced keys") {
+    val doc = TypeOverlayDocument(
+      structs = Map(
+        "game#Player" -> OverlayStructDef(List(member.copy(name = "a"))),
+        "other#Player" -> OverlayStructDef(List(member.copy(name = "b")))
+      ),
+      newStructs = Nil
+    )
+    assert(
+      OverlayDocumentOps.matchingStructKeys(doc, "Player") == List("game#Player", "other#Player")
+    )
+    assert(OverlayDocumentOps.uniqueMatchingStructKey(doc, "Player").isEmpty)
+    assert(OverlayDocumentOps.membersForStruct(doc, "Player").isEmpty)
+    assert(OverlayDocumentOps.removeStructOverlay(doc, "Player") == doc)
+  }
 }

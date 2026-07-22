@@ -24,31 +24,37 @@ object DecodedPayload {
       payload: Json,
       decoded: Json,
       overlay: Option[Json]
-  ): Json =
-    payload.hcursor.downField("reads").as[Vector[Json]] match {
-      case Right(reads) if reads.nonEmpty =>
-        val head = reads.head
-        val withDecoded = head.mapObject(_.add("decoded", decoded))
-        val updatedHead = overlay match {
-          case Some(od) =>
-            withDecoded.mapObject(_.add("overlayDecoded", od))
-          case None =>
-            if (head.hcursor.downField("overlayDecoded").succeeded)
-              withDecoded.mapObject(_.remove("overlayDecoded"))
-            else withDecoded
-        }
-        payload.mapObject(_.add("reads", Json.fromValues(updatedHead +: reads.tail)))
-      case _ =>
-        val withDecoded = payload.mapObject(_.add("decoded", decoded))
-        overlay match {
-          case Some(od) =>
-            withDecoded.mapObject(_.add("overlayDecoded", od))
-          case None =>
-            if (payload.hcursor.downField("overlayDecoded").succeeded)
-              withDecoded.mapObject(_.remove("overlayDecoded"))
-            else withDecoded
-        }
+  ): Json = {
+    def patchObject(base: Json): Json = {
+      val withDecoded = base.mapObject(_.add("decoded", decoded))
+      overlay match {
+        case Some(od) =>
+          withDecoded.mapObject(_.add("overlayDecoded", od))
+        case None =>
+          if (base.hcursor.downField("overlayDecoded").succeeded)
+            withDecoded.mapObject(_.remove("overlayDecoded"))
+          else withDecoded
+      }
     }
+
+    payload.hcursor.downField("reads").focus match {
+      case Some(readsJson) =>
+        readsJson.asArray match {
+          case Some(reads) if reads.nonEmpty =>
+            payload.mapObject(
+              _.add("reads", Json.fromValues(patchObject(reads.head) +: reads.tail.toList))
+            )
+          case Some(_) =>
+            // DESNOTE(jbarber, 2026-07-21): Empty `reads: []` is still a reads envelope;
+            // writing top-level decoded here would be invisible to extractDecoded.
+            payload.mapObject(_.add("reads", Json.fromValues(List(patchObject(Json.obj())))))
+          case None =>
+            patchObject(payload)
+        }
+      case None =>
+        patchObject(payload)
+    }
+  }
 
   def decodeFailed(json: Json): Boolean = {
     val cursor = json.hcursor

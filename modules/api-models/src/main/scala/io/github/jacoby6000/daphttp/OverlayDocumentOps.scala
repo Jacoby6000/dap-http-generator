@@ -18,12 +18,32 @@ object OverlayDocumentOps {
     val normalizedNew = normalizeNewStructId(trimmed)
     val matchesNew =
       document.newStructs.exists(ns => normalizeNewStructId(ns.id) == normalizedNew)
-    document.structs.keys.filter { key =>
-      key == trimmed ||
-      (matchesNew && key == normalizedNew) ||
-      (!trimmed.contains("#") && key.endsWith("#" + trimmed) &&
-        (matchesNew || !key.startsWith("overlay#")))
-    }.toList
+    document.structs.keys
+      .filter { key =>
+        key == trimmed ||
+        (matchesNew && key == normalizedNew) ||
+        (!trimmed.contains("#") && key.endsWith("#" + trimmed) &&
+          (matchesNew || !key.startsWith("overlay#")))
+      }
+      .toList
+      .distinct
+      .sorted
+  }
+
+  /** Prefer an unambiguous structs key; refuse when multiple namespaces share the short name. */
+  def uniqueMatchingStructKey(
+      document: TypeOverlayDocument,
+      structId: String
+  ): Option[String] = {
+    val trimmed = structId.trim
+    val normalizedNew = normalizeNewStructId(trimmed)
+    val keys = matchingStructKeys(document, trimmed)
+    keys match {
+      case List(one)                            => Some(one)
+      case many if many.contains(trimmed)       => Some(trimmed)
+      case many if many.contains(normalizedNew) => Some(normalizedNew)
+      case _                                    => None
+    }
   }
 
   def membersForStruct(
@@ -32,7 +52,7 @@ object OverlayDocumentOps {
   ): Option[List[OverlayMember]] = {
     val trimmed = structId.trim
     val normalizedNew = normalizeNewStructId(trimmed)
-    matchingStructKeys(document, trimmed).headOption
+    uniqueMatchingStructKey(document, trimmed)
       .flatMap(document.structs.get)
       .map(_.members)
       .orElse(
@@ -59,14 +79,17 @@ object OverlayDocumentOps {
     val matchesNew =
       document.newStructs.exists(ns => normalizeNewStructId(ns.id) == normalizedNew)
     // DESNOTE(jbarber, 2026-07-21): Only force `overlay#…` when editing a client-created
-    // struct. Unqualified IR names keep/reuse an existing `ns#Name` key when present so PUT
-    // round-trips and TypeOverlay.structDefFor stay aligned.
-    val existing = matchingStructKeys(document, trimmed)
+    // struct. Unqualified IR names keep/reuse a unique existing `ns#Name` key when present so
+    // PUT round-trips and TypeOverlay.structDefFor stay aligned. Ambiguous short names (two
+    // namespaces with the same leaf) leave other keys alone and write the short id.
+    val existing = uniqueMatchingStructKey(document, trimmed)
     val key =
       if (matchesNew) normalizedNew
-      else existing.headOption.getOrElse(trimmed)
+      else existing.getOrElse(trimmed)
     val updatedStructs =
-      (document.structs -- existing - trimmed - normalizedNew) + (key -> OverlayStructDef(members))
+      (document.structs -- existing.toList - trimmed - normalizedNew) + (key -> OverlayStructDef(
+        members
+      ))
     val updatedNew = document.newStructs.map { ns =>
       if (normalizeNewStructId(ns.id) == normalizedNew) ns.copy(members = members)
       else ns
@@ -82,20 +105,19 @@ object OverlayDocumentOps {
     val normalizedNew = normalizeNewStructId(trimmed)
     val matchesNew =
       document.newStructs.exists(ns => normalizeNewStructId(ns.id) == normalizedNew)
-    val keys = matchingStructKeys(document, trimmed)
+    val key = uniqueMatchingStructKey(document, trimmed)
     // DESNOTE(jbarber, 2026-07-21): Apply dual-writes newStruct edits into `structs` and
     // `newStructs`. Reset of a client-created type must clear both. Reset of an IR overlay
-    // drops every matching structs key (short or `ns#Name`) without deleting a coincidental
-    // newStruct that shares the unqualified name.
+    // drops only an unambiguous matching key — never every `*#Name` across namespaces.
     if (matchesNew)
       document.copy(
-        structs = document.structs -- keys - trimmed - normalizedNew,
+        structs = document.structs -- key.toList - trimmed - normalizedNew,
         newStructs = document.newStructs.filterNot { ns =>
           normalizeNewStructId(ns.id) == normalizedNew
         }
       )
     else
-      document.copy(structs = document.structs -- keys)
+      document.copy(structs = document.structs -- key.toList)
   }
 
   def addNewStruct(
