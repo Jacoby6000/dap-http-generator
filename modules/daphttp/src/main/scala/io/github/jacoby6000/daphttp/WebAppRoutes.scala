@@ -179,32 +179,35 @@ private[daphttp] object WebAppRoutes {
                   for {
                     plans <- plansRef.get
                     typeIndex = TypeOverlay.buildTypeIndex(plans.services)
-                    normalized = normalizeOverlayKeys(document, typeIndex)
-                    validationErrors = validateOverlayTypes(normalized, typeIndex)
-                    response <-
-                      if (validationErrors.nonEmpty)
-                        BadRequest(Json.obj("errors" -> validationErrors.asJson))
-                      else {
-                        val engine = OverlayEngine.fromServices(normalized, plans.services)
-                        for {
-                          _ <- overlaysRef.set(engine)
-                          _ <- IO.blocking {
-                            overlayPersistPath.foreach(TypeOverlay.saveDocument(_, normalized))
-                          }
-                          rebindResult <- watchService.fold(
-                            IO.pure((List.empty[WatchBinding], List.empty[String]))
-                          )(_.rebindAll)
-                          (bindings, watchErrors) = rebindResult
-                          response <- Ok(
-                            normalized.asJson.mapObject { obj =>
-                              val withWatches =
-                                obj.add("watches", bindings.map(watchBindingJson).asJson)
-                              if (watchErrors.isEmpty) withWatches
-                              else withWatches.add("watchErrors", watchErrors.asJson)
+                    response <- normalizeOverlayKeys(document, typeIndex) match {
+                      case Left(errors) =>
+                        BadRequest(Json.obj("errors" -> errors.asJson))
+                      case Right(normalized) =>
+                        val validationErrors = validateOverlayTypes(normalized, typeIndex)
+                        if (validationErrors.nonEmpty)
+                          BadRequest(Json.obj("errors" -> validationErrors.asJson))
+                        else {
+                          val engine = OverlayEngine.fromServices(normalized, plans.services)
+                          for {
+                            _ <- overlaysRef.set(engine)
+                            _ <- IO.blocking {
+                              overlayPersistPath.foreach(TypeOverlay.saveDocument(_, normalized))
                             }
-                          )
-                        } yield response
-                      }
+                            rebindResult <- watchService.fold(
+                              IO.pure((List.empty[WatchBinding], List.empty[String]))
+                            )(_.rebindAll)
+                            (bindings, watchErrors) = rebindResult
+                            ok <- Ok(
+                              normalized.asJson.mapObject { obj =>
+                                val withWatches =
+                                  obj.add("watches", bindings.map(watchBindingJson).asJson)
+                                if (watchErrors.isEmpty) withWatches
+                                else withWatches.add("watchErrors", watchErrors.asJson)
+                              }
+                            )
+                          } yield ok
+                        }
+                    }
                   } yield response
               }
           }
@@ -230,8 +233,8 @@ private[daphttp] object WebAppRoutes {
   private def normalizeOverlayKeys(
       document: TypeOverlayDocument,
       typeIndex: Map[ShapeId, IrType]
-  ): TypeOverlayDocument = {
-    val normalizedStructs = document.structs.map { case (key, defn) =>
+  ): Either[List[String], TypeOverlayDocument] = {
+    val mapped = document.structs.toList.map { case (key, defn) =>
       val canonical =
         try {
           val shapeId =
@@ -245,9 +248,18 @@ private[daphttp] object WebAppRoutes {
           case _: IllegalArgumentException =>
             TypeOverlay.normalizeShapeId(key).toString
         }
-      canonical -> defn
+      (canonical, key, defn)
     }
-    document.copy(structs = normalizedStructs)
+    val collisions = mapped
+      .groupBy(_._1)
+      .collect {
+        case (canonical, group) if group.size > 1 =>
+          val keys = group.map(_._2).mkString(", ")
+          s"structs keys [$keys] collide after normalization to $canonical."
+      }
+      .toList
+    if (collisions.nonEmpty) Left(collisions)
+    else Right(document.copy(structs = mapped.map { case (c, _, d) => c -> d }.toMap))
   }
 
   private def validateOverlayTypes(

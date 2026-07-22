@@ -152,7 +152,7 @@ object DoldecompIrGenerator {
           Nil
         }
       IrGenerationResult(
-        warnings = warnings.toList.distinct,
+        warnings = (warnings ++= diagnosticsSink.reportOtherWarnings).toList.distinct,
         services = Nil,
         diagnostics = baseDiagnostics(resolvedCount = 0, operations = 0, extras = emptyMessage)
       )

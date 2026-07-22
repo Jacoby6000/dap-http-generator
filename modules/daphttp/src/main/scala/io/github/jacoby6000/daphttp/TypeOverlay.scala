@@ -87,7 +87,10 @@ object TypeOverlay {
       if (ns.id.trim.isEmpty) errors += s"newStructs[$index].id must be non-empty."
       validateMembers(s"newStructs[${ns.id}]", ns.members, errors)
     }
-    val newIds = document.newStructs.map(_.id.trim).filter(_.nonEmpty)
+    val newIds =
+      document.newStructs
+        .map(ns => OverlayDocumentOps.normalizeNewStructId(ns.id))
+        .filter(_.nonEmpty)
     if (newIds.distinct.size != newIds.size)
       errors += "newStructs ids must be unique."
     if (errors.nonEmpty) Left(errors.toList) else Right(document)

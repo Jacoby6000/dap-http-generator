@@ -55,7 +55,7 @@ final class OverlayDocumentOpsSpec extends AnyFunSuite {
     assert(next.newStructs.head.members.head.name == "z")
   }
 
-  test("applyStructMembers stores under normalized key") {
+  test("applyStructMembers stores newStructs under normalized key") {
     val doc = TypeOverlayDocument(
       structs = Map("Foo" -> OverlayStructDef(List(member))),
       newStructs = List(OverlayNewStruct("overlay#Foo", List(member)))
@@ -64,6 +64,14 @@ final class OverlayDocumentOpsSpec extends AnyFunSuite {
     assert(!next.structs.contains("Foo"))
     assert(next.structs("overlay#Foo").members.head.name == "z")
     assert(next.newStructs.head.members.head.name == "z")
+  }
+
+  test("applyStructMembers keeps unqualified IR overlay keys") {
+    val doc = TypeOverlayDocument.empty
+    val next =
+      OverlayDocumentOps.applyStructMembers(doc, "Player", List(member.copy(name = "hp")))
+    assert(next.structs.contains("Player"))
+    assert(!next.structs.contains("overlay#Player"))
   }
 
   test("addNewStruct rejects duplicates") {

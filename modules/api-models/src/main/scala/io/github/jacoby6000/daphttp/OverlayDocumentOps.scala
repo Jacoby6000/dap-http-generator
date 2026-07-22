@@ -11,14 +11,17 @@ object OverlayDocumentOps {
       document: TypeOverlayDocument,
       structId: String
   ): Option[List[OverlayMember]] = {
-    val normalized = normalizeNewStructId(structId)
+    val trimmed = structId.trim
+    val normalizedNew = normalizeNewStructId(trimmed)
+    val matchesNew =
+      document.newStructs.exists(ns => normalizeNewStructId(ns.id) == normalizedNew)
     document.structs
-      .get(structId)
-      .orElse(document.structs.get(normalized))
+      .get(trimmed)
+      .orElse(if (matchesNew) document.structs.get(normalizedNew) else None)
       .map(_.members)
       .orElse(
         document.newStructs
-          .find(ns => normalizeNewStructId(ns.id) == normalized)
+          .find(ns => normalizeNewStructId(ns.id) == normalizedNew)
           .map(_.members)
       )
   }
@@ -35,14 +38,18 @@ object OverlayDocumentOps {
       structId: String,
       members: List[OverlayMember]
   ): TypeOverlayDocument = {
-    val normalized = normalizeNewStructId(structId)
-    // DESNOTE(jbarber, 2026-07-21): Always persist under the normalized key and drop the
-    // raw/alternate spelling so Apply with `Foo` cannot leave a second `overlay#Foo` entry
-    // (or the reverse) that Reset and TypeOverlay lookup would disagree about.
+    val trimmed = structId.trim
+    val normalizedNew = normalizeNewStructId(trimmed)
+    val matchesNew =
+      document.newStructs.exists(ns => normalizeNewStructId(ns.id) == normalizedNew)
+    // DESNOTE(jbarber, 2026-07-21): Only force `overlay#…` when editing a client-created
+    // struct. Unqualified IR names (e.g. `Player`) must keep their raw key so PUT
+    // normalizeOverlayKeys / TypeOverlay.structDefFor can resolve them to `ns#Player`.
+    val key = if (matchesNew) normalizedNew else trimmed
     val updatedStructs =
-      (document.structs - structId - normalized) + (normalized -> OverlayStructDef(members))
+      (document.structs - trimmed - normalizedNew) + (key -> OverlayStructDef(members))
     val updatedNew = document.newStructs.map { ns =>
-      if (normalizeNewStructId(ns.id) == normalized) ns.copy(members = members)
+      if (normalizeNewStructId(ns.id) == normalizedNew) ns.copy(members = members)
       else ns
     }
     document.copy(structs = updatedStructs, newStructs = updatedNew)
@@ -52,17 +59,23 @@ object OverlayDocumentOps {
       document: TypeOverlayDocument,
       structId: String
   ): TypeOverlayDocument = {
-    val normalized = normalizeNewStructId(structId)
-    document.copy(
-      // DESNOTE(jbarber, 2026-07-21): Drop both the raw and normalized keys so Reset with
-      // `Foo` clears an Apply that stored `overlay#Foo` (and the reverse). Apply dual-writes
-      // newStruct edits into `structs` and `newStructs`; Reset must clear matching newStructs
-      // too or reinterpretation keeps the applied members via the newStructs fallback.
-      structs = document.structs - structId - normalized,
-      newStructs = document.newStructs.filterNot { ns =>
-        normalizeNewStructId(ns.id) == normalized
-      }
-    )
+    val trimmed = structId.trim
+    val normalizedNew = normalizeNewStructId(trimmed)
+    val matchesNew =
+      document.newStructs.exists(ns => normalizeNewStructId(ns.id) == normalizedNew)
+    // DESNOTE(jbarber, 2026-07-21): Apply dual-writes newStruct edits into `structs` and
+    // `newStructs`. Reset of a client-created type must clear both (and both spellings of the
+    // structs key). Reset of an IR overlay only drops structs entries — never a coincidental
+    // newStruct that shares an unqualified name.
+    if (matchesNew)
+      document.copy(
+        structs = document.structs - trimmed - normalizedNew,
+        newStructs = document.newStructs.filterNot { ns =>
+          normalizeNewStructId(ns.id) == normalizedNew
+        }
+      )
+    else
+      document.copy(structs = document.structs - trimmed)
   }
 
   def addNewStruct(

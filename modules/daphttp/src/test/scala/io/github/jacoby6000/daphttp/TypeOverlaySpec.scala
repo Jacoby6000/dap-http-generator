@@ -302,6 +302,18 @@ class TypeOverlaySpec extends AnyFunSuite {
         )
         .isLeft
     )
+    assert(
+      TypeOverlay
+        .validate(
+          TypeOverlayDocument(
+            newStructs = List(
+              OverlayNewStruct("Foo", List(OverlayMember("x", "u8"))),
+              OverlayNewStruct("overlay#Foo", List(OverlayMember("y", "u8")))
+            )
+          )
+        )
+        .isLeft
+    )
     val typeIndex = TypeOverlay.buildTypeIndex(services)
     val bad = TypeOverlayDocument(
       structs = Map(
