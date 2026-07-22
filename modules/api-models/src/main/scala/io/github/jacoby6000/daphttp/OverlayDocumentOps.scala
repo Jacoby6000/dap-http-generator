@@ -10,15 +10,18 @@ object OverlayDocumentOps {
   def membersForStruct(
       document: TypeOverlayDocument,
       structId: String
-  ): Option[List[OverlayMember]] =
+  ): Option[List[OverlayMember]] = {
+    val normalized = normalizeNewStructId(structId)
     document.structs
       .get(structId)
+      .orElse(document.structs.get(normalized))
       .map(_.members)
       .orElse(
         document.newStructs
-          .find(ns => ns.id == structId || s"overlay#${ns.id}" == structId)
+          .find(ns => normalizeNewStructId(ns.id) == normalized)
           .map(_.members)
       )
+  }
 
   def validateDraftMembers(members: List[OverlayMember]): Option[String] =
     if (members.isEmpty || members.exists(_.name.trim.isEmpty))
@@ -32,10 +35,10 @@ object OverlayDocumentOps {
       structId: String,
       members: List[OverlayMember]
   ): TypeOverlayDocument = {
+    val normalized = normalizeNewStructId(structId)
     val updatedStructs = document.structs + (structId -> OverlayStructDef(members))
     val updatedNew = document.newStructs.map { ns =>
-      val fullId = if (ns.id.contains("#")) ns.id else s"overlay#${ns.id}"
-      if (fullId == structId || ns.id == structId) ns.copy(members = members)
+      if (normalizeNewStructId(ns.id) == normalized) ns.copy(members = members)
       else ns
     }
     document.copy(structs = updatedStructs, newStructs = updatedNew)
@@ -47,15 +50,13 @@ object OverlayDocumentOps {
   ): TypeOverlayDocument = {
     val normalized = normalizeNewStructId(structId)
     document.copy(
-      structs = document.structs - structId,
-      // DESNOTE(jbarber, 2026-07-21): Apply dual-writes newStruct edits into `structs` and
-      // `newStructs`. Reset must drop the matching newStruct too — clearing only `structs`
-      // leaves the applied members via the newStructs fallback, so reinterpretation never
-      // reverts. For client-created types there is no IR source; removing the entry is the
-      // reset.
+      // DESNOTE(jbarber, 2026-07-21): Drop both the raw and normalized keys so Reset with
+      // `Foo` clears an Apply that stored `overlay#Foo` (and the reverse). Apply dual-writes
+      // newStruct edits into `structs` and `newStructs`; Reset must clear matching newStructs
+      // too or reinterpretation keeps the applied members via the newStructs fallback.
+      structs = document.structs - structId - normalized,
       newStructs = document.newStructs.filterNot { ns =>
-        val id = normalizeNewStructId(ns.id)
-        id == normalized || ns.id == structId
+        normalizeNewStructId(ns.id) == normalized
       }
     )
   }

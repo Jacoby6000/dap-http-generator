@@ -21,6 +21,20 @@ final class OverlayDocumentOpsSpec extends AnyFunSuite {
         .membersForStruct(doc, "overlay#N")
         .contains(List(member.copy(name = "y")))
     )
+    assert(
+      OverlayDocumentOps
+        .membersForStruct(doc, "N")
+        .contains(List(member.copy(name = "y")))
+    )
+  }
+
+  test("membersForStruct finds unqualified newStructs via normalized id") {
+    val doc = TypeOverlayDocument(
+      structs = Map.empty,
+      newStructs = List(OverlayNewStruct("Foo", List(member)))
+    )
+    assert(OverlayDocumentOps.membersForStruct(doc, "overlay#Foo").contains(List(member)))
+    assert(OverlayDocumentOps.membersForStruct(doc, "Foo").contains(List(member)))
   }
 
   test("validateDraftMembers rejects empty names and types") {
@@ -78,5 +92,15 @@ final class OverlayDocumentOpsSpec extends AnyFunSuite {
     val afterIr = OverlayDocumentOps.removeStructOverlay(doc, "game#S")
     assert(!afterIr.structs.contains("game#S"))
     assert(afterIr.newStructs.size == 1)
+  }
+
+  test("removeStructOverlay clears normalized structs key when reset with unqualified id") {
+    val doc = TypeOverlayDocument(
+      structs = Map("overlay#Foo" -> OverlayStructDef(List(member))),
+      newStructs = List(OverlayNewStruct("overlay#Foo", List(member)))
+    )
+    val after = OverlayDocumentOps.removeStructOverlay(doc, "Foo")
+    assert(after.structs.isEmpty)
+    assert(after.newStructs.isEmpty)
   }
 }
