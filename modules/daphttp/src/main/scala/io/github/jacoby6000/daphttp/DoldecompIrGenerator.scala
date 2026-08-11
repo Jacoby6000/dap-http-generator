@@ -1,0 +1,1359 @@
+package io.github.jacoby6000.daphttp
+
+import org.eclipse.cdt.core.dom.ast.IASTCompositeTypeSpecifier
+import org.eclipse.cdt.core.dom.ast.IASTDeclarator
+import software.amazon.smithy.model.shapes.ShapeId
+
+import java.nio.file.Files
+import java.nio.file.Path
+import scala.collection.mutable
+import scala.jdk.CollectionConverters._
+
+object DoldecompIrGenerator {
+  private final case class OperationModel(
+      symbol: DoldecompSymbol,
+      operationName: String,
+      outputName: String,
+      routePath: String,
+      rootTypeName: String,
+      isArray: Boolean,
+      arrayLength: Option[Int],
+      pointerDepth: Int
+  )
+
+  private final case class ResolvedSymbol(
+      symbol: DoldecompSymbol,
+      typeName: String,
+      isArray: Boolean,
+      arrayLength: Option[Int],
+      pointerDepth: Int
+  )
+
+  def generateFromPaths(
+      symbolsPath: Path,
+      headerRoots: List[Path],
+      namespace: String = "doldecomp.generated",
+      serviceName: String = "DolDecompApi",
+      wordSizeBits: Int = 32,
+      extraDataSections: Set[String] = Set.empty
+  ): Either[List[String], IrGenerationResult] = {
+    val symbolsContent = new String(Files.readAllBytes(symbolsPath))
+    DoldecompSymbolsParser
+      .parse(symbolsContent)
+      .map(
+        generateFromSymbols(_, headerRoots, namespace, serviceName, wordSizeBits, extraDataSections)
+      )
+  }
+
+  def generateFromSymbols(
+      symbols: List[DoldecompSymbol],
+      headerRoots: List[Path],
+      namespace: String = "doldecomp.generated",
+      serviceName: String = "DolDecompApi",
+      wordSizeBits: Int = 32,
+      extraDataSections: Set[String] = Set.empty
+  ): IrGenerationResult = {
+    val corpus = CheadersCorpus.load(headerRoots)
+    val diagnosticsSink = DiagnosticSink.forDoldecomp
+    DapHttpLoggers.irSourceDoldecomp.info(
+      "Generating IR from {} symbol(s) across {} header root(s) ({} source file(s))",
+      Integer.valueOf(symbols.size),
+      Integer.valueOf(headerRoots.size),
+      Integer.valueOf(corpus.files.size)
+    )
+    val macroLoad = CheadersTypeCorpus.loadAllMacros(corpus)
+    val allMacros = CHeaderParser.builtInMacros ++ macroLoad.values
+    // Enums before types: Count-sentinel iteration stays enum-only. Array bounds that use
+    // enumerator names (e.g. jobjs[HUD_PLACE_MAX]) resolve via arrayConstants lookup — never by
+    // injecting every enumerator into ScannerInfo (that OOM'd Melee-scale corpora).
+    val enumParse = CheadersEnumCorpus.load(corpus, allMacros)
+    val enums = enumParse.enums
+    val arrayConstants = CheadersEnumCorpus.enumeratorIntConstants(enums)
+    val macrosForTypes =
+      allMacros ++ CheadersEnumCorpus.countMacrosFromEnums(enums).filter { case (name, _) =>
+        !allMacros.contains(name)
+      }
+    val typeCorpus = CheadersTypeCorpus.load(corpus, macrosForTypes, arrayConstants)
+    val headerStructs = typeCorpus.structs.values
+    val structMemberOffsets = CheadersCorpus.loadStructMemberOffsets(corpus)
+    val globalDeclarations = typeCorpus.globals
+    val fieldInitializerLengths = typeCorpus.fieldInitializerLengths
+    val typedefs = typeCorpus.typedefs.values
+    val sectionResult = SectionFilter.filterDataSymbols(symbols, extraDataSections)
+    sectionResult.warnings.foreach(w => diagnosticsSink.warn(DiagnosticCategory.Section, w))
+    val dataObjectSymbols = sectionResult.dataSymbols
+    val warnings = mutable.ListBuffer.empty[String]
+    warnings ++= sectionResult.warnings
+    warnings ++= macroLoad.warnings
+    warnings ++= typeCorpus.structs.warnings
+    warnings ++= typeCorpus.typedefs.warnings
+    warnings ++= enumParse.warnings
+    (macroLoad.warnings ++ typeCorpus.structs.warnings ++ typeCorpus.typedefs.warnings ++ enumParse.warnings)
+      .foreach(w => diagnosticsSink.warn(DiagnosticCategory.Conflict, w))
+
+    val unresolvedSymbols = mutable.ListBuffer.empty[String]
+    val resolvedSymbols = dataObjectSymbols.flatMap { symbol =>
+      resolveSymbol(symbol, globalDeclarations) match {
+        case some @ Some(_) =>
+          some
+        case None =>
+          unresolvedSymbols += symbol.name
+          None
+      }
+    }
+    val includeHints = mutable.ListBuffer.empty[String]
+    val otherWarnings = mutable.ListBuffer.empty[String]
+
+    def baseDiagnostics(
+        resolvedCount: Int,
+        operations: Int,
+        missingTypes: List[(String, List[String])] = Nil,
+        extras: List[String] = Nil
+    ): IrDiagnostics =
+      IrDiagnostics(
+        codeSectionSkips = sectionResult.codeSectionSkips,
+        unknownSectionSkips = sectionResult.unknownSectionSkips,
+        unresolvedSymbols = unresolvedSymbols.toList,
+        missingTypes = missingTypes,
+        conflictingMacros = macroLoad.conflicts,
+        conflictingStructs = typeCorpus.structs.conflicts,
+        conflictingTypedefs = typeCorpus.typedefs.conflicts,
+        conflictingEnums = enumParse.conflicts,
+        enumEvaluationWarnings = enumParse.warnings.filterNot(_.contains("Conflicting enum")),
+        includeHints = includeHints.toList,
+        otherWarnings =
+          (otherWarnings ++ diagnosticsSink.reportOtherWarnings ++ extras).toList.distinct,
+        headerRoots = headerRoots.map(_.toString),
+        sourceFileCount = corpus.files.size,
+        symbolCount = symbols.size,
+        dataObjectCount = dataObjectSymbols.size,
+        resolvedSymbolCount = resolvedCount,
+        operationCount = operations
+      )
+
+    if (unresolvedSymbols.nonEmpty) {
+      val names = unresolvedSymbols.take(40).mkString(", ")
+      val suffix =
+        if (unresolvedSymbols.size > 40) s", … (${unresolvedSymbols.size - 40} more)" else ""
+      val message =
+        s"Skipping ${unresolvedSymbols.size} object symbol(s) with no ctype and no matching global C declaration under --headers: $names$suffix."
+      warnings += message
+      diagnosticsSink.warn(DiagnosticCategory.Symbol, message)
+    }
+
+    if (resolvedSymbols.isEmpty) {
+      val emptyMessage =
+        if (!warnings.exists(_.contains("matching global C declaration"))) {
+          val message = "No data object symbols with a matching C declaration were found."
+          warnings += message
+          diagnosticsSink.warn(DiagnosticCategory.Symbol, message)
+          List(message)
+        } else {
+          Nil
+        }
+      IrGenerationResult(
+        warnings = (warnings ++= diagnosticsSink.reportOtherWarnings).toList.distinct,
+        services = Nil,
+        diagnostics = baseDiagnostics(resolvedCount = 0, operations = 0, extras = emptyMessage)
+      )
+    } else {
+      val missingTypeByName = mutable.LinkedHashMap.empty[String, mutable.ListBuffer[String]]
+      val validResolved = resolvedSymbols.filter { resolved =>
+        validateResolvedType(
+          resolved.symbol.name,
+          resolved.typeName,
+          headerStructs,
+          typedefs,
+          enums,
+          allMacros
+        ) match {
+          case Some(error) =>
+            if (error.contains("Missing struct or primitive definition")) {
+              val typeKey =
+                CHeaderParser.normalizeTypeName(resolved.typeName).replaceAll("\\s+", "")
+              missingTypeByName
+                .getOrElseUpdate(typeKey, mutable.ListBuffer.empty)
+                .append(resolved.symbol.name)
+            } else {
+              warnings += error
+              otherWarnings += error
+              DapHttpLoggers.irSourceDoldecomp.debug("Skipping symbol: {}", error)
+            }
+            false
+          case None =>
+            true
+        }
+      }
+      missingTypeByName.foreach { case (typeName, typeSymbols) =>
+        val names = typeSymbols.take(20).mkString(", ")
+        val suffix = if (typeSymbols.size > 20) s", … (${typeSymbols.size - 20} more)" else ""
+        val message =
+          s"Skipping ${typeSymbols.size} symbol(s) with missing struct or primitive definition for '$typeName' (add the defining headers via --headers): $names$suffix."
+        warnings += message
+        DapHttpLoggers.irSourceDoldecomp.warn("{}", message)
+      }
+      // DESNOTE(jbarber, 2026-07-20): Do not auto-add guessed include roots. When any type fails
+      // to resolve, probe nearby directories and suggest --headers adjustments only.
+      if (missingTypeByName.nonEmpty) {
+        speculateMissingIncludePaths(headerRoots, missingTypeByName.keys.toList).foreach { hint =>
+          warnings += hint
+          includeHints += hint
+          DapHttpLoggers.irSourceDoldecomp.warn("{}", hint)
+        }
+      }
+
+      val missingTypesList = missingTypeByName.toList.map { case (name, syms) =>
+        name -> syms.toList
+      }
+
+      if (validResolved.isEmpty) {
+        IrGenerationResult(
+          (warnings ++= diagnosticsSink.reportOtherWarnings).toList.distinct,
+          Nil,
+          baseDiagnostics(
+            resolvedCount = resolvedSymbols.size,
+            operations = 0,
+            missingTypes = missingTypesList
+          )
+        )
+      } else {
+        val usedOutputNames = mutable.Set.empty[String]
+        val usedOperationNames = mutable.Set.empty[String]
+        val usedRoutePaths = mutable.Set.empty[String]
+        val operations = validResolved.map { resolved =>
+          val pascalName = toPascalCase(resolved.symbol.name)
+          val baseRoutePath = ApiRoutes.normalize(s"/$serviceName/${resolved.symbol.name}")
+          val routePath =
+            if (usedRoutePaths.contains(baseRoutePath)) {
+              var suffix = 2
+              while (
+                usedRoutePaths.contains(
+                  ApiRoutes.normalize(s"/$serviceName/${resolved.symbol.name}_$suffix")
+                )
+              )
+                suffix += 1
+              val result = ApiRoutes.normalize(s"/$serviceName/${resolved.symbol.name}_$suffix")
+              usedRoutePaths += result
+              result
+            } else {
+              usedRoutePaths += baseRoutePath
+              baseRoutePath
+            }
+          val baseOutputName = s"${pascalName}Output"
+          val outputName =
+            if (usedOutputNames.contains(baseOutputName)) {
+              var suffix = 2
+              while (usedOutputNames.contains(s"$baseOutputName$suffix")) suffix += 1
+              val result = s"$baseOutputName$suffix"
+              usedOutputNames += result
+              result
+            } else {
+              usedOutputNames += baseOutputName
+              baseOutputName
+            }
+          val baseOperationName = s"Get$pascalName"
+          val operationName =
+            if (usedOperationNames.contains(baseOperationName)) {
+              var suffix = 2
+              while (usedOperationNames.contains(s"$baseOperationName$suffix")) suffix += 1
+              val result = s"$baseOperationName$suffix"
+              usedOperationNames += result
+              result
+            } else {
+              usedOperationNames += baseOperationName
+              baseOperationName
+            }
+          OperationModel(
+            symbol = resolved.symbol,
+            operationName = operationName,
+            outputName = outputName,
+            routePath = routePath,
+            rootTypeName = resolved.typeName,
+            isArray = resolved.isArray,
+            arrayLength = resolved.arrayLength,
+            pointerDepth = resolved.pointerDepth
+          )
+        }
+
+        val reachableStructs = collectReachableStructs(operations, headerStructs, typedefs)
+        val reachableByName = reachableStructs.toMap
+        val builtStructs = mutable.Map.empty[String, IrType.MemoryMappedStruct]
+        val buildingStructs = mutable.Set.empty[String]
+        val builtEnums = mutable.Map.empty[String, IrType.IntEnum]
+
+        def buildEnum(name: String): IrType.IntEnum =
+          builtEnums.getOrElseUpdate(
+            name, {
+              val definition = enums.getOrElse(
+                name,
+                throw new IllegalStateException(
+                  s"Missing enum definition for '$name' while building IR."
+                )
+              )
+              IrType.IntEnum(
+                id = ShapeId.from(s"$namespace#${definition.name}"),
+                values = definition.values,
+                underlying = IrPrimitive.S32
+              )
+            }
+          )
+
+        def buildStruct(name: String): IrType.MemoryMappedStruct = {
+          builtStructs.getOrElseUpdate(
+            name,
+            reachableByName.get(name) match {
+              case None =>
+                throw new IllegalStateException(
+                  s"Missing struct definition for '$name' while building IR."
+                )
+              case Some(composite) =>
+                buildingStructs += name
+                try {
+                  val fields = CHeaderParser.extractFields(composite)
+                  val rawMembers = buildStructMembers(
+                    namespace = namespace,
+                    structName = name,
+                    wordSizeBits = wordSizeBits,
+                    fields = fields,
+                    reachableStructs = reachableByName,
+                    buildStruct = buildStruct,
+                    buildEnum = buildEnum,
+                    enums = enums,
+                    pointeeTypeFor = pointeeTypeFor,
+                    fieldInitializerLengths = fieldInitializerLengths,
+                    typedefs = typedefs,
+                    arrayConstants = arrayConstants
+                  )
+                  val members = enrichMissingArrayLengths(
+                    structName = name,
+                    fields = fields,
+                    members = rawMembers,
+                    commentOffsets = structMemberOffsets,
+                    arrayConstants = arrayConstants,
+                    wordSizeBits = wordSizeBits,
+                    diagnostics = diagnosticsSink
+                  )
+                  val unpacked = IrType.MemoryMappedStruct(
+                    id = ShapeId.from(s"$namespace#$name"),
+                    members = members,
+                    declaredSizeBytes = None
+                  )
+                  val packed = IrLayout.packStruct(unpacked, Some(wordSizeBits)) match {
+                    case Right(p) =>
+                      p
+                    case Left(errs) =>
+                      // DESNOTE(jbarber, 2026-07-20): Packing is required for layout, but a single
+                      // unresolved flexible array should not abort the whole Melee corpus. Warn and
+                      // keep the unpacked members so other symbols can still load.
+                      errs.foreach { err =>
+                        diagnosticsSink.warn(
+                          DiagnosticCategory.Layout,
+                          s"Failed to pack struct '$name': $err"
+                        )
+                      }
+                      unpacked
+                  }
+                  commentOffsetWarnings(
+                    name,
+                    fields.map(f => CHeaderParser.fieldName(f.declarator)),
+                    packed.members,
+                    structMemberOffsets
+                  ).foreach(msg => diagnosticsSink.warn(DiagnosticCategory.Layout, msg))
+                  packed
+                } finally {
+                  buildingStructs -= name
+                }
+            }
+          )
+        }
+
+        def pointeeTypeFor(name: String, structs: Map[String, IASTCompositeTypeSpecifier]): IrType =
+          if (structs.contains(name) && buildingStructs.contains(name))
+            IrType.Ref(ShapeId.from(s"$namespace#$name"))
+          else
+            typeForName(name, structs, buildStruct, buildEnum, enums, typedefs)
+
+        def isStructType(typeName: String): Boolean =
+          reachableByName.contains(typeName) || reachableByName.contains(
+            resolveTypedef(typeName, typedefs)
+          )
+
+        def isEnumType(typeName: String): Boolean = {
+          val normalized = CHeaderParser.normalizeTypeName(typeName).replaceAll("\\s+", "")
+          enums.contains(normalized) || enums.contains(resolveTypedef(typeName, typedefs))
+        }
+
+        def resolveEnumName(typeName: String): Option[String] = {
+          val normalized = CHeaderParser.normalizeTypeName(typeName).replaceAll("\\s+", "")
+          if (enums.contains(normalized)) Some(normalized)
+          else {
+            val resolved = resolveTypedef(typeName, typedefs)
+            if (enums.contains(resolved)) Some(resolved) else None
+          }
+        }
+
+        def rootElementIrType(typeName: String, pointerDepth: Int): IrType =
+          if (pointerDepth > 0) {
+            IrType.Primitive(IrPrimitive.LongWord)
+          } else {
+            if (reachableByName.contains(typeName)) {
+              buildStruct(typeName)
+            } else {
+              val resolved = resolveTypedef(typeName, typedefs)
+              if (reachableByName.contains(resolved)) {
+                buildStruct(resolved)
+              } else {
+                resolveEnumName(typeName)
+                  .orElse(resolveEnumName(resolved))
+                  .map(buildEnum)
+                  .getOrElse(
+                    IrType.Primitive(primitiveForType(resolved).getOrElse(IrPrimitive.LongWord))
+                  )
+              }
+            }
+          }
+
+        def rootOutputIrType(operation: OperationModel): IrType =
+          if (operation.isArray) {
+            IrType.ListType(
+              id = ShapeId.from(s"$namespace#${operation.outputName}ValueArray"),
+              element = rootElementIrType(operation.rootTypeName, operation.pointerDepth),
+              bytesAlias = false,
+              bitsAlias = false
+            )
+          } else {
+            rootElementIrType(operation.rootTypeName, operation.pointerDepth)
+          }
+
+        def elementSizeBytesForRootType(typeName: String, pointerDepth: Int): Option[Int] =
+          if (pointerDepth > 0) {
+            Some(wordSizeBits / 8)
+          } else {
+            val resolved = resolveTypedef(typeName, typedefs)
+            if (isStructType(resolved)) {
+              Some(irStructSizeBytes(buildStruct(resolved), wordSizeBits))
+            } else if (isEnumType(resolved) || isEnumType(typeName)) {
+              IrLayout
+                .bitsForPrimitive(IrPrimitive.S32, Some(wordSizeBits))
+                .map(bits => math.ceil(bits.toDouble / 8d).toInt)
+            } else {
+              primitiveForType(resolved).flatMap { kind =>
+                IrLayout
+                  .bitsForPrimitive(kind, Some(wordSizeBits))
+                  .map(bits => math.ceil(bits.toDouble / 8d).toInt)
+              }
+            }
+          }
+
+        val operationsWithArrayLengths = operations.flatMap { operation =>
+          if (operation.isArray && operation.arrayLength.isEmpty) {
+            val resolvedRoot = resolveTypedef(operation.rootTypeName, typedefs)
+            if (operation.pointerDepth == 0 && isStructType(resolvedRoot)) {
+              val message =
+                s"${operation.symbol.name}: Unable to infer array length for aggregate '${operation.rootTypeName}' without a C declarator bound or initializer; symbol size may include element-stride padding."
+              warnings += message
+              otherWarnings += message
+              None
+            } else {
+              elementSizeBytesForRootType(operation.rootTypeName, operation.pointerDepth) match {
+                case Some(elementSizeBytes) =>
+                  inferArrayLength(operation.symbol, elementSizeBytes) match {
+                    case Some(length) =>
+                      Some(operation.copy(arrayLength = Some(length)))
+                    case None =>
+                      val message =
+                        s"${operation.symbol.name}: Unable to infer array length for '${operation.rootTypeName}'."
+                      warnings += message
+                      otherWarnings += message
+                      None
+                  }
+                case None =>
+                  val message =
+                    s"${operation.symbol.name}: Unable to determine element size for '${operation.rootTypeName}'."
+                  warnings += message
+                  otherWarnings += message
+                  None
+              }
+            }
+          } else {
+            Some(operation)
+          }
+        }
+
+        operationsWithArrayLengths.foreach { operation =>
+          if (operation.isArray) {
+            for {
+              length <- operation.arrayLength
+              totalSize <- operation.symbol.sizeBytes
+              elementSize <- elementSizeBytesForRootType(
+                operation.rootTypeName,
+                operation.pointerDepth
+              )
+              // Warn only when the symbol is too small for a packed array. Larger sizes may be
+              // per-element stride padding (when divisible) or trailing section padding.
+              if length > 0 && totalSize < length.toLong * elementSize
+            } {
+              val message =
+                s"${operation.symbol.name}: symbol size 0x${totalSize.toHexString} is inconsistent with array length $length and element size $elementSize."
+              warnings += message
+              otherWarnings += message
+            }
+          }
+        }
+
+        operationsWithArrayLengths.foreach { operation =>
+          val resolvedRoot = resolveTypedef(operation.rootTypeName, typedefs)
+          if (operation.pointerDepth == 0 && isStructType(resolvedRoot)) {
+            buildStruct(resolvedRoot)
+          } else if (operation.pointerDepth > 0 && isStructType(resolvedRoot)) {
+            buildStruct(resolvedRoot)
+          } else {
+            resolveEnumName(operation.rootTypeName).orElse(resolveEnumName(resolvedRoot)).foreach {
+              buildEnum
+            }
+          }
+        }
+
+        val irOperations = operationsWithArrayLengths.flatMap { operation =>
+          try {
+            val outputShapeId = ShapeId.from(s"$namespace#${operation.outputName}")
+            val rootTarget = rootOutputIrType(operation)
+            val resolvedRoot = resolveTypedef(operation.rootTypeName, typedefs)
+            val outputMember = IrMember(
+              id = ShapeId.from(s"$namespace#${operation.outputName}$$value"),
+              name = "value",
+              target = rootTarget,
+              staticAddress = Some(operation.symbol.address),
+              paddingRepeats = None,
+              isPointer = operation.pointerDepth > 0,
+              isArray = operation.isArray,
+              arrayLength = operation.arrayLength,
+              endianOverride = None,
+              primitiveOverride =
+                if (
+                  operation.pointerDepth > 0 && isCharType(
+                    CHeaderParser.normalizeTypeName(operation.rootTypeName).replaceAll("\\s+", "")
+                  )
+                ) {
+                  Some(IrPrimitive.Char)
+                } else if (
+                  operation.pointerDepth > 0 || operation.isArray || isStructType(
+                    operation.rootTypeName
+                  ) || isEnumType(operation.rootTypeName) || isEnumType(resolvedRoot)
+                ) {
+                  None
+                } else {
+                  primitiveForType(resolvedRoot)
+                    .filter(isExplicitSizedPrimitive)
+                    .orElse(wordSizePrimitive(wordSizeBits))
+                },
+              readSizeBytes = operation.symbol.sizeBytes
+            )
+
+            Some(
+              IrOperation(
+                name = operation.operationName,
+                routePath = operation.routePath,
+                output = IrType.EnclosingStruct(
+                  id = outputShapeId,
+                  members = List(outputMember),
+                  declaredSizeBytes = None
+                ),
+                pointerChain =
+                  if (operation.pointerDepth > 0) {
+                    val normalizedRootType =
+                      CHeaderParser.normalizeTypeName(operation.rootTypeName).replaceAll("\\s+", "")
+                    Some(
+                      IrPointerChain(
+                        pointeeType = rootElementIrType(operation.rootTypeName, pointerDepth = 0),
+                        pointerDepth = operation.pointerDepth,
+                        outerArrayLength = if (operation.isArray) operation.arrayLength else None,
+                        followCString = isCharType(normalizedRootType)
+                      )
+                    )
+                  } else {
+                    None
+                  }
+              )
+            )
+          } catch {
+            case ex: Exception =>
+              val message = s"${operation.symbol.name}: ${ex.getMessage}"
+              warnings += message
+              otherWarnings += message
+              None
+          }
+        }
+
+        val result = IrGenerationResult(
+          warnings = (warnings ++= diagnosticsSink.reportOtherWarnings).toList.distinct,
+          services = List(
+            IrService(
+              name = serviceName,
+              wordSizeBits = Some(wordSizeBits),
+              defaultEndian = IrEndian.Big,
+              operations = irOperations
+            )
+          ),
+          diagnostics = baseDiagnostics(
+            resolvedCount = resolvedSymbols.size,
+            operations = irOperations.size,
+            missingTypes = missingTypesList
+          )
+        )
+        DapHttpLoggers.irSourceDoldecomp.info(
+          "Generated {} operation(s) with {} warning(s) from {} resolved symbol(s)",
+          Integer.valueOf(irOperations.size),
+          Integer.valueOf(result.warnings.size),
+          Integer.valueOf(resolvedSymbols.size)
+        )
+        irOperations.foreach { operation =>
+          DapHttpLoggers.irSourceDoldecomp.debug("Operation {}", operation.routePath)
+        }
+        result
+      }
+    }
+  }
+
+  private sealed trait StructFieldGroup
+  private final case class RegularFieldGroup(field: StructFieldDecl) extends StructFieldGroup
+  private final case class BitmaskFieldGroup(
+      name: String,
+      fields: List[StructFieldDecl],
+      storageBits: Int
+  ) extends StructFieldGroup
+
+  private def buildStructMembers(
+      namespace: String,
+      structName: String,
+      wordSizeBits: Int,
+      fields: List[StructFieldDecl],
+      reachableStructs: Map[String, IASTCompositeTypeSpecifier],
+      buildStruct: String => IrType.MemoryMappedStruct,
+      buildEnum: String => IrType.IntEnum,
+      enums: Map[String, CEnumDefinition],
+      pointeeTypeFor: (String, Map[String, IASTCompositeTypeSpecifier]) => IrType,
+      fieldInitializerLengths: Map[(String, String), Int],
+      typedefs: Map[String, String],
+      arrayConstants: Map[String, Int]
+  ): List[IrMember] =
+    groupBitfieldFields(fields, wordSizeBits).flatMap {
+      case RegularFieldGroup(field) =>
+        List(
+          toIrMember(
+            namespace = namespace,
+            structName = structName,
+            fieldTypeName = field.typeName,
+            fieldDeclarator = field.declarator,
+            unionGroup = field.unionGroup,
+            offsetBytes = field.offsetBytes,
+            wordSizeBits = wordSizeBits,
+            reachableStructs = reachableStructs,
+            buildStruct = buildStruct,
+            buildEnum = buildEnum,
+            enums = enums,
+            pointeeTypeFor = pointeeTypeFor,
+            fieldInitializerLengths = fieldInitializerLengths,
+            typedefs = typedefs,
+            arrayConstants = arrayConstants
+          )
+        )
+      case BitmaskFieldGroup(name, bitfields, storageBits) if bitfields.size == 1 =>
+        val field = bitfields.head
+        List(
+          IrMember(
+            id = ShapeId.from(
+              s"$namespace#$structName$$${toCamelCase(CHeaderParser.fieldName(field.declarator))}"
+            ),
+            name = toCamelCase(CHeaderParser.fieldName(field.declarator)),
+            target = IrType.Primitive(IrPrimitive.Bool),
+            staticAddress = None,
+            paddingRepeats = None,
+            isPointer = false,
+            isArray = false,
+            arrayLength = None,
+            endianOverride = None,
+            primitiveOverride = None,
+            layoutBitWidth = Some(storageBits),
+            offsetBytes = field.offsetBytes
+          )
+        )
+      case BitmaskFieldGroup(name, bitfields, storageBits) =>
+        List(
+          toBitmaskMember(
+            namespace = namespace,
+            structName = structName,
+            memberName = name,
+            bitfields = bitfields,
+            storageBits = storageBits,
+            offsetBytes = bitfields.flatMap(_.offsetBytes).headOption
+          )
+        )
+    }
+
+  /** Offset comments are documentation; warn when they disagree with type-packed layout. */
+  private[daphttp] def commentOffsetWarnings(
+      structName: String,
+      fieldNames: List[String],
+      packedMembers: List[IrMember],
+      commentOffsets: Map[(String, String), Int]
+  ): List[String] = {
+    val packedByName =
+      packedMembers.flatMap(m => m.offsetBytes.map(off => m.name -> off)).toMap
+    fieldNames.flatMap { cName =>
+      val camel = toCamelCase(cName)
+      for {
+        comment <- commentOffsets.get((structName, cName))
+        packed <- packedByName.get(camel).orElse(packedByName.get(cName))
+        if packed != comment
+      } yield s"$structName.$cName: offset comment 0x${Integer.toHexString(comment)} disagrees with type-packed layout 0x${Integer.toHexString(packed)}"
+    }
+  }
+
+  /** When an array bound (often an enumerator like `StatsAttack_Count`) does not resolve, recover
+    * length from the gap between this field's offset comment and the next field's comment.
+    */
+  private[daphttp] def enrichMissingArrayLengths(
+      structName: String,
+      fields: List[StructFieldDecl],
+      members: List[IrMember],
+      commentOffsets: Map[(String, String), Int],
+      arrayConstants: Map[String, Int],
+      wordSizeBits: Int,
+      diagnostics: DiagnosticSink = DiagnosticSink.silent
+  ): List[IrMember] = {
+    val fieldNames = fields.map(f => CHeaderParser.fieldName(f.declarator))
+    val fieldByCamel = fieldNames.map(n => toCamelCase(n) -> n).toMap
+    members.map { member =>
+      if (!member.isArray || member.arrayLength.isDefined) {
+        member
+      } else {
+        val cName = fieldByCamel.getOrElse(member.name, member.name)
+        val bound = fields
+          .find(f => CHeaderParser.fieldName(f.declarator) == cName)
+          .flatMap(f => CHeaderParser.arrayBoundExpression(f.declarator))
+        bound.foreach { expr =>
+          if (!arrayConstants.contains(expr)) {
+            diagnostics.warn(
+              DiagnosticCategory.ArrayBound,
+              s"$structName.$cName: unable to resolve array bound '$expr' (not in enumerator/macro constant table)"
+            )
+          }
+        }
+        inferArrayLengthFromOffsetComments(
+          structName,
+          cName,
+          member,
+          commentOffsets,
+          wordSizeBits
+        ) match {
+          case Some(length) =>
+            val boundNote = bound.map(b => s" (bound '$b' unresolved)").getOrElse("")
+            diagnostics.warn(
+              DiagnosticCategory.ArrayBound,
+              s"$structName.$cName: inferred arrayLength=$length from offset comments$boundNote"
+            )
+            ensureArrayListTarget(member.copy(arrayLength = Some(length)), structName)
+          case None =>
+            member
+        }
+      }
+    }
+  }
+
+  private def inferArrayLengthFromOffsetComments(
+      structName: String,
+      cFieldName: String,
+      member: IrMember,
+      commentOffsets: Map[(String, String), Int],
+      wordSizeBits: Int
+  ): Option[Int] = {
+    val start = commentOffsets.get((structName, cFieldName))
+    val next = start.flatMap { startOff =>
+      commentOffsets.collect {
+        case ((`structName`, _), off) if off > startOff => off
+      }.minOption
+    }
+    val elemSize = arrayElementSizeBytes(member, wordSizeBits)
+    for {
+      s <- start
+      n <- next
+      elem <- elemSize
+      if elem > 0 && (n - s) % elem == 0
+      length = (n - s) / elem
+      if length > 0
+    } yield length
+  }
+
+  private def arrayElementSizeBytes(member: IrMember, wordSizeBits: Int): Option[Int] = {
+    val wordSize = Some(wordSizeBits)
+    val errors = mutable.ListBuffer.empty[String]
+    if (member.isPointer) {
+      wordSize.map(_ / 8)
+    } else {
+      member.target match {
+        case list: IrType.ListType =>
+          IrLayout.typeSizeBytes(list.element, wordSize, errors)
+        case other =>
+          IrLayout.typeSizeBytes(other, wordSize, errors)
+      }
+    }
+  }
+
+  private def ensureArrayListTarget(member: IrMember, structName: String): IrMember =
+    if (member.isPointer || member.target.isInstanceOf[IrType.ListType]) {
+      member
+    } else {
+      member.copy(
+        target = IrType.ListType(
+          id = ShapeId.from(
+            s"${member.id.getNamespace}#${structName}${toPascalCase(member.name)}Array"
+          ),
+          element = member.target,
+          bytesAlias = false,
+          bitsAlias = false
+        )
+      )
+    }
+
+  private def groupBitfieldFields(
+      fields: List[StructFieldDecl],
+      wordSizeBits: Int
+  ): List[StructFieldGroup] = {
+    val groups = mutable.ListBuffer.empty[StructFieldGroup]
+    val pending = mutable.ListBuffer.empty[StructFieldDecl]
+    var pendingType: Option[String] = None
+    var pendingUsedBits = 0
+    var pendingTypeBits = 0
+
+    def flushPending(): Unit =
+      if (pending.nonEmpty) {
+        val bitfields = pending.toList
+        // DESNOTE(jbarber, 2026-07-20): Size incomplete bitfield units by bits used
+        // (rounded up to a whole byte), not the full declared type width. GCC would keep a
+        // trailing `u32` unit at 32 bits even when only 16 are used; Metrowerks / doldecomp
+        // Melee headers (e.g. StartMeleeRules `x0_*`…`x5_*` then `u8 x6`) expect the tighter
+        // 6-byte layout so later offsetof pads like `pad_x5C[0x60 - 0x5C]` stay correct.
+        // Allocation still splits when a unit of `typeBits` fills; only the last partial unit
+        // shrinks. See https://github.com/doldecomp/melee
+        val storageBits = ((pendingUsedBits + 7) / 8) * 8
+        groups += BitmaskFieldGroup(
+          name = bitmaskGroupName(bitfields),
+          fields = bitfields,
+          storageBits = storageBits
+        )
+        pending.clear()
+        pendingType = None
+        pendingUsedBits = 0
+        pendingTypeBits = 0
+      }
+
+    fields.foreach { field =>
+      field.bitFieldWidth match {
+        case None =>
+          flushPending()
+          groups += RegularFieldGroup(field)
+        case Some(width) =>
+          val normalizedType =
+            CHeaderParser.normalizeTypeName(field.typeName).replaceAll("\\s+", "")
+          val typeBits = primitiveStorageBits(normalizedType, wordSizeBits).getOrElse(8)
+          val sameType = pendingType.forall(_ == normalizedType)
+          if (pending.nonEmpty && sameType && pendingUsedBits + width <= typeBits) {
+            pending += field
+            pendingUsedBits += width
+          } else {
+            flushPending()
+            pendingType = Some(normalizedType)
+            pendingTypeBits = typeBits
+            pending += field
+            pendingUsedBits = width
+          }
+      }
+    }
+    flushPending()
+    groups.toList
+  }
+
+  private def bitmaskGroupName(fields: List[StructFieldDecl]): String = {
+    val names = fields.map(field => CHeaderParser.fieldName(field.declarator))
+    val commonPrefix = names
+      .reduceLeftOption { (left, right) =>
+        left.zip(right).takeWhile(Function.tupled(_ == _)).map(_._1).mkString
+      }
+      .getOrElse("")
+    val trimmed =
+      if (commonPrefix.nonEmpty && commonPrefix.last == '_') commonPrefix.dropRight(1)
+      else if (commonPrefix.nonEmpty) commonPrefix
+      else names.headOption.getOrElse("bits")
+    toCamelCase(trimmed)
+  }
+
+  private def primitiveStorageBits(normalizedType: String, wordSizeBits: Int): Option[Int] =
+    primitiveForType(normalizedType).flatMap(IrLayout.bitsForPrimitive(_, Some(wordSizeBits)))
+
+  private def toBitmaskMember(
+      namespace: String,
+      structName: String,
+      memberName: String,
+      bitfields: List[StructFieldDecl],
+      storageBits: Int,
+      offsetBytes: Option[Int]
+  ): IrMember = {
+    val bitmaskId = ShapeId.from(s"$namespace#$structName${toPascalCase(memberName)}Bits")
+    IrMember(
+      id = ShapeId.from(s"$namespace#$structName$$$memberName"),
+      name = memberName,
+      target = IrType.Bitmask(
+        id = bitmaskId,
+        members = bitfields.map { field =>
+          val fieldName = CHeaderParser.fieldName(field.declarator)
+          IrMember(
+            id = ShapeId.from(
+              s"$namespace#${structName}${toPascalCase(memberName)}${toPascalCase(fieldName)}"
+            ),
+            name = toCamelCase(fieldName),
+            target = IrType.Primitive(IrPrimitive.Bool),
+            staticAddress = None,
+            paddingRepeats = None,
+            isPointer = false,
+            isArray = false,
+            arrayLength = None,
+            endianOverride = None,
+            primitiveOverride = None
+          )
+        },
+        storageBits = Some(storageBits)
+      ),
+      staticAddress = None,
+      paddingRepeats = None,
+      isPointer = false,
+      isArray = false,
+      arrayLength = None,
+      endianOverride = None,
+      primitiveOverride = None,
+      offsetBytes = offsetBytes
+    )
+  }
+
+  private def toIrMember(
+      namespace: String,
+      structName: String,
+      fieldTypeName: String,
+      fieldDeclarator: IASTDeclarator,
+      unionGroup: Option[String],
+      offsetBytes: Option[Int],
+      wordSizeBits: Int,
+      reachableStructs: Map[String, IASTCompositeTypeSpecifier],
+      buildStruct: String => IrType.MemoryMappedStruct,
+      buildEnum: String => IrType.IntEnum,
+      enums: Map[String, CEnumDefinition],
+      pointeeTypeFor: (String, Map[String, IASTCompositeTypeSpecifier]) => IrType,
+      fieldInitializerLengths: Map[(String, String), Int],
+      typedefs: Map[String, String],
+      arrayConstants: Map[String, Int]
+  ): IrMember = {
+    val normalizedType = CHeaderParser.normalizeTypeName(fieldTypeName).replaceAll("\\s+", "")
+    val fieldName = CHeaderParser.fieldName(fieldDeclarator)
+    val memberName = toCamelCase(fieldName)
+    val memberId = ShapeId.from(s"$namespace#$structName$$$memberName")
+    val isPointer = CHeaderParser.pointerDepth(fieldDeclarator) > 0
+    val arrayLength =
+      CHeaderParser
+        .arrayLength(fieldDeclarator, arrayConstants)
+        .orElse(fieldInitializerLengths.get((structName, fieldName)))
+
+    val funcPointerSig =
+      if (isPointer) CHeaderParser.extractFunctionPointerSignature(fieldDeclarator, fieldTypeName)
+      else None
+
+    lazy val pointeeType = pointeeTypeFor(normalizedType, reachableStructs)
+    val resolvedTarget = if (funcPointerSig.isDefined && arrayLength.isEmpty) {
+      IrType.FunctionPointer(
+        name = toPascalCase(fieldName),
+        params = funcPointerSig.get.params.map(p => FunctionPointerParam(p.typeName, p.name)),
+        returnType = funcPointerSig.get.returnType
+      )
+    } else if (isPointer && arrayLength.isDefined && arrayLength.exists(_ > 0)) {
+      IrType.ListType(
+        id = ShapeId.from(s"$namespace#${structName}${toPascalCase(fieldName)}Array"),
+        element = pointeeType,
+        bytesAlias = false,
+        bitsAlias = false
+      )
+    } else if (isPointer) {
+      IrType.Primitive(IrPrimitive.LongWord)
+    } else {
+      arrayLength match {
+        case Some(_) =>
+          val elementType =
+            typeForName(normalizedType, reachableStructs, buildStruct, buildEnum, enums, typedefs)
+          IrType.ListType(
+            id = ShapeId.from(s"$namespace#${structName}${toPascalCase(fieldName)}Array"),
+            element = elementType,
+            bytesAlias = false,
+            bitsAlias = false
+          )
+        case None =>
+          typeForName(normalizedType, reachableStructs, buildStruct, buildEnum, enums, typedefs)
+      }
+    }
+    // DESNOTE(jbarber, 2026-07-20): Resolve typedefs (e.g. enum_t → int, MessageBufferID → int)
+    // before choosing primitiveOverride. typeForName already resolves for the target shape; without
+    // the same step here, IrSizingWarnings treats S32/F32 targets as ambiguous Integer/Float.
+    val resolvedTypeName = resolveTypedef(normalizedType, typedefs)
+    val explicitPrimitive = primitiveForType(resolvedTypeName)
+    val charType = isCharType(normalizedType) || isCharType(resolvedTypeName)
+
+    IrMember(
+      id = memberId,
+      name = memberName,
+      target = resolvedTarget,
+      staticAddress = None,
+      paddingRepeats = None,
+      isPointer = isPointer,
+      isArray = CHeaderParser.isArrayField(fieldDeclarator),
+      arrayLength = arrayLength,
+      endianOverride = None,
+      primitiveOverride =
+        if (isPointer && charType && funcPointerSig.isEmpty) {
+          Some(IrPrimitive.Char)
+        } else if (isPointer && funcPointerSig.isEmpty) {
+          None
+        } else if (isPointer) {
+          None
+        } else {
+          explicitPrimitive.filter(isExplicitSizedPrimitive).orElse {
+            if (resolvedTarget == IrType.Primitive(IrPrimitive.LongWord))
+              wordSizePrimitive(wordSizeBits)
+            else None
+          }
+        },
+      unionGroup = unionGroup,
+      offsetBytes = offsetBytes
+    )
+  }
+
+  private def isCharType(normalizedType: String): Boolean = {
+    val base = normalizedType.replaceAll("\\s+", " ").stripSuffix(" const").trim
+    base == "char" || base == "unsigned char" || base == "signed char"
+  }
+
+  private def isExplicitSizedPrimitive(kind: IrPrimitive): Boolean =
+    kind match {
+      case IrPrimitive.U8 | IrPrimitive.S8 | IrPrimitive.U16 | IrPrimitive.S16 | IrPrimitive.U32 |
+          IrPrimitive.S32 | IrPrimitive.U64 | IrPrimitive.S64 | IrPrimitive.U128 |
+          IrPrimitive.S128 | IrPrimitive.F8 | IrPrimitive.F16 | IrPrimitive.F32 | IrPrimitive.F64 |
+          IrPrimitive.Char | IrPrimitive.Bool =>
+        true
+      case IrPrimitive.LongWord =>
+        false
+    }
+
+  private def wordSizePrimitive(wordSizeBits: Int): Option[IrPrimitive] =
+    wordSizeBits match {
+      case 8   => Some(IrPrimitive.U8)
+      case 16  => Some(IrPrimitive.U16)
+      case 32  => Some(IrPrimitive.U32)
+      case 64  => Some(IrPrimitive.U64)
+      case 128 => Some(IrPrimitive.U128)
+      case _   => None
+    }
+
+  private def typeForName(
+      normalizedType: String,
+      reachableStructs: Map[String, IASTCompositeTypeSpecifier],
+      buildStruct: String => IrType.MemoryMappedStruct,
+      buildEnum: String => IrType.IntEnum,
+      enums: Map[String, CEnumDefinition],
+      typedefs: Map[String, String]
+  ): IrType = {
+    val resolved = resolveTypedef(normalizedType, typedefs)
+    if (reachableStructs.contains(normalizedType)) {
+      buildStruct(normalizedType)
+    } else if (reachableStructs.contains(resolved)) {
+      buildStruct(resolved)
+    } else if (enums.contains(normalizedType)) {
+      buildEnum(normalizedType)
+    } else if (enums.contains(resolved)) {
+      buildEnum(resolved)
+    } else {
+      IrType.Primitive(primitiveForType(resolved).getOrElse(IrPrimitive.LongWord))
+    }
+  }
+
+  private def primitiveForType(typeName: String): Option[IrPrimitive] =
+    CPrimitiveMapping.fromTypeName(typeName)
+
+  private def resolveSymbol(
+      symbol: DoldecompSymbol,
+      globalDeclarations: Map[String, GlobalVariableDeclaration]
+  ): Option[ResolvedSymbol] = {
+    val declaration = globalDeclarations.get(symbol.name)
+    symbol.cType
+      .map { explicitType =>
+        // DESNOTE(jbarber, 2026-07-19): ctype names the element/pointee type, but array length
+        // and pointer depth still come from the matching C global declaration when present.
+        val normalized = CHeaderParser.normalizeTypeName(explicitType).replaceAll("\\s+", "")
+        val pointerFromCtype = normalized.count(_ == '*')
+        val baseType = normalized.replaceAll("\\*", "")
+        ResolvedSymbol(
+          symbol = symbol,
+          typeName = baseType,
+          isArray = declaration.exists(_.isArray),
+          arrayLength = declaration.flatMap(_.resolvedArrayLength),
+          pointerDepth = declaration.map(_.pointerDepth).getOrElse(pointerFromCtype)
+        )
+      }
+      .orElse {
+        declaration.map { decl =>
+          ResolvedSymbol(
+            symbol = symbol,
+            typeName = decl.typeName,
+            isArray = decl.isArray,
+            arrayLength = decl.resolvedArrayLength,
+            pointerDepth = decl.pointerDepth
+          )
+        }
+      }
+  }
+
+  private def validateResolvedType(
+      symbolName: String,
+      typeName: String,
+      headerStructs: Map[String, IASTCompositeTypeSpecifier],
+      typedefs: Map[String, String],
+      enums: Map[String, CEnumDefinition],
+      macros: Map[String, String]
+  ): Option[String] = {
+    val normalized = CHeaderParser.normalizeTypeName(typeName).replaceAll("\\s+", "")
+    if (
+      headerStructs.contains(normalized) || enums.contains(normalized) || primitiveForType(
+        normalized
+      ).isDefined
+    ) {
+      None
+    } else {
+      val resolved = resolveTypeName(typeName, typedefs, macros)
+      if (
+        headerStructs.contains(resolved) || enums.contains(resolved) || primitiveForType(
+          resolved
+        ).isDefined
+      ) {
+        None
+      } else {
+        Some(s"$symbolName: Missing struct or primitive definition for resolved type '$typeName'.")
+      }
+    }
+  }
+
+  private def resolveTypeName(
+      typeName: String,
+      typedefs: Map[String, String],
+      macros: Map[String, String]
+  ): String = {
+    val viaTypedef = resolveTypedef(typeName, typedefs)
+    if (primitiveForType(viaTypedef).isDefined) {
+      viaTypedef
+    } else {
+      val normalized = CHeaderParser.normalizeTypeName(viaTypedef).replaceAll("\\s+", "")
+      val base = normalized.replaceAll("\\*", "").trim
+      val pointerCount = normalized.count(_ == '*')
+      macros.get(base) match {
+        case Some(expansion) =>
+          // DESNOTE(jbarber, 2026-07-20): Melee uses macros as opaque types (UNK_T → void*).
+          val expanded = resolveTypedef(expansion, typedefs)
+          val expandedNorm = CHeaderParser.normalizeTypeName(expanded).replaceAll("\\s+", "")
+          val extraPointers = (0 until pointerCount).map(_ => "*").mkString
+          s"$expandedNorm$extraPointers".replaceAll("\\s+", "")
+        case None =>
+          viaTypedef
+      }
+    }
+  }
+
+  private def resolveTypedef(typeName: String, typedefs: Map[String, String]): String = {
+    val normalized = CHeaderParser.normalizeTypeName(typeName).replaceAll("\\s+", "")
+    val base = normalized.replaceAll("\\*", "").trim
+    val pointerCount = normalized.count(_ == '*')
+    val resolvedBase = resolveTypedefChain(base, typedefs, Set.empty)
+    val pointerSuffix = (0 until pointerCount).map(_ => "*").mkString
+    s"$resolvedBase$pointerSuffix".replaceAll("\\s+", "")
+  }
+
+  private def resolveTypedefChain(
+      name: String,
+      typedefs: Map[String, String],
+      visited: Set[String]
+  ): String = {
+    if (visited.contains(name)) name
+    else {
+      typedefs.get(name) match {
+        case Some(resolved) =>
+          val cleanResolved = CHeaderParser.normalizeTypeName(resolved).replaceAll("\\s+", "")
+          val cleanBase = cleanResolved.replaceAll("\\*", "").trim
+          if (cleanBase != name) resolveTypedefChain(cleanBase, typedefs, visited + name)
+          else cleanResolved
+        case None =>
+          name
+      }
+    }
+  }
+
+  private def inferArrayLength(symbol: DoldecompSymbol, elementSizeBytes: Int): Option[Int] =
+    symbol.sizeBytes.flatMap { totalSize =>
+      Option.when(elementSizeBytes > 0 && totalSize % elementSizeBytes == 0)(
+        totalSize / elementSizeBytes
+      )
+    }
+
+  private def irStructSizeBytes(struct: IrType.MemoryMappedStruct, wordSizeBits: Int): Int =
+    struct.declaredSizeBytes.getOrElse {
+      IrLayout
+        .packStruct(struct, Some(wordSizeBits))
+        .map(_.declaredSizeBytes.getOrElse(0))
+        .getOrElse(0)
+    }
+
+  /** @deprecated Prefer [[CheadersTypeCorpus.mergeGlobalDeclarations]]; kept for existing tests. */
+  private[daphttp] def mergeGlobalDeclarations(
+      declarations: List[GlobalVariableDeclaration]
+  ): GlobalVariableDeclaration =
+    CheadersTypeCorpus.mergeGlobalDeclarations(declarations)
+
+  private def speculateMissingIncludePaths(
+      headerRoots: List[Path],
+      missingTypes: List[String]
+  ): List[String] = {
+    if (missingTypes.isEmpty) {
+      Nil
+    } else {
+      val alreadyScanned = headerRoots.map(_.toAbsolutePath.normalize).toSet
+      val candidates = headerRoots
+        .flatMap(nearbyIncludeCandidates)
+        .map(_.toAbsolutePath.normalize)
+        .distinct
+        .filter(p => Files.isDirectory(p) && !alreadyScanned.contains(p))
+      val hits = candidates.flatMap { dir =>
+        val defined = missingTypes.filter(typeName => directoryLikelyDefinesType(dir, typeName))
+        if (defined.isEmpty) None
+        else Some(dir -> defined)
+      }
+      if (hits.isEmpty) {
+        Nil
+      } else {
+        val details = hits
+          .map { case (dir, types) =>
+            val sample = types.take(8).mkString(", ")
+            val more = if (types.size > 8) s", … (${types.size - 8} more)" else ""
+            s"$dir (may define $sample$more)"
+          }
+          .mkString("; ")
+        List(
+          s"Missing type definitions may indicate incomplete --headers. Nearby paths that appear to define some of them: $details. Add those paths via --headers or adjust your include path."
+        )
+      }
+    }
+  }
+
+  private def nearbyIncludeCandidates(root: Path): List[Path] = {
+    val absolute = root.toAbsolutePath.normalize
+    val parent = Option(absolute.getParent)
+    val grandparent = parent.flatMap(p => Option(p.getParent))
+    List[Option[Path]](
+      parent.map(_.resolve("include")),
+      parent.map(_.resolve("extern")),
+      parent.map(_.resolve("extern/dolphin/include")),
+      parent.map(_.resolve("dolphin/include")),
+      parent.map(_.resolve("sdk/include")),
+      grandparent.map(_.resolve("extern/dolphin/include")),
+      grandparent.map(_.resolve("include")),
+      Some(absolute.resolveSibling("include")),
+      Some(absolute.resolveSibling("extern/dolphin/include"))
+    ).flatten
+  }
+
+  private def directoryLikelyDefinesType(dir: Path, typeName: String): Boolean = {
+    // Lightweight text probe only — never add the directory to the scan set.
+    val needle = typeName.replaceAll("\\*", "").trim
+    if (needle.isEmpty || !Files.isDirectory(dir)) {
+      false
+    } else {
+      val quoted = java.util.regex.Pattern.quote(needle)
+      val patterns = List(
+        raw"\bstruct\s+$quoted\b".r,
+        raw"\bunion\s+$quoted\b".r,
+        raw"\benum\s+$quoted\b".r,
+        raw"\btypedef\b[^;{}]*\b$quoted\s*;".r,
+        raw"\}\s*$quoted\s*;".r
+      )
+      val stream = Files.walk(dir)
+      try {
+        stream
+          .iterator()
+          .asScala
+          .filter(path => Files.isRegularFile(path) && path.toString.endsWith(".h"))
+          .take(400)
+          .exists { path =>
+            val text = new String(Files.readAllBytes(path))
+            patterns.exists(_.findFirstIn(text).isDefined)
+          }
+      } finally {
+        stream.close()
+      }
+    }
+  }
+
+  private def collectReachableStructs(
+      operations: List[OperationModel],
+      headerStructs: Map[String, IASTCompositeTypeSpecifier],
+      typedefs: Map[String, String]
+  ): List[(String, IASTCompositeTypeSpecifier)] = {
+    val visited = mutable.LinkedHashSet.empty[String]
+
+    def resolve(name: String): String = {
+      val normalized = CHeaderParser.normalizeTypeName(name).replaceAll("\\s+", "")
+      if (headerStructs.contains(normalized)) normalized
+      else {
+        val resolved = resolveTypedef(name, typedefs)
+        if (headerStructs.contains(resolved)) resolved else normalized
+      }
+    }
+
+    def visit(structName: String): Unit = {
+      val resolved = resolve(structName)
+      if (!visited.contains(resolved)) {
+        visited += resolved
+        headerStructs.get(resolved).foreach { struct =>
+          CHeaderParser.extractFields(struct).foreach { field =>
+            val normalized = CHeaderParser.normalizeTypeName(field.typeName).replaceAll("\\s+", "")
+            val fieldResolved = resolveTypedef(field.typeName, typedefs)
+            if (headerStructs.contains(normalized)) {
+              visit(normalized)
+            } else if (headerStructs.contains(fieldResolved)) {
+              visit(fieldResolved)
+            }
+          }
+        }
+      }
+    }
+
+    operations.foreach { operation =>
+      visit(operation.rootTypeName)
+    }
+    visited.toList.flatMap(name => headerStructs.get(name).map(name -> _))
+  }
+
+  private def toPascalCase(value: String): String =
+    value
+      .split("[^A-Za-z0-9]+")
+      .toList
+      .filter(_.nonEmpty)
+      .map(part => s"${part.head.toUpper}${part.drop(1)}")
+      .mkString
+
+  private def toCamelCase(value: String): String = {
+    val pascal = toPascalCase(value)
+    val camel = if (pascal.isEmpty) "value" else s"${pascal.head.toLower}${pascal.drop(1)}"
+    if (camel.head.isDigit) s"_$camel" else camel
+  }
+}

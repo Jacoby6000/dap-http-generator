@@ -37,7 +37,9 @@ Run with `sbt "run <subcommand> ..."`. Standard build/lint/test commands are doc
 
 ### DAP transport notes
 
-- TCP client: `DapHttpServerMain.SocketDapClient`. Pipe/socket client: `LocalPipeDapClient`.
+- TCP client: `SocketDapClient`. Pipe/socket client: `LocalPipeDapClient`. Shared framed
+  request/response helpers live in `FramedDapOps`; each transport keeps its own connect and
+  locking policy (JVM monitor vs cats-effect `Mutex`).
 - Sessions are persistent and handshake with DAP `initialize`. Outbound requests are serialized;
   a background reader thread demuxes responses by `request_seq` and forwards
   `dolphin_memoryChanged` events while idle (required for realtime watches).
@@ -89,29 +91,53 @@ flowchart LR
   SmithyIrGenerator --> IR
   DoldecompIrGenerator --> IR
 
-  IR --> HttpRouteIrEmitter
-  IR --> SmithyIrEmitter
+  IR --> RoutePlanEmitter
+  IR --> IrJsonCodecs
 
   subgraph Outputs
-    subgraph http
-        HttpRouteIrEmitter --> Routes["HTTP routes"]
-    end
-    subgraph smithyOut [Smithy]
-        SmithyIrEmitter --> SMOUT["Smithy Models"]
-    end
+  subgraph http
+  RoutePlanEmitter --> Routes["HTTP routes"]
+  IrJsonCodecs --> Routes
+  end
+  subgraph smithyOut [Smithy]
+  SmithyIrEmitter --> SMOUT["Smithy Models"]
+  end
   end
 ```
 
+`HttpRouteIrEmitter` remains a compatibility façade over `RoutePlanEmitter` + `IrJsonCodecs`.
 `SmithyIrEmitter` builds a Smithy `Model` with smithy-model shape builders and serializes it via
 `SmithyIdlModelSerializer` (do not hand-render Smithy IDL text).
 
 ### Modules
 
-- **root (JVM)** — CLI, IR pipeline, http4s server (`io.github.jacoby6000.daphttp.Cli`).
-- **ui (Scala.js)** — browser explorer under `ui/`; `Compile / resourceGenerators` copies
-  `fastOptJS` + `index.html` into `web/` resources served at `/` and `/assets/main.js`. The
-  explorer keeps the full `/routes` catalog in memory but only renders search results in the left
-  panel (name/struct/field substring, or `0x…` address match against tree node addresses).
+- **root / daphttp (JVM)** — under `modules/daphttp/`; CLI, IR pipeline, http4s server
+  (`io.github.jacoby6000.daphttp.Cli`). Depends on cross-compiled `api-models` for HTTP wire
+  types. HTTP routes compose as
+  `DapProxyRoutes <+> WebAppRoutes <+> ApiRoutes` (DAP runtime under `/dap-proxy`,
+  explorer/catalog/watches/ws at the root, generated data under `/api`).
+  Path matching for GET/watches lives in `RoutePathResolver`; single-region DAP
+  read/decode is shared via `MemoryDecodeService`. Smithy assembly is
+  `SmithyModelLoader` (used by Cli). Process entry is `Cli` only; `DapHttpServerMain` is the
+  HTTP/DAP runtime library (routes, clients, decode), not a second `IOApp`. Watch/WebSocket
+  deps are `Option` (`None` in tests without realtime); never null sentinels.
+- **api-models (JVM + JS)** — under `modules/api-models/`; Circe transport models shared by
+  server and explorer (`RouteTreeNode`, `RoutesResponse`, overlay document types,
+  `TypeCatalogEntry`), plus shared helpers `DualDecodeAlign` (source/overlay JSON row
+  alignment), `DapAddress` (parse/format `0x…` memory addresses), `IndexPath`
+  (`{index}` template substitute/resolve for the explorer index bar),
+  `WatchPathMatch` (realtime watch / overlay-segment coverage), `JsonPath` /
+  `DecodedPayload` / `FetchableRoutePath` (explorer JSON path and envelope helpers),
+  and `OverlayDocumentOps` (pure overlay-document mutations for the struct editor),
+  plus `FieldFreshness` / `JsonPrimitiveDisplay` for dual-view stamp keys and leaf styling.
+  No IR or DAP runtime.
+- **ui (Scala.js)** — browser explorer under `modules/ui/`; depends on `api-models` JS.
+  `Compile / resourceGenerators` copies `fastOptJS` + `index.html` into `web/` resources
+  served at `/` and `/assets/main.js`. Dual decode (`DualDecodeSupport`), overlay editor
+  (`OverlayEditorSupport`), and realtime watches (`WatchClientSupport`) are mixins on
+  `Main`. The explorer keeps the full `/routes`
+  catalog in memory but only renders search results in the left panel (name/struct/field
+  substring, or `0x…` address match against tree node addresses).
 
 ### HTTP surface
 
@@ -125,8 +151,9 @@ flowchart LR
 | `GET /types/fields?id=` | Full field descriptors for one struct (editor pre-population) |
 | `GET /overlays` | Current type-overlay document (`structs` + `newStructs`) |
 | `PUT /overlays` | Replace overlays (validate; persist when `--overlays` was set) |
-| `PUT /memory` | Write a leaf field via DAP `writeMemory` (`address`, `value`, `decodeType`, `segments`, optional `overlay`) |
-| `POST /resume` | DAP `continue` |
+| `POST /dap-proxy/continue` | DAP `continue` (optional `{ "threadId": N }`) |
+| `POST /dap-proxy/readMemory` | DAP `readMemory` (`memoryReference`, `count`, optional `offset`) |
+| `POST /dap-proxy/writeMemory` | DAP `writeMemory` (`memoryReference`+`data`) or typed leaf write (`address`+`value`+`decodeType`+`segments`) |
 | `POST /watches` | Subscribe to realtime memory for a data path (`{ "path": "/api/…" }`) |
 | `DELETE /watches/{id}` | Cancel a realtime watch |
 | `GET /watches` | List active watches |
@@ -136,8 +163,17 @@ flowchart LR
 ### Non-obvious caveats
 
 - `scalafmtOnCompile := true`, so `sbt compile` will reformat sources in place.
+- All modules share fatal warnings: `-Xfatal-warnings`, `-Xlint:_`, `-Wunused:_`, plus
+  `-Wdead-code` / `-Wextra-implicit` / `-Wnumeric-widen` / `-Woctal-literal` / `-Wvalue-discard`.
+  The Scala.js UI uses `MacrotaskExecutor` instead of `ExecutionContext.global` so the
+  microtask EC warning stays fatal rather than being silenced with a compiler flag.
+- Pin `sbt-scalafix` to `0.14.5` (not 0.14.6/0.14.7): those versions intermittently fail
+  `scalafixAll` while sbt copies test-resource fixtures (`Unable to load symbol table: …/*.tmp`).
+  See https://github.com/scalacenter/scalafix/issues/2469.
 - Generated data routes are always under `/api` (`ApiRoutes.normalize`). Meta UI endpoints stay at
-  the root so they never collide with a Smithy service named `api`.
+  the root so they never collide with a Smithy service named `api`. DAP runtime commands live under
+  `/dap-proxy` (`DapProxyRoutes`) and mirror DAP request names (`continue`, `readMemory`,
+  `writeMemory`).
 - The `/health` and `/routes` endpoints work without a debugger. On startup the server immediately
   tries to connect to the DAP adapter (TCP or `--dap-pipe`; 1s TCP connect timeout per attempt,
   retrying every 5s until connected). Generated **data** routes reuse that persistent session
@@ -186,8 +222,10 @@ flowchart LR
   C strings; function pointers stay as raw address numbers. Follow depth is capped and
   previously visited pointee addresses are skipped so pointer cycles cannot hang decode.
 - Member `@size(N)` (also structure `@size`) round-trips doldecomp symbol `size:` as
-  `IrMember.readSizeBytes` through `cheaders-smithy` → `smithy`. Structure `@size` still means
-  declared structure width; on members it is the explicit DAP read width.
+  `IrMember.readSizeBytes` through `cheaders-smithy` → `smithy`. Structure `@size` means
+  declared width whose unit depends on the shape: **bytes** for `@dapStruct` /
+  enclosing structs (`IrType.*.declaredSizeBytes`), **bits** for `@bitmask`
+  (`IrType.Bitmask.storageBits`). On members it is the explicit DAP read width in bytes.
 - Global arrays (including pointer arrays) use `readSizeBytes / length` as element stride when that
   exceeds packed layout/pointer width (padding between elements). Pointer-chain outer indices use
   the same stride. Enclosing outputs that unwrap to a root-level array (e.g. Melee `player_slots`)
@@ -207,7 +245,8 @@ flowchart LR
   structs, typedefs, and enums across scanned files keep the first definition and emit one summarized
   warning per kind. Pass `--report <path>` to write a Markdown file with the full per-name /
   per-symbol detail behind those summaries. `cheaders-smithy` fails when the service has zero
-  operations.
+  operations. Non-fatal layout/array-bound notes go through `DiagnosticSink` so they appear in
+  console, `IrGenerationResult.warnings`, and `IrDiagnostics.otherWarnings` (Markdown report).
 - C typedefs of `int`/`float`/… (e.g. melee `enum_t`, `MessageBufferID`) set `primitiveOverride` so
   `IrSizingWarnings` does not treat them as ambiguous Smithy prelude Integer/Float.
 - First `sbt` invocation downloads sbt/Scala launchers and Coursier deps; expect a slow cold start.
@@ -224,7 +263,7 @@ flowchart LR
   stays paired across renames. Missing sides show "—". Followed pointer pointees carry `_pointer`
   and show a ⌖ control that opens that value as a root tab (fetches the member route when
   available). Double-click a leaf value (with a known absolute address) to edit it; Enter writes
-  via `PUT /memory` → DAP `writeMemory`, then refreshes the tab. Object metadata keys (`_address`,
+  via `POST /dap-proxy/writeMemory` → DAP `writeMemory`, then refreshes the tab. Object metadata keys (`_address`,
   `_offsets`, `_pointer`) are not treated as fields. Realtime watch updates patch leaf values in
   place (full rebuild only on shape change) so ◎ toggles stay clickable while watches stream.
   Fields that map to a

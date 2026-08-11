@@ -13,8 +13,8 @@ ThisBuild / scalacOptions ++= Seq(
   "-Wdead-code",
   "-Wextra-implicit",
   "-Wnumeric-widen",
-  "-Xlint:implicit-recursion",
-  "-Wunused:imports,patvars,privates,locals,explicits,implicits",
+  "-Woctal-literal",
+  "-Wunused:_",
   "-Wvalue-discard"
 )
 
@@ -22,29 +22,43 @@ lazy val smithyVersion = "1.72.0"
 lazy val declineVersion = "2.4.1"
 lazy val circeVersion = "0.14.16"
 
+lazy val apiModels = crossProject(JSPlatform, JVMPlatform)
+  .crossType(CrossType.Pure)
+  .in(file("modules/api-models"))
+  .settings(
+    name := "dap-http-api-models",
+    // DESNOTE(jbarber, 2026-07-21): Wire models only — no IR, DAP, or UI state. Shared by
+    // the JVM server and Scala.js explorer so /routes /overlays /types JSON stays in sync.
+    libraryDependencies ++= Seq(
+      "io.circe" %%% "circe-core" % circeVersion,
+      "io.circe" %%% "circe-parser" % circeVersion
+    )
+  )
+
+lazy val apiModelsJVM = apiModels.jvm
+lazy val apiModelsJS = apiModels.js
+
 lazy val ui = project
-  .in(file("ui"))
+  .in(file("modules/ui"))
   .enablePlugins(ScalaJSPlugin)
+  .dependsOn(apiModels.js)
   .settings(
     name := "dap-http-ui",
     scalaJSUseMainModuleInitializer := true,
-    // DESNOTE(jbarber, 2026-07-18): Scala.js DOM / Promise interop is noisy under the JVM
-    // module's strict -Xlint/-Wunused settings; keep those fatal warnings on the server.
-    scalacOptions --= Seq(
-      "-Xlint:_",
-      "-Wunused:imports,patvars,privates,locals,explicits,implicits",
-      "-Wvalue-discard"
-    ),
-    scalacOptions += "-P:scalajs:nowarnGlobalExecutionContext",
+    // DESNOTE(jbarber, 2026-07-21): Prefer macrotask EC over ExecutionContext.global so
+    // Scala.js does not warn (fatal under -Xfatal-warnings) about microtask starvation.
+    // See https://github.com/scala-js/scala-js-macrotask-executor
     libraryDependencies ++= Seq(
       "org.scala-js" %%% "scalajs-dom" % "2.8.0",
+      "org.scala-js" %%% "scala-js-macrotask-executor" % "1.1.1",
       "io.circe" %%% "circe-core" % circeVersion,
       "io.circe" %%% "circe-parser" % circeVersion,
       "io.circe" %%% "circe-generic" % circeVersion
     )
   )
 
-lazy val root = (project in file("."))
+lazy val root = (project in file("modules/daphttp"))
+  .dependsOn(apiModels.jvm)
   .settings(
     name := "dap-http-generator",
     libraryDependencies ++= Seq(

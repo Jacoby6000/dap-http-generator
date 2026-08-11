@@ -4,8 +4,7 @@ Use Smithy models to define read-only HTTP servers that proxy debugger memory vi
 
 ## Entrypoint
 
-The runnable jar uses `io.github.jacoby6000.daphttp.Cli` (Decline CLI). A legacy flat-argument
-entrypoint also exists at `io.github.jacoby6000.daphttp.DapHttpServerMain`.
+The runnable entrypoint is `io.github.jacoby6000.daphttp.Cli` (Decline CLI).
 
 ### CLI subcommands
 
@@ -23,7 +22,7 @@ Server subcommands (`smithy`, `cheaders`) share these flags:
     (e.g. dolphin-dap `DAPSocket=/tmp/dolphin-dap.sock`) or Windows named pipe
     (`\\.\pipe\Name`)
 - `--dap-timeout-ms` (default `5000`) — DAP read timeout for memory reads
-- `--dap-continue-timeout-ms` (default `30000`) — DAP read timeout for `POST /resume`
+- `--dap-continue-timeout-ms` (default `30000`) — DAP read timeout for `POST /dap-proxy/continue`
 - `--dap-connect-timeout-ms` (default `1000`) — TCP connect timeout per DAP attempt
 - `--dap-connect-retry-ms` (default `5000`) — delay between DAP connect attempts at startup
 - `--bind-host` / `--bind-port` (default `0.0.0.0:8080`) — HTTP server bind address
@@ -45,7 +44,7 @@ Server subcommands (`smithy`, `cheaders`) share these flags:
 
 ### Custom C/DAP traits
 
-Traits are defined in `src/main/smithy/dap-http-traits.smithy`:
+Traits are defined in `modules/daphttp/src/main/smithy/dap-http-traits.smithy`:
 
 - `@dapStruct` marks structures that should be decoded from DAP bytes.
 - `@bitmask` marks a structure as a bitmask.
@@ -125,7 +124,7 @@ flowchart LR
 The server:
 
 - loads API definitions from Smithy models or C headers,
-- generates GET data routes under `/api/<ServiceName>/...` and `PUT /memory` for leaf field writes,
+- generates GET data routes under `/api/<ServiceName>/...` and `POST /dap-proxy/writeMemory` for leaf field writes,
 - serves an HTML + Scala.js explorer at `/` that mirrors those routes (collapse/expand + per-node refresh;
   double-click a leaf to edit, Enter writes via DAP `writeMemory`),
 - requires non-DAP output members to use `@staticAddress(...)`,
@@ -133,11 +132,11 @@ The server:
   `readMemory` / `writeMemory` requests,
 - watches Smithy sources and reloads routes when model files change (`smithy --watch`).
 
-`/`, `/health`, `/routes`, and `POST /resume` work without a debugger. `PUT /memory` needs a DAP
+`/`, `/health`, `/routes`, and `POST /dap-proxy/continue` work without a debugger. `POST /dap-proxy/writeMemory` needs a DAP
 adapter that supports `writeMemory`. `/routes` returns both a flat
 `routes` list and a `tree` for the UI. On startup the server immediately tries to connect to the DAP
 adapter over TCP or `--dap-pipe` (1s TCP connect timeout per attempt, retrying every 5s until
-connected). `/resume` reuses the persistent DAP session (then sends `continue`). Use it when the
+connected). `/dap-proxy/continue` reuses the persistent DAP session (then sends `continue`). Use it when the
 target is stopped and `readMemory` times out. Generated **data** routes use the same connection for
 `readMemory` / `writeMemory` (serialized under a lock); if the connection drops the client reconnects. If nothing is
 listening they return per-read `error` fields while the HTTP request still succeeds.
@@ -153,7 +152,7 @@ sbt "run smithy --smithy /absolute/path/to/models --watch --bind-port 8080"
 Resume a stopped debug target before reading memory:
 
 ```bash
-curl -X POST localhost:8080/resume
+curl -X POST localhost:8080/dap-proxy/continue -H 'Content-Type: application/json' -d '{}'
 ```
 
 From C headers (direct to server):
@@ -225,17 +224,6 @@ sbt "run cheaders-smithy \
 sbt "run smithy --smithy /absolute/path/to/generated.smithy --bind-port 8080"
 ```
 
-Legacy flat-argument entrypoint:
-
-```bash
-sbt "runMain io.github.jacoby6000.daphttp.DapHttpServerMain \
-  --smithy=/absolute/path/to/models \
-  --dapHost=127.0.0.1 \
-  --dapPort=4711 \
-  --bindPort=8080 \
-  --watch=true"
-```
-
 ### Formatting, linting, and tests
 
 ```bash
@@ -246,7 +234,7 @@ sbt test
 
 ### Logging
 
-Logging uses SLF4J with Logback. Configure levels in `src/main/resources/logback.xml`:
+Logging uses SLF4J with Logback. Configure levels in `modules/daphttp/src/main/resources/logback.xml`:
 
 | Logger | Layer |
 |--------|-------|
